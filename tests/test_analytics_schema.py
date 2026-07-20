@@ -17,10 +17,8 @@ import unittest
 from pathlib import Path
 
 
-_SCHEMA_PATH = (
-    Path(__file__).resolve().parent.parent
-    / "analytics-db" / "init" / "01-schema.sql"
-)
+_SCHEMA_DIR = Path(__file__).resolve().parent.parent / "analytics-db" / "init"
+_SCHEMA_PATH = _SCHEMA_DIR / "01-schema.sql"
 
 
 def _schema_text() -> str:
@@ -32,6 +30,25 @@ def _normalize(sql: str) -> str:
     return re.sub(r"\s+", " ", sql).strip()
 
 
+def _normalized_schema() -> str:
+    """Whitespace-collapsed schema DDL, shared across the contract tests."""
+    return _normalize(_schema_text())
+
+
+def _rollup_view_body() -> str:
+    # Materialized views terminate at the SELECT's semicolon; isolate
+    # the body so column-presence assertions cannot accidentally
+    # match text from the surrounding `analytics_agent_runs` view or
+    # the index DDL.
+    match = re.search(
+        r"CREATE MATERIALIZED VIEW IF NOT EXISTS "
+        r"analytics_daily_rollup AS\s+(.*?);",
+        _normalized_schema(),
+    )
+    assert match is not None, "analytics_daily_rollup view missing"
+    return match.group(1)
+
+
 class SchemaIndexesTest(unittest.TestCase):
     """The dashboard's hot queries rely on these indexes; assert they
     are present and idempotent (`IF NOT EXISTS`) so a re-applied DDL
@@ -39,7 +56,7 @@ class SchemaIndexesTest(unittest.TestCase):
     """
 
     def test_agent_exit_partial_index_present(self) -> None:
-        text = _normalize(_schema_text())
+        text = _normalized_schema()
         self.assertRegex(
             text,
             r"CREATE INDEX IF NOT EXISTS analytics_events_agent_exit_idx "
@@ -48,7 +65,7 @@ class SchemaIndexesTest(unittest.TestCase):
         )
 
     def test_stage_enter_partial_index_present(self) -> None:
-        text = _normalize(_schema_text())
+        text = _normalized_schema()
         self.assertRegex(
             text,
             r"CREATE INDEX IF NOT EXISTS analytics_events_stage_enter_idx "
@@ -59,7 +76,7 @@ class SchemaIndexesTest(unittest.TestCase):
     def test_has_composite_event_repo_stage_ts_index(self) -> None:
         # The column order matters: equality on event / repo / stage
         # then range on ts. A reorder is a behavior change.
-        text = _normalize(_schema_text())
+        text = _normalized_schema()
         self.assertRegex(
             text,
             r"CREATE INDEX IF NOT EXISTS analytics_events_event_repo_stage_ts_idx "
@@ -92,7 +109,7 @@ class AnalyticsAgentRunsViewTest(unittest.TestCase):
         # `psql -f` against an instance that already has the view)
         # does not error -- mirrors the IF NOT EXISTS guard on
         # tables / indexes.
-        text = _normalize(_schema_text())
+        text = _normalized_schema()
         self.assertRegex(
             text,
             r"CREATE OR REPLACE VIEW analytics_agent_runs AS",
@@ -101,7 +118,7 @@ class AnalyticsAgentRunsViewTest(unittest.TestCase):
     def test_view_filters_to_agent_exit(self) -> None:
         # The view's whole point is to narrow to agent_exit rows so
         # downstream consumers do not have to repeat the predicate.
-        text = _normalize(_schema_text())
+        text = _normalized_schema()
         # match the view body up to its terminating semicolon
         match = re.search(
             r"CREATE OR REPLACE VIEW analytics_agent_runs AS\s+(.*?);",
@@ -116,7 +133,7 @@ class AnalyticsAgentRunsViewTest(unittest.TestCase):
         # Pin every column the dashboard / read model wants -- a
         # silently-renamed column would break the dashboard, not the
         # ingest path, so the contract has to live in tests.
-        text = _normalize(_schema_text())
+        text = _normalized_schema()
         expected_columns = (
             "id", "ts", "repo", "issue", "stage",
             "agent_role", "backend", "agent_spec",
@@ -143,21 +160,21 @@ class AnalyticsAgentRunsViewTest(unittest.TestCase):
     def test_view_derives_model_from_models_jsonb(self) -> None:
         # The model fallback is `models->>0` with a COALESCE so
         # GROUP BY model never blows up on a NULL key.
-        text = _normalize(_schema_text())
+        text = _normalized_schema()
         self.assertRegex(text, r"COALESCE\(models->>0,\s*'unknown'\)\s+AS\s+model")
 
     def test_view_has_cost_is_cost_usd_not_null(self) -> None:
         # The dashboard splits "coverage-known" from "coverage-gap"
         # runs by this flag; keep it tied to cost_usd presence so a
         # cost_source semantics change cannot decouple them.
-        text = _normalize(_schema_text())
+        text = _normalized_schema()
         self.assertRegex(
             text,
             r"\(cost_usd IS NOT NULL\)\s+AS\s+has_cost",
         )
 
     def test_view_total_tokens_derivation(self) -> None:
-        text = _normalize(_schema_text())
+        text = _normalized_schema()
         self.assertRegex(
             text,
             r"COALESCE\(input_tokens,\s*0\)\s*\+\s*COALESCE\(output_tokens,\s*0\)"
@@ -168,7 +185,7 @@ class AnalyticsAgentRunsViewTest(unittest.TestCase):
         # cache totals roll up cached + cache_read + cache_write so a
         # dashboard can plot one number; missing one of the three
         # would silently understate the figure.
-        text = _normalize(_schema_text())
+        text = _normalized_schema()
         self.assertRegex(
             text,
             r"COALESCE\(cached_tokens,\s*0\)\s*"
@@ -188,20 +205,6 @@ class AnalyticsDailyRollupViewTest(unittest.TestCase):
     suite -- before an operator sees a broken dashboard.
     """
 
-    def _view_body(self) -> str:
-        # Materialized views terminate at the SELECT's semicolon; isolate
-        # the body so column-presence assertions cannot accidentally
-        # match text from the surrounding `analytics_agent_runs` view or
-        # the index DDL.
-        text = _normalize(_schema_text())
-        match = re.search(
-            r"CREATE MATERIALIZED VIEW IF NOT EXISTS "
-            r"analytics_daily_rollup AS\s+(.*?);",
-            text,
-        )
-        assert match is not None, "analytics_daily_rollup view missing"
-        return match.group(1)
-
     def test_view_is_idempotent_create(self) -> None:
         # `CREATE MATERIALIZED VIEW IF NOT EXISTS` matches the
         # idempotency contract every other CREATE in this DDL upholds:
@@ -209,14 +212,14 @@ class AnalyticsDailyRollupViewTest(unittest.TestCase):
         # picks up the view on first apply and no-ops on every reapply.
         # Postgres CREATE MATERIALIZED VIEW does not support OR REPLACE,
         # so IF NOT EXISTS is the only available guard.
-        text = _normalize(_schema_text())
+        text = _normalized_schema()
         self.assertRegex(
             text,
             r"CREATE MATERIALIZED VIEW IF NOT EXISTS analytics_daily_rollup",
         )
 
     def test_view_reads_from_analytics_events(self) -> None:
-        body = self._view_body()
+        body = _rollup_view_body()
         self.assertRegex(body, r"FROM analytics_events")
 
     def test_view_groups_by_required_key_columns(self) -> None:
@@ -226,7 +229,7 @@ class AnalyticsDailyRollupViewTest(unittest.TestCase):
         # cost-coverage panel can read from the rollup without
         # decomposing the `unknown-price` / `no-usage` / `reported` /
         # `estimated` cohorts after the fact.
-        body = self._view_body()
+        body = _rollup_view_body()
         for key_col in (
             "repo", "issue", "event", "stage", "backend", "cost_source",
         ):
@@ -246,7 +249,7 @@ class AnalyticsDailyRollupViewTest(unittest.TestCase):
         # the rollup must be present. A silently-dropped aggregate
         # would force a fallback to the raw events table, which is
         # what Layer 4 exists to avoid.
-        body = self._view_body()
+        body = _rollup_view_body()
         for col in (
             "total_input_tokens",
             "total_output_tokens",
@@ -268,7 +271,7 @@ class AnalyticsDailyRollupViewTest(unittest.TestCase):
         # populated -- not the raw row count. Without that, a consumer
         # recovering `AVG(duration_s)` as `SUM/COUNT` would divide by
         # the wrong denominator on rows where duration was NULL.
-        body = self._view_body()
+        body = _rollup_view_body()
         self.assertRegex(
             body,
             r"SUM\(CASE WHEN duration_s IS NOT NULL THEN 1 ELSE 0 END\)\s+"
@@ -276,7 +279,7 @@ class AnalyticsDailyRollupViewTest(unittest.TestCase):
         )
 
     def test_failed_count_requires_nonzero_exit(self) -> None:
-        body = self._view_body()
+        body = _rollup_view_body()
         # Non-zero exit_code is the failure signal; NULL exit_code
         # stays excluded so a `stage_enter` row never counts as a
         # failure.
@@ -287,7 +290,7 @@ class AnalyticsDailyRollupViewTest(unittest.TestCase):
         )
 
     def test_timeout_count_uses_agent_exit(self) -> None:
-        body = self._view_body()
+        body = _rollup_view_body()
         # The reliability "Timeouts" tile reads this aggregate; it must
         # be scoped to `event='agent_exit'` so a `stage_enter` row with
         # a stale `timed_out` JSONB extra (impossible today, but the
@@ -299,7 +302,7 @@ class AnalyticsDailyRollupViewTest(unittest.TestCase):
         )
 
     def test_view_event_count_is_row_count(self) -> None:
-        body = self._view_body()
+        body = _rollup_view_body()
         self.assertRegex(body, r"COUNT\(\*\)\s+AS\s+event_count")
 
     def test_unique_index_treats_nulls_as_equal(self) -> None:
@@ -310,7 +313,7 @@ class AnalyticsDailyRollupViewTest(unittest.TestCase):
         # unique across the view's contents. The current sync uses the
         # non-concurrent variant, so the index is forward-compat
         # plumbing rather than load-bearing today.
-        text = _normalize(_schema_text())
+        text = _normalized_schema()
         self.assertRegex(
             text,
             r"CREATE UNIQUE INDEX IF NOT EXISTS "
@@ -325,7 +328,7 @@ class AnalyticsDailyRollupViewTest(unittest.TestCase):
         # reads. Without this, a `WHERE day BETWEEN x AND y` predicate
         # would fall back to a sequential scan over the rollup once it
         # grew past a few thousand rows.
-        text = _normalize(_schema_text())
+        text = _normalized_schema()
         self.assertRegex(
             text,
             r"CREATE INDEX IF NOT EXISTS "

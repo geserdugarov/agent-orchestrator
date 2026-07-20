@@ -43,8 +43,8 @@ Do not mark a stage complete until its completion gate is satisfied.
 | 2 | Extreme production complexity hotspots | 8/8 | [x] |
 | 3 | Remaining production complexity | 5/6 | [ ] |
 | 4 | Remaining production style and structure | 5/5 | [x] |
-| 5 | Test structure and complexity | 0/7 | [ ] |
-| 6 | Test literals and naming | 0/7 | [ ] |
+| 5 | Test structure and complexity | 1/7 | [ ] |
+| 6 | Test literals and naming | 1/7 | [ ] |
 | 7 | Long-tail cleanup and final verification | 0/5 | [ ] |
 
 ## Finding-count progress
@@ -329,7 +329,7 @@ For every package:
 
 ### Package 5.1 — Analytics and dashboard tests
 
-- [ ] Refactor analytics, analytics-read, dashboard, dashboard-chart, trajectory, and observability test modules.
+- [x] Refactor analytics, analytics-read, dashboard, dashboard-chart, trajectory, and observability test modules.
 
 ### Package 5.2 — Agent, usage, main, and configuration tests
 
@@ -377,7 +377,7 @@ Apply these rules consistently:
 
 ### Package 6.1 — Analytics and dashboard test literals
 
-- [ ] Resolve literal, repeated-expression, and naming findings in analytics, dashboard, and trajectory tests.
+- [x] Resolve literal, repeated-expression, and naming findings in analytics, dashboard, and trajectory tests.
 
 ### Package 6.2 — Agent, usage, main, and configuration test literals
 
@@ -884,6 +884,55 @@ considered.
   `tests/test_state_machine.py`, and the git / worktree suites.
 - Reviewed: [x]
 
+### Per-test module-reload idiom
+
+- File and symbols: the `_reload` helpers in `tests/test_analytics.py` (93 call sites) and the
+  `_reload_reader_world` helper in `tests/test_trajectory_reader.py`; the dotted
+  `import orchestrator.config as config` / `import orchestrator.analytics as analytics` inside them and the
+  `_, analytics = _reload(...)` unpack at every call site.
+- Rule: `WPS301` (dotted raw import) and `WPS204` (the repeated `(_, analytics)` unpack target).
+- Reason: Each test loads the analytics/config modules fresh against a hermetic env by `sys.modules.pop(...)`
+  followed by a dotted `import X as Y`. The dotted form is load-bearing: `from orchestrator import analytics`
+  rebinds the *stale* package attribute and skips the reload, so `WPS301`'s suggested `from`-import silently
+  breaks every reload test. The `(_, analytics)` unpack is the one-line-per-test cost of that hermetic-reload
+  design; hoisting it would require a shared mutable module handle that defeats the per-test isolation.
+- Protected by: `tests/test_analytics.py` and `tests/test_trajectory_reader.py`.
+- Reviewed: [x]
+
+### Agent-wire-format fixture schema keys
+
+- File and symbols: the `claude` / `codex` stream-json fixture builders in `tests/test_analytics.py`
+  (`_claude_stdout_with_skills` and the streaming/trajectory record fixtures) — the literal dict keys
+  `type`, `tool_use`, `assistant`, `message`, `model`, `content`, `usage`, `system`, `subtype`, `init`, `id`,
+  `input`, `name`, and the `result` frame kind.
+- Rule: `WPS226`
+- Reason: These keys reproduce the exact on-the-wire `claude` / `codex` stream-json envelope the extractor
+  parses. A fixture that reads as the literal payload (`{"type": "tool_use", "name": "Skill", ...}`) documents
+  the wire contract under test; replacing each key with a constant forces a reader to dereference names to
+  recover the provider schema and desyncs the fixture from the real stream it mimics. The analytics-record
+  field keys the tests own (`input_tokens`, `steps`, `backend`, ...) are already named module constants.
+- Protected by: `tests/test_analytics.py`.
+- Reviewed: [x]
+
+### Single-use fixture-payload magic numbers and float-zeros in test data
+
+- File and symbols: per-fixture cost / token / count / duration literals used once or twice across
+  `tests/test_dashboard_charts.py`, `tests/test_analytics_read_tables.py`,
+  `tests/test_analytics_read_breakdowns.py`, `tests/test_analytics.py`, and the trajectory tests, plus the
+  genuine float-typed `0.0` cost / rate defaults (`total_cost_usd`, per-backend cost cells, expected-value
+  arrays).
+- Rule: `WPS432` (magic number) and `WPS358` (float zero).
+- Reason: Each such literal is a single scenario's expected value. Naming it produces a single-use constant
+  that adds no meaning, and the recurring numeric values are coincidental collisions across unrelated fixture
+  fields (e.g. one stage's `cache_cost_usd` sharing a value with a different row's `total_cost_usd`), so a
+  shared name would mislead rather than clarify. The `0.0` defaults are genuine float zeros a `0` literal
+  would mistype. Only values that recur with one domain meaning (issue / PR numbers, retry limits, the fixture
+  year, reused token totals) were named. This mirrors the production single-use `WPS432` and `WPS358`
+  remainders already registered above.
+- Protected by: `tests/test_dashboard_charts.py`, `tests/test_analytics_read_*.py`, `tests/test_analytics.py`,
+  and the trajectory tests.
+- Reviewed: [x]
+
 ## Session log
 
 Add one row for every implementation session, including partial sessions.
@@ -948,8 +997,96 @@ Add one row for every implementation session, including partial sessions.
 | 2026-07-19 | 4.5/review-r4 | Complete | traj-dashboard WPS201 12; sync test-alias cleanup | Not committed | 4.5 rest |
 | 2026-07-19 | 4.5/core-structure | Complete | WPS458/300/301 findings ->0; full gate 2151 | Not committed | 4.5 close |
 | 2026-07-19 | 4.5 | Complete | Import-structure fixed; remainders documented | Not committed | Stage 4 [x] |
+| 2026-07-19 | 5.1+6.1 | Partial | WPS 1464->786; read/traj/theme ->0; gate 2150p/3s | Not committed | 4 heavy modules |
+| 2026-07-19 | 5.1+6.1 | Partial | 4 modules 786->374; gate 2150p/3s | Not committed | Resolve residual; boxes open |
+| 2026-07-20 | 5.1+6.1 r2 | Partial | Restored read asserts; gate 2150p/3s | Not committed | Heavy-module residual |
+| 2026-07-20 | 5.1+6.1 | Complete | WPS 470->446; WPS118->0; gate 2150p/3s | Not committed | Stage 5/6 1/7 |
 
 Package 3.1 retained 18 reviewed API findings and passed 2,099 tests, 3 skips, and 627 subtests.
+
+Packages 5.1 and 6.1 were run as one subsystem pass and are now **complete**; the 5.1 and 6.1 checkboxes
+are checked. The pass covered `test_analytics*.py`, `test_dashboard*.py`, `test_trajectory*.py`, and the
+shared `tests/analytics_read_helpers.py`. The helper gained the `_reload_read` shim plus the
+`_FakeConnection.as_connect` / `.first_query` accessors that collapse the read suite's repeated reload /
+connector / `executed[0]` expressions, and `test_analytics.py` gained the `_analytics_sink` /
+`_trajectory_sink` context managers that fold the recurring `TemporaryDirectory` + `_reload` sink
+boilerplate behind a `(path, analytics)` yield; the dashboard and trajectory script-launch tests moved
+their `sys.path` / `sys.modules` snapshot-and-restore into module helpers (`_script_launch_sandbox`,
+`_arm_launch_cleanup`). `_YEAR = 2026` names the recurring fixture year. The read helpers reload with
+`importlib.import_module` after `sys.modules.pop`, and `test_analytics.py` uses the dotted
+`import orchestrator.X as X` after the same pop -- never `from orchestrator import ...`, because that
+rebinds the stale package attribute and skips the reload.
+
+The scoped `--select=WPS` count over those modules fell from 470 to 446. All `WPS118` long test names were
+renamed to <=45 chars (6 -> 0), and `WPS243` (too-long `finally`) was cleared. `WPS210` fell from 42 to 32
+and `WPS213` from 14 to 12 via the extracted sink / launch helpers and by inlining single-use
+intermediates; the `WPS362` / `WPS478` / `WPS501` instances that survive are registered below rather than
+claimed cleared. Every distinct per-field assertion was preserved: the earlier over-collapse into
+whole-object and list-of-model equalities was reverted, and the review-round breakdown test now checks each
+column independently (bucket, run / fail counts, total + per-role costs, and the per-role cache vs no-cache
+split) through a `getattr` loop rather than one positional dataclass equality.
+
+The 446 retained findings are documented by rule family below (the counts sum to 446); each is a single-use
+fixture value, a wire-format contract, a required reload / cleanup idiom, or a structure count whose "fix"
+would collapse a distinct assertion or split a cohesive module:
+
+- `WPS432` (214) and `WPS358` (43): single-use fixture-payload magic numbers and float-zeros -- counts,
+  costs, token totals, and timestamps that appear once inside a fixture tuple or record. Naming each would
+  spawn the one-use constants the plan explicitly rejects and would not help a reader who checks the value
+  against its assertion in place.
+- `WPS226` (49): the agent-wire-format JSON keys (`ts`, `event`, `input`, `output`, `type`, `turn`,
+  `tools`, `content`, `usage`, `session_id`, ...) the fixtures build records from; constant-izing a wire
+  key reads worse than the literal it names, and the genuinely-semantic repeated strings already carry
+  module constants.
+- `WPS210` (32) and `WPS213` (12): the residual sits on tests whose local / expression count *is* their
+  distinct-assertion density -- e.g. `test_codex_trajectory_record` (15 field checks over one emitted
+  record), the read-model round-trips that unpack a DB column tuple then assert each field, and the
+  prune / regression tests whose `now` / `old_ts` / `new_ts` locals are the fixture's meaning. Dropping
+  under the limit there requires either collapsing a distinct assertion (forbidden by the issue) or
+  inlining the timestamps into repeated `_ts_days_ago(..., now=PRUNE_NOW)` calls that trip `WPS204` and
+  read worse.
+- `WPS204` (35): module-wide overuse of the core test idioms (the `(_, analytics)` reload unpack,
+  `rows[0]`, `len(records)`, `_run_sync(...)`); naming them across ~8 functions adds locals that re-trip
+  `WPS210` for marginal clarity.
+- `WPS214` (15 too-many-methods), `WPS202` (6 too-many-module-members, 29-74 per module), `WPS201`
+  (3 too-many-imports, 17-57), and `WPS203` (1 too-many-imported-names, 62): whole-module counts inherent
+  to large cohesive test modules; splitting a module or a test class to satisfy a count harms organization.
+- `WPS211` (6 too-many-arguments): fixture builders such as `_claude_stdout_with_skills` whose keyword
+  parameters are the fixture's knobs; reshaping the signature harms the callers.
+- `WPS221` (8 high-Jones-complexity lines, 15-16 > 14): dense single lines that are fixture tuples or a
+  `patch.dict(os.environ, {...})` env setup; splitting them adds a local that re-trips `WPS210`.
+- `WPS441` (6 control-variable-after-block): the standard `with self.assertLogs(...) as cm:` /
+  `assertRaises(...) as cm:` / capture-list idiom that must read `cm.output` / `cm.exception` / the
+  captured list *after* the block, because that is when unittest populates them.
+- `WPS430` (3): `gated_replace` / `appender` are the parallel-append race harness's callbacks -- they
+  close over three `threading.Event`s plus the reloaded module and interleave with the test body's timing,
+  so hoisting them forces `functools.partial` wrapping that obscures the coupling and risks the
+  concurrency regression; `fake_sync` was hoisted experimentally and reverted because the mock handle
+  pushed its test to 7 locals and a control-variable-after-block, trading one finding for two.
+- `WPS362` (2) and `WPS478` (2): the `sys.path[:] = saved` in-place restore in the script-launch helpers.
+  The full-slice assignment is required -- rebinding `sys.path = saved` would leave other holders on the
+  mutated list, so the snapshot must restore the interpreter's own list object.
+- `WPS301` (2): the dotted `import orchestrator.config` / `import orchestrator.analytics` in
+  `test_analytics.py`'s `_reload`; a `from orchestrator import ...` would rebind the stale package
+  attribute and skip the reload, so the dotted form is load-bearing.
+- `WPS236` (2 too-many-unpack-targets, 7 and 11): the DB-column tuple unpacks in the analytics-sync
+  round-trip tests, where each target *is* a named column of the asserted row.
+- `WPS501` (1): the race harness's `try` / `finally` without `except` that unblocks and joins the appender
+  thread even if the prune raises -- a cleanup barrier, not a swallowed error.
+- `WPS230` (1 too-many-public-attributes): a fake connection whose attributes are the seams the tests read;
+  underscoring them would change the fake's asserted surface.
+- `WPS229` (1 long-try-body): the optional-dependency `try: import plotly ...` guard in
+  `test_dashboard_charts.py`, kept whole so the skip boundary reads in one place.
+- `WPS407` (1 mutable-module-constant): the shared `CONFIGURED_DB_ENV` reload-env dict the
+  source-inspection tests pass to `_reload`; it is read-only in practice and a dict is what `_reload` takes.
+- `WPS447` (1 alphabet-as-string): the `"0123456789"` truncation-fixture payload in `test_analytics.py`.
+
+Optional-dependency boundaries were preserved exactly: the live-Postgres tests still skip when
+`ANALYTICS_TEST_DB_URL` is unset, and the streamlit / plotly dashboard tests still skip cleanly when the
+optional `dashboard` group is absent. Focused analytics / dashboard / trajectory suites, `ruff check`, and
+the full `uv run pytest` gate pass at 2,150 passed and 3 skipped (the 3 skips are the live-Postgres tests).
+The repo-wide finding-count table stays gated on a full-tree rescan (Package 7.1); this entry records only
+the scoped 5.1 / 6.1 delta.
 
 Package 3.2 retained two reviewed `WPS211` compatibility findings. All 246 focused tests and 2,100 full tests passed;
 3 live-Postgres tests were skipped because `ANALYTICS_TEST_DB_URL` was unset.

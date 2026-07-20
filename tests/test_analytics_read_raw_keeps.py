@@ -6,9 +6,15 @@ import unittest
 
 from tests.analytics_read_helpers import (
     _FakeConnection,
-    _connector,
-    _reload,
+    _reload_read,
 )
+
+# The source each guarded reader must keep scanning; the regression
+# guard asserts the reader stays put and never silently moves to the
+# day-bucketed rollup.
+_BASE_TABLE = "FROM analytics_events"
+_ROLLUP_TABLE = "FROM analytics_daily_rollup"
+_AGENT_RUNS_TABLE = "FROM analytics_agent_runs"
 
 
 class RawReaderRollupKeepsTest(unittest.TestCase):
@@ -24,57 +30,57 @@ class RawReaderRollupKeepsTest(unittest.TestCase):
     """
 
     def test_recent_agent_exits_reads_base_table(self) -> None:
-        _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
+        analytics_read = _reload_read()
         conn = _FakeConnection()
-        analytics_read.get_recent_agent_exits(connect=_connector(conn))
-        sql, _ = conn.executed[0]
-        self.assertIn("FROM analytics_events", sql)
-        self.assertNotIn("FROM analytics_daily_rollup", sql)
+        analytics_read.get_recent_agent_exits(connect=conn.as_connect)
+        sql, _ = conn.first_query
+        self.assertIn(_BASE_TABLE, sql)
+        self.assertNotIn(_ROLLUP_TABLE, sql)
 
     def test_top_cost_issues_reads_base_table(self) -> None:
         # `get_issues` carries MIN(ts), MAX(ts), `latest_stage`,
         # MAX(review_round), and MAX(retry_count) which the rollup
         # cannot answer -- the rollup throws away the per-row `ts`
         # precision and never carried `review_round` / `retry_count`.
-        _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
+        analytics_read = _reload_read()
         conn = _FakeConnection()
-        analytics_read.get_issues(connect=_connector(conn))
-        sql, _ = conn.executed[0]
-        self.assertIn("FROM analytics_events", sql)
-        self.assertNotIn("FROM analytics_daily_rollup", sql)
+        analytics_read.get_issues(connect=conn.as_connect)
+        sql, _ = conn.first_query
+        self.assertIn(_BASE_TABLE, sql)
+        self.assertNotIn(_ROLLUP_TABLE, sql)
 
     def test_review_round_breakdown_stays_on_view(self) -> None:
         # `review_round` is not in the rollup key, so the rollup
         # cannot bucket by it. Stays on `analytics_agent_runs`.
-        _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
+        analytics_read = _reload_read()
         conn = _FakeConnection()
-        analytics_read.get_review_round_breakdown(connect=_connector(conn))
-        sql, _ = conn.executed[0]
-        self.assertIn("FROM analytics_agent_runs", sql)
-        self.assertNotIn("FROM analytics_daily_rollup", sql)
+        analytics_read.get_review_round_breakdown(connect=conn.as_connect)
+        sql, _ = conn.first_query
+        self.assertIn(_AGENT_RUNS_TABLE, sql)
+        self.assertNotIn(_ROLLUP_TABLE, sql)
 
     def test_hourly_heatmap_stays_on_base_table(self) -> None:
         # The rollup is day-bucketed -- hour-of-day is not
         # recoverable from `day`, so this widget must keep reading
         # from `analytics_events`.
-        _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
+        analytics_read = _reload_read()
         conn = _FakeConnection()
-        analytics_read.get_hourly_heatmap(connect=_connector(conn))
-        sql, _ = conn.executed[0]
-        self.assertIn("FROM analytics_events", sql)
-        self.assertNotIn("FROM analytics_daily_rollup", sql)
+        analytics_read.get_hourly_heatmap(connect=conn.as_connect)
+        sql, _ = conn.first_query
+        self.assertIn(_BASE_TABLE, sql)
+        self.assertNotIn(_ROLLUP_TABLE, sql)
 
     def test_issue_events_stays_on_base_table(self) -> None:
         # Per-row drill-down -- the rollup pre-aggregates per group
         # so individual rows are no longer addressable.
-        _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
+        analytics_read = _reload_read()
         conn = _FakeConnection()
         analytics_read.get_issue_events(
-            repo="owner/r", issue=1, connect=_connector(conn),
+            repo="owner/r", issue=1, connect=conn.as_connect,
         )
-        sql, _ = conn.executed[0]
-        self.assertIn("FROM analytics_events", sql)
-        self.assertNotIn("FROM analytics_daily_rollup", sql)
+        sql, _ = conn.first_query
+        self.assertIn(_BASE_TABLE, sql)
+        self.assertNotIn(_ROLLUP_TABLE, sql)
 
     def test_cost_coverage_stays_on_view(self) -> None:
         # Cost coverage stays on `analytics_agent_runs` per the
@@ -82,9 +88,9 @@ class RawReaderRollupKeepsTest(unittest.TestCase):
         # guardrail -- being conservative here lets the
         # `unknown-price` cohort's run / token accounting stay
         # exactly as it was.
-        _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
+        analytics_read = _reload_read()
         conn = _FakeConnection()
-        analytics_read.get_cost_coverage(connect=_connector(conn))
-        sql, _ = conn.executed[0]
-        self.assertIn("FROM analytics_agent_runs", sql)
-        self.assertNotIn("FROM analytics_daily_rollup", sql)
+        analytics_read.get_cost_coverage(connect=conn.as_connect)
+        sql, _ = conn.first_query
+        self.assertIn(_AGENT_RUNS_TABLE, sql)
+        self.assertNotIn(_ROLLUP_TABLE, sql)

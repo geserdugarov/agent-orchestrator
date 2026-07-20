@@ -14,6 +14,11 @@ import unittest
 
 from orchestrator import dashboard_theme as theme
 
+STAGE_IMPLEMENTING = "implementing"
+# The compact count / token formatters render an integer zero as this
+# bare string.
+_ZERO_TEXT = "0"
+
 
 class ColorForTest(unittest.TestCase):
 
@@ -23,11 +28,11 @@ class ColorForTest(unittest.TestCase):
         # rows.
         self.assertEqual(
             theme.color_for(
-                "implementing",
-                ["implementing", "validating"],
+                STAGE_IMPLEMENTING,
+                [STAGE_IMPLEMENTING, "validating"],
                 explicit=theme.STAGE_COLORS,
             ),
-            theme.STAGE_COLORS["implementing"],
+            theme.STAGE_COLORS[STAGE_IMPLEMENTING],
         )
 
     def test_domain_position_drives_color(self) -> None:
@@ -35,14 +40,13 @@ class ColorForTest(unittest.TestCase):
         # gets the n-th entry of `CATEGORICAL_PALETTE`. That property
         # is what makes "the same domain in the same order" produce
         # the same colors across chart re-renders.
-        self.assertEqual(
-            theme.color_for("a", ["a", "b", "c"]),
-            theme.CATEGORICAL_PALETTE[0],
-        )
-        self.assertEqual(
-            theme.color_for("b", ["a", "b", "c"]),
-            theme.CATEGORICAL_PALETTE[1],
-        )
+        domain = ["a", "b", "c"]
+        for domain_key, position in (("a", 0), ("b", 1)):
+            with self.subTest(domain_key=domain_key):
+                self.assertEqual(
+                    theme.color_for(domain_key, domain),
+                    theme.CATEGORICAL_PALETTE[position],
+                )
 
     def test_unknown_domain_key_uses_hash(self) -> None:
         # `domain` is provided but the key is not in it -- the helper
@@ -129,35 +133,52 @@ class FormattersTest(unittest.TestCase):
     """
 
     def test_fmt_money_handles_zero_and_small_values(self) -> None:
-        self.assertEqual(theme.fmt_money(0), "$0.00")
-        self.assertEqual(theme.fmt_money(4.5), "$4.50")
-        self.assertEqual(theme.fmt_money(42), "$42")
+        cases = ((0, "$0.00"), (4.5, "$4.50"), (42, "$42"))
+        for money_input, formatted in cases:
+            with self.subTest(money_input=money_input):
+                self.assertEqual(theme.fmt_money(money_input), formatted)
 
     def test_fmt_money_uses_k_and_m_suffixes(self) -> None:
-        self.assertEqual(theme.fmt_money(1_234), "$1.2K")
-        self.assertEqual(theme.fmt_money(2_500_000), "$2.50M")
+        cases = ((1_234, "$1.2K"), (2_500_000, "$2.50M"))
+        for money_input, formatted in cases:
+            with self.subTest(money_input=money_input):
+                self.assertEqual(theme.fmt_money(money_input), formatted)
 
     def test_fmt_money_exact_uses_thousands(self) -> None:
-        self.assertEqual(theme.fmt_money_exact(12_345.67), "$12,346")
-        self.assertEqual(theme.fmt_money_exact(0), "$0")
+        cases = ((12_345.67, "$12,346"), (0, "$0"))
+        for money_input, formatted in cases:
+            with self.subTest(money_input=money_input):
+                self.assertEqual(theme.fmt_money_exact(money_input), formatted)
 
     def test_fmt_tokens_compact(self) -> None:
-        self.assertEqual(theme.fmt_tokens(0), "0")
-        self.assertEqual(theme.fmt_tokens(999), "999")
-        self.assertEqual(theme.fmt_tokens(1_500), "2K")
-        self.assertEqual(theme.fmt_tokens(2_500_000), "2.5M")
-        self.assertEqual(theme.fmt_tokens(12_000_000_000), "12B")
+        cases = (
+            (0, _ZERO_TEXT),
+            (999, "999"),
+            (1_500, "2K"),
+            (2_500_000, "2.5M"),
+            (12_000_000_000, "12B"),
+        )
+        for token_count, formatted in cases:
+            with self.subTest(token_count=token_count):
+                self.assertEqual(theme.fmt_tokens(token_count), formatted)
 
     def test_fmt_num_thousands(self) -> None:
-        self.assertEqual(theme.fmt_num(1234567), "1,234,567")
-        self.assertEqual(theme.fmt_num(0), "0")
+        cases = ((1234567, "1,234,567"), (0, _ZERO_TEXT))
+        for count, formatted in cases:
+            with self.subTest(count=count):
+                self.assertEqual(theme.fmt_num(count), formatted)
 
     def test_formatters_accept_value_keyword(self) -> None:
         # `value` is the public keyword every formatter exposes.
-        self.assertEqual(theme.fmt_money(value=42), "$42")
-        self.assertEqual(theme.fmt_money_exact(value=0), "$0")
-        self.assertEqual(theme.fmt_tokens(value=999), "999")
-        self.assertEqual(theme.fmt_num(value=0), "0")
+        cases = (
+            (theme.fmt_money, 42, "$42"),
+            (theme.fmt_money_exact, 0, "$0"),
+            (theme.fmt_tokens, 999, "999"),
+            (theme.fmt_num, 0, _ZERO_TEXT),
+        )
+        for formatter, formatter_input, formatted in cases:
+            with self.subTest(formatter=formatter.__name__):
+                self.assertEqual(formatter(value=formatter_input), formatted)
 
 
 class PageCssTest(unittest.TestCase):
@@ -251,7 +272,7 @@ class PageCssTest(unittest.TestCase):
         )
         self.assertIn(":has(input:checked)", theme.PAGE_CSS)
 
-    def test_chrome_does_not_full_bleed_with_100vw(self) -> None:
+    def test_chrome_avoids_full_viewport_width_bleed(self) -> None:
         # `100vw` includes the vertical scrollbar's width but the
         # content area does not, so a full-bleed bar overflows by
         # ~15px on any page tall enough to scroll. Keep the topbar

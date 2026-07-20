@@ -7,9 +7,18 @@ from datetime import date
 
 from tests.analytics_read_helpers import (
     _FakeConnection,
-    _connector,
-    _reload,
+    _reload_read,
 )
+
+# The reader's resolved/rejected CASE arm is its most distinctive SQL
+# fragment, so tests register the fake's rows against it and read the
+# day-bucketed throughput back.
+_RESOLVED_CASE = "WHEN stage = 'done'"
+
+# Two adjacent days the fixtures bucket their counts under.
+_YEAR = 2026
+_TS_DAY = date(_YEAR, 5, 25)
+_TS_NEXT_DAY = date(_YEAR, 5, 26)
 
 
 class ThroughputBreakdownTest(unittest.TestCase):
@@ -20,7 +29,7 @@ class ThroughputBreakdownTest(unittest.TestCase):
     otherwise count."""
 
     def test_unset_db_url_returns_empty(self) -> None:
-        _, analytics_read = _reload({"ANALYTICS_DB_URL": ""})
+        analytics_read = _reload_read(db_url="")
         self.assertEqual(
             analytics_read.get_throughput_breakdown(
                 connect=lambda url: _FakeConnection(),
@@ -32,28 +41,28 @@ class ThroughputBreakdownTest(unittest.TestCase):
         # If `stage_enter` is not in the events selection, this
         # widget has nothing to count -- it is by definition about
         # `stage_enter` rows.
-        _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
+        analytics_read = _reload_read()
         conn = _FakeConnection()
         rows = analytics_read.get_throughput_breakdown(
-            events=["agent_exit"], connect=_connector(conn),
+            events=["agent_exit"], connect=conn.as_connect,
         )
         self.assertEqual(rows, [])
         self.assertEqual(conn.executed, [])
 
     def test_empty_events_short_circuits(self) -> None:
-        _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
+        analytics_read = _reload_read()
         conn = _FakeConnection()
         rows = analytics_read.get_throughput_breakdown(
-            events=[], connect=_connector(conn),
+            events=[], connect=conn.as_connect,
         )
         self.assertEqual(rows, [])
         self.assertEqual(conn.executed, [])
 
     def test_empty_stages_short_circuits(self) -> None:
-        _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
+        analytics_read = _reload_read()
         conn = _FakeConnection()
         rows = analytics_read.get_throughput_breakdown(
-            stages=[], connect=_connector(conn),
+            stages=[], connect=conn.as_connect,
         )
         self.assertEqual(rows, [])
         self.assertEqual(conn.executed, [])
@@ -61,55 +70,55 @@ class ThroughputBreakdownTest(unittest.TestCase):
     def test_stage_filter_excludes_done_and_rejected(self) -> None:
         # The operator selected only non-terminal stages -- nothing
         # to count.
-        _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
+        analytics_read = _reload_read()
         conn = _FakeConnection()
         rows = analytics_read.get_throughput_breakdown(
-            stages=["implementing", "validating"], connect=_connector(conn),
+            stages=["implementing", "validating"], connect=conn.as_connect,
         )
         self.assertEqual(rows, [])
         self.assertEqual(conn.executed, [])
 
     def test_returns_per_day_resolved_rejected(self) -> None:
-        _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
+        analytics_read = _reload_read()
         conn = _FakeConnection()
         conn.rows_for = {
-            "WHEN stage = 'done'": [
-                (date(2026, 5, 25), 3, 1),
-                (date(2026, 5, 26), 5, 0),
+            _RESOLVED_CASE: [
+                (_TS_DAY, 3, 1),
+                (_TS_NEXT_DAY, 5, 0),
             ],
         }
         rows = analytics_read.get_throughput_breakdown(
-            connect=_connector(conn),
+            connect=conn.as_connect,
         )
         self.assertEqual(len(rows), 2)
-        self.assertEqual(rows[0].day, date(2026, 5, 25))
+        self.assertEqual(rows[0].day, _TS_DAY)
         self.assertEqual(rows[0].resolved, 3)
         self.assertEqual(rows[0].rejected, 1)
         self.assertEqual(rows[1].resolved, 5)
         self.assertEqual(rows[1].rejected, 0)
-        sql, params = conn.executed[0]
+        sql, query_params = conn.first_query
         # Implicit `event = 'stage_enter'` predicate plus the
         # stage IN ('done', 'rejected') intersection.
         self.assertIn("event = %s", sql)
-        self.assertIn("stage_enter", params)
+        self.assertIn("stage_enter", query_params)
         self.assertIn("stage IN", sql)
-        self.assertIn("done", params)
-        self.assertIn("rejected", params)
+        self.assertIn("done", query_params)
+        self.assertIn("rejected", query_params)
 
     def test_stage_filter_intersects_terminal_pair(self) -> None:
         # User picked `done` only; SQL must narrow to `stage = 'done'`
         # (via stage IN ('done',)) inside the implicit event filter.
-        _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
+        analytics_read = _reload_read()
         conn = _FakeConnection()
-        conn.rows_for = {"WHEN stage = 'done'": [(date(2026, 5, 25), 1, 0)]}
+        conn.rows_for = {_RESOLVED_CASE: [(_TS_DAY, 1, 0)]}
         rows = analytics_read.get_throughput_breakdown(
             stages=["done", "implementing"],
-            connect=_connector(conn),
+            connect=conn.as_connect,
         )
         self.assertEqual(len(rows), 1)
-        _, params = conn.executed[0]
+        _, query_params = conn.first_query
         # `implementing` is not in the resolved/rejected pair so it
         # is dropped from the IN clause -- only `done` lands.
-        self.assertIn("done", params)
-        self.assertNotIn("rejected", params)
-        self.assertNotIn("implementing", params)
+        self.assertIn("done", query_params)
+        self.assertNotIn("rejected", query_params)
+        self.assertNotIn("implementing", query_params)

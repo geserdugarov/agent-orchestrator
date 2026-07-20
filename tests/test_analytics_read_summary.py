@@ -7,9 +7,31 @@ from datetime import date, datetime, timezone
 
 from tests.analytics_read_helpers import (
     _FakeConnection,
-    _connector,
-    _reload,
+    _reload_read,
 )
+
+# The combined summary query opens with this CTE and scans the daily
+# rollup; both fragments are asserted against the emitted SQL across
+# the module. `get_kpi_prev` emits the trimmed scalar SELECT instead.
+_WIN_CTE = "WITH win AS"
+_ROLLUP_SCAN = "FROM analytics_daily_rollup"
+_SCALARS_CTE = "AS total_cost_usd"
+_KIND_TOTALS = "t"
+_AGENT_EXIT = "agent_exit"
+_STAGE_ENTER = "stage_enter"
+
+_REPO = "owner/repo"
+_REPO_SHORT = "owner/r"
+
+# Reused window bounds; the rollup cutover binds their `.date()`
+# projection, so the day components are the assertion surface rather
+# than incidental fixture noise.
+_YEAR = 2026
+_WINDOW_START = datetime(_YEAR, 5, 1, tzinfo=timezone.utc)
+_WINDOW_END = datetime(_YEAR, 5, 28, tzinfo=timezone.utc)
+_PREV_START = datetime(_YEAR, 4, 1, tzinfo=timezone.utc)
+_TS_DAY = date(_YEAR, 5, 25)
+_TS_NEXT_DAY = date(_YEAR, 5, 26)
 
 
 class SummaryTest(unittest.TestCase):
@@ -17,21 +39,21 @@ class SummaryTest(unittest.TestCase):
     breakdowns. Empty results give a zero-valued Summary, not None."""
 
     def test_returns_zero_summary_when_db_url_unset(self) -> None:
-        _, analytics_read = _reload({"ANALYTICS_DB_URL": ""})
+        analytics_read = _reload_read(db_url="")
         connected = []
-        result = analytics_read.get_summary(
+        summary = analytics_read.get_summary(
             connect=lambda url: connected.append(url) or _FakeConnection(),
         )
         self.assertEqual(connected, [])
-        self.assertEqual(result, analytics_read.Summary())
+        self.assertEqual(summary, analytics_read.Summary())
 
     def test_empty_rows_yield_zero_summary(self) -> None:
-        _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
+        analytics_read = _reload_read()
         conn = _FakeConnection()
         # No rows from the unioned SELECT (a fake that emits nothing).
         conn.rows_for = {}
-        result = analytics_read.get_summary(connect=_connector(conn))
-        self.assertEqual(result, analytics_read.Summary())
+        summary = analytics_read.get_summary(connect=conn.as_connect)
+        self.assertEqual(summary, analytics_read.Summary())
 
     def test_aggregates_and_breakdowns(self) -> None:
         # Layer 3 collapses totals + by_event + by_stage into one
@@ -42,14 +64,14 @@ class SummaryTest(unittest.TestCase):
         # the breakdown pairs in arbitrary order so the in-Python
         # `COUNT DESC, label ASC` sort that preserves the previous
         # SQL ordering is exercised.
-        _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
+        analytics_read = _reload_read()
         conn = _FakeConnection()
         conn.rows_for = {
-            "WITH win AS": [
-                ("t", None, 42, 10, 2, 1.234, 100, 200, 0, 0, 0, 0, 0),
-                ("e", "agent_exit", 12, None, None, None, None, None,
+            _WIN_CTE: [
+                (_KIND_TOTALS, None, 42, 10, 2, 1.234, 100, 200, 0, 0, 0, 0, 0),
+                ("e", _AGENT_EXIT, 12, None, None, None, None, None,
                  None, None, None, None, None),
-                ("e", "stage_enter", 30, None, None, None, None, None,
+                ("e", _STAGE_ENTER, 30, None, None, None, None, None,
                  None, None, None, None, None),
                 ("s", "validating", 10, None, None, None, None, None,
                  None, None, None, None, None),
@@ -57,40 +79,38 @@ class SummaryTest(unittest.TestCase):
                  None, None, None, None, None),
             ],
         }
-        result = analytics_read.get_summary(
-            start=datetime(2026, 5, 1, tzinfo=timezone.utc),
-            end=datetime(2026, 5, 28, tzinfo=timezone.utc),
-            repo="owner/repo",
-            connect=_connector(conn),
+        summary = analytics_read.get_summary(
+            start=_WINDOW_START,
+            end=_WINDOW_END,
+            repo=_REPO,
+            connect=conn.as_connect,
         )
-        self.assertEqual(result.total_events, 42)
-        self.assertEqual(result.distinct_issues, 10)
-        self.assertEqual(result.distinct_repos, 2)
-        self.assertEqual(result.total_cost_usd, 1.234)
-        self.assertEqual(result.total_input_tokens, 100)
-        self.assertEqual(result.total_output_tokens, 200)
+        self.assertEqual(summary.total_events, 42)
+        self.assertEqual(summary.distinct_issues, 10)
+        self.assertEqual(summary.distinct_repos, 2)
+        self.assertEqual(summary.total_cost_usd, 1.234)
+        self.assertEqual(summary.total_input_tokens, 100)
+        self.assertEqual(summary.total_output_tokens, 200)
         # Insertion order must match `c DESC, label ASC` so the
         # dashboard's iteration order does not depend on which UNION
         # plan Postgres picked.
         self.assertEqual(
-            list(result.by_event.items()),
-            [("stage_enter", 30), ("agent_exit", 12)],
+            list(summary.by_event.items()),
+            [(_STAGE_ENTER, 30), (_AGENT_EXIT, 12)],
         )
         self.assertEqual(
-            list(result.by_stage.items()),
+            list(summary.by_stage.items()),
             [("implementing", 20), ("validating", 10)],
         )
         # And the whole result came from a single round-trip.
         self.assertEqual(len(conn.executed), 1)
 
     def test_window_and_repo_params_bound(self) -> None:
-        _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
+        analytics_read = _reload_read()
         conn = _FakeConnection()
-        start = datetime(2026, 5, 1, tzinfo=timezone.utc)
-        end = datetime(2026, 5, 28, tzinfo=timezone.utc)
         analytics_read.get_summary(
-            start=start, end=end, repo="owner/r",
-            connect=_connector(conn),
+            start=_WINDOW_START, end=_WINDOW_END, repo=_REPO_SHORT,
+            connect=conn.as_connect,
         )
         # The single combined SQL applies the filter once in the CTE
         # and the totals / breakdown branches inherit it from `win`.
@@ -99,13 +119,14 @@ class SummaryTest(unittest.TestCase):
         # (the rollup's UTC-bound aggregate key) and the parameters
         # carry the `.date()` projection of the input timestamps.
         self.assertEqual(len(conn.executed), 1)
-        sql, params = conn.executed[0]
-        self.assertIn("WITH win AS", sql)
-        self.assertIn("FROM analytics_daily_rollup", sql)
+        sql, query_params = conn.first_query
+        self.assertIn(_WIN_CTE, sql)
+        self.assertIn(_ROLLUP_SCAN, sql)
         self.assertIn("day >= %s", sql)
         self.assertIn("day < %s", sql)
         self.assertIn("repo = %s", sql)
-        self.assertEqual(params[:3], (start.date(), end.date(), "owner/r"))
+        bound_window = (_WINDOW_START.date(), _WINDOW_END.date(), _REPO_SHORT)
+        self.assertEqual(query_params[:3], bound_window)
 
     def test_distinct_issues_counts_repo_issue_pairs(self) -> None:
         # GitHub issue numbers are only unique within a repo, so a
@@ -116,16 +137,16 @@ class SummaryTest(unittest.TestCase):
         # issue=1; the SQL must read `COUNT(DISTINCT (repo, issue))` so
         # the fake aggregate reflecting `2` round-trips into the
         # `distinct_issues` field.
-        _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
+        analytics_read = _reload_read()
         conn = _FakeConnection()
         conn.rows_for = {
-            "WITH win AS": [
-                ("t", None, 4, 2, 2, 0.0, 0, 0, 0, 0, 0, 0, 0),
+            _WIN_CTE: [
+                (_KIND_TOTALS, None, 4, 2, 2, 0, 0, 0, 0, 0, 0, 0, 0),
             ],
         }
-        result = analytics_read.get_summary(connect=_connector(conn))
-        self.assertEqual(result.distinct_issues, 2)
-        sql, _ = conn.executed[0]
+        summary = analytics_read.get_summary(connect=conn.as_connect)
+        self.assertEqual(summary.distinct_issues, 2)
+        sql, _ = conn.first_query
         self.assertIn("COUNT(DISTINCT (repo, issue))", sql)
 
 
@@ -136,7 +157,7 @@ class SummaryAgentRunsExtensionTest(unittest.TestCase):
     reads off the same query as the rest of the overview."""
 
     def test_totals_carry_agent_run_columns(self) -> None:
-        _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
+        analytics_read = _reload_read()
         conn = _FakeConnection()
         # Full 13-column totals row: kind / label / events / issues
         # / repos / cost / input / output / total runs / failed runs
@@ -147,14 +168,14 @@ class SummaryAgentRunsExtensionTest(unittest.TestCase):
         # `failed_count` (`exit_code IS NOT NULL AND exit_code <> 0`)
         # narrowed to `event = 'agent_exit'`.
         conn.rows_for = {
-            "WITH win AS": [
-                ("t", None, 50, 12, 3, 2.5, 100, 200, 15, 4, 0, 0, 0),
+            _WIN_CTE: [
+                (_KIND_TOTALS, None, 50, 12, 3, 2.5, 100, 200, 15, 4, 0, 0, 0),
             ],
         }
-        result = analytics_read.get_summary(connect=_connector(conn))
-        self.assertEqual(result.total_agent_runs, 15)
-        self.assertEqual(result.failed_agent_runs, 4)
-        sql, _ = conn.executed[0]
+        summary = analytics_read.get_summary(connect=conn.as_connect)
+        self.assertEqual(summary.total_agent_runs, 15)
+        self.assertEqual(summary.failed_agent_runs, 4)
+        sql, _ = conn.first_query
         self.assertIn("total_agent_runs", sql)
         self.assertIn("failed_agent_runs", sql)
         # Failure subset constrains on `event = 'agent_exit'` so a
@@ -162,44 +183,44 @@ class SummaryAgentRunsExtensionTest(unittest.TestCase):
         # never counts; the NULL-exit-code guard lives in the rollup
         # definition.
         self.assertIn("event = 'agent_exit'", sql)
-        self.assertIn("FROM analytics_daily_rollup", sql)
+        self.assertIn(_ROLLUP_SCAN, sql)
 
     def test_short_totals_tuple_round_trips(self) -> None:
         # A fixture whose totals row is shorter than the full
         # 13-column shape (e.g. a pre-extension fake) defaults the
         # missing trailing columns to zero rather than raising on
         # the unpack. Mirrors the previous "legacy 6-tuple" guard.
-        _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
+        analytics_read = _reload_read()
         conn = _FakeConnection()
         conn.rows_for = {
-            "WITH win AS": [
+            _WIN_CTE: [
                 # kind / label / events / issues / repos / cost /
                 # input / output -- no agent-run or cache columns.
-                ("t", None, 4, 2, 2, 0.0, 0, 0),
+                (_KIND_TOTALS, None, 4, 2, 2, 0, 0, 0),
             ],
         }
-        result = analytics_read.get_summary(connect=_connector(conn))
-        self.assertEqual(result.total_agent_runs, 0)
-        self.assertEqual(result.failed_agent_runs, 0)
-        self.assertEqual(result.total_cache_read_tokens, 0)
-        self.assertEqual(result.total_cache_write_tokens, 0)
-        self.assertEqual(result.timed_out_agent_runs, 0)
+        summary = analytics_read.get_summary(connect=conn.as_connect)
+        self.assertEqual(summary.total_agent_runs, 0)
+        self.assertEqual(summary.failed_agent_runs, 0)
+        self.assertEqual(summary.total_cache_read_tokens, 0)
+        self.assertEqual(summary.total_cache_write_tokens, 0)
+        self.assertEqual(summary.timed_out_agent_runs, 0)
 
     def test_totals_carry_cache_token_columns(self) -> None:
         # The cache columns feed the redesigned "Total tokens" KPI
         # and sparkline -- matching the standalone mock's
         # `input + output + cache_read + cache_write` accounting.
-        _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
+        analytics_read = _reload_read()
         conn = _FakeConnection()
         conn.rows_for = {
-            "WITH win AS": [
-                ("t", None, 50, 12, 3, 2.5, 100, 200, 15, 4, 1200, 800, 0),
+            _WIN_CTE: [
+                (_KIND_TOTALS, None, 50, 12, 3, 2.5, 100, 200, 15, 4, 1200, 800, 0),
             ],
         }
-        result = analytics_read.get_summary(connect=_connector(conn))
-        self.assertEqual(result.total_cache_read_tokens, 1200)
-        self.assertEqual(result.total_cache_write_tokens, 800)
-        sql, _ = conn.executed[0]
+        summary = analytics_read.get_summary(connect=conn.as_connect)
+        self.assertEqual(summary.total_cache_read_tokens, 1200)
+        self.assertEqual(summary.total_cache_write_tokens, 800)
+        sql, _ = conn.first_query
         # The rollup carries cache-band tokens pre-summed per group
         # under the `total_cache_*` column names, so the reader sums
         # the rollup columns rather than the raw event columns.
@@ -212,16 +233,16 @@ class SummaryAgentRunsExtensionTest(unittest.TestCase):
         # just the latest N from `get_recent_agent_exits`. The SQL
         # filters on `timed_out = true` so NULL pre-flag rows never
         # count.
-        _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
+        analytics_read = _reload_read()
         conn = _FakeConnection()
         conn.rows_for = {
-            "WITH win AS": [
-                ("t", None, 50, 12, 3, 2.5, 100, 200, 15, 4, 1200, 800, 7),
+            _WIN_CTE: [
+                (_KIND_TOTALS, None, 50, 12, 3, 2.5, 100, 200, 15, 4, 1200, 800, 7),
             ],
         }
-        result = analytics_read.get_summary(connect=_connector(conn))
-        self.assertEqual(result.timed_out_agent_runs, 7)
-        sql, _ = conn.executed[0]
+        summary = analytics_read.get_summary(connect=conn.as_connect)
+        self.assertEqual(summary.timed_out_agent_runs, 7)
+        sql, _ = conn.first_query
         self.assertIn("timed_out", sql)
         self.assertIn("timed_out_agent_runs", sql)
 
@@ -236,71 +257,78 @@ class KpiPrevTest(unittest.TestCase):
     defaults."""
 
     def test_returns_zero_summary_when_db_url_unset(self) -> None:
-        _, analytics_read = _reload({"ANALYTICS_DB_URL": ""})
+        analytics_read = _reload_read(db_url="")
         connected: list[str] = []
-        result = analytics_read.get_kpi_prev(
+        summary = analytics_read.get_kpi_prev(
             connect=lambda url: connected.append(url) or _FakeConnection(),
         )
         self.assertEqual(connected, [])
-        self.assertEqual(result, analytics_read.Summary())
+        self.assertEqual(summary, analytics_read.Summary())
 
     def test_returns_zero_summary_for_empty_window(self) -> None:
-        _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
+        analytics_read = _reload_read()
         conn = _FakeConnection()
         conn.rows_for = {}
-        result = analytics_read.get_kpi_prev(connect=_connector(conn))
-        self.assertEqual(result, analytics_read.Summary())
+        summary = analytics_read.get_kpi_prev(connect=conn.as_connect)
+        self.assertEqual(summary, analytics_read.Summary())
 
     def test_scalars_round_trip(self) -> None:
-        _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
+        analytics_read = _reload_read()
         conn = _FakeConnection()
         # 6-tuple: cost / input / output / cache_read / cache_write
         # / total_agent_runs -- exactly what the dashboard reads off
         # `prev_summary` for KPI deltas and the cost-trend banner.
         conn.rows_for = {
-            "AS total_cost_usd": [(2.5, 1000, 500, 200, 100, 7)],
+            _SCALARS_CTE: [(2.5, 1000, 500, 200, 100, 7)],
         }
-        result = analytics_read.get_kpi_prev(connect=_connector(conn))
-        self.assertEqual(result.total_cost_usd, 2.5)
-        self.assertEqual(result.total_input_tokens, 1000)
-        self.assertEqual(result.total_output_tokens, 500)
-        self.assertEqual(result.total_cache_read_tokens, 200)
-        self.assertEqual(result.total_cache_write_tokens, 100)
-        self.assertEqual(result.total_agent_runs, 7)
-        # The trimmed reader leaves the unread fields at their
-        # dataclass defaults so existing `prev_summary` consumers
-        # see zero rather than stale values.
-        self.assertEqual(result.total_events, 0)
-        self.assertEqual(result.distinct_issues, 0)
-        self.assertEqual(result.distinct_repos, 0)
-        self.assertEqual(result.failed_agent_runs, 0)
-        self.assertEqual(result.timed_out_agent_runs, 0)
-        self.assertEqual(result.by_event, {})
-        self.assertEqual(result.by_stage, {})
+        summary = analytics_read.get_kpi_prev(connect=conn.as_connect)
+        # Contract one: each scalar the KPI strip reads off `prev_summary`
+        # round-trips from its own row column -- asserted field-by-field
+        # so a column-order regression is pinned to the exact scalar.
+        for field, expected in (
+            ("total_cost_usd", 2.5),
+            ("total_input_tokens", 1000),
+            ("total_output_tokens", 500),
+            ("total_cache_read_tokens", 200),
+            ("total_cache_write_tokens", 100),
+            ("total_agent_runs", 7),
+        ):
+            self.assertEqual(getattr(summary, field), expected, field)
+        # Contract two: the trimmed reader leaves every unread field at
+        # its dataclass default so consumers see zero, not stale values.
+        for field, expected in (
+            ("total_events", 0),
+            ("distinct_issues", 0),
+            ("distinct_repos", 0),
+            ("failed_agent_runs", 0),
+            ("timed_out_agent_runs", 0),
+            ("by_event", {}),
+            ("by_stage", {}),
+        ):
+            self.assertEqual(getattr(summary, field), expected, field)
 
     def test_window_and_filter_params_bound(self) -> None:
-        _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
+        analytics_read = _reload_read()
         conn = _FakeConnection()
-        start = datetime(2026, 4, 1, tzinfo=timezone.utc)
-        end = datetime(2026, 5, 1, tzinfo=timezone.utc)
         analytics_read.get_kpi_prev(
-            start=start, end=end, repo="owner/r",
-            events=["agent_exit"], stages=["implementing"],
-            connect=_connector(conn),
+            start=_PREV_START, end=_WINDOW_START, repo=_REPO_SHORT,
+            events=[_AGENT_EXIT], stages=["implementing"],
+            connect=conn.as_connect,
         )
         # One round-trip; the rollup window predicate replaces the
         # base-table `ts >= / ts <` shape with `day >= / day <`,
         # but the previous-window read still narrows alongside the
         # current-window summary.
         self.assertEqual(len(conn.executed), 1)
-        sql, params = conn.executed[0]
-        self.assertIn("FROM analytics_daily_rollup", sql)
+        sql, query_params = conn.first_query
+        self.assertIn(_ROLLUP_SCAN, sql)
         self.assertIn("day >= %s", sql)
         self.assertIn("day < %s", sql)
         self.assertIn("repo = %s", sql)
         self.assertIn("event IN (%s)", sql)
         self.assertIn("stage IN (%s)", sql)
-        self.assertEqual(params[:3], (start.date(), end.date(), "owner/r"))
+        bound_window = (_PREV_START.date(), _WINDOW_START.date(), _REPO_SHORT)
+        self.assertEqual(query_params[:3], bound_window)
 
     def test_empty_events_emits_false_predicate(self) -> None:
         # Mirrors `get_summary`'s cleared-multiselect semantics: an
@@ -308,10 +336,10 @@ class KpiPrevTest(unittest.TestCase):
         # filter". The SQL carries a tautologically-false predicate
         # so the previous-window KPI strip drops to zero alongside
         # the current-window read.
-        _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
+        analytics_read = _reload_read()
         conn = _FakeConnection()
-        analytics_read.get_kpi_prev(events=[], connect=_connector(conn))
-        sql, _ = conn.executed[0]
+        analytics_read.get_kpi_prev(events=[], connect=conn.as_connect)
+        sql, _ = conn.first_query
         self.assertIn("FALSE", sql)
 
     def test_skips_breakdown_and_distinct_counts(self) -> None:
@@ -320,10 +348,10 @@ class KpiPrevTest(unittest.TestCase):
         # `COUNT(DISTINCT ...)`s that `get_summary` emits, otherwise
         # the previous-window read still pays the same cost it did
         # before Layer 3.
-        _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
+        analytics_read = _reload_read()
         conn = _FakeConnection()
-        analytics_read.get_kpi_prev(connect=_connector(conn))
-        sql, _ = conn.executed[0]
+        analytics_read.get_kpi_prev(connect=conn.as_connect)
+        sql, _ = conn.first_query
         self.assertNotIn("GROUP BY", sql)
         self.assertNotIn("COUNT(DISTINCT", sql)
 
@@ -331,20 +359,20 @@ class KpiPrevTest(unittest.TestCase):
         # A fake that pre-dates the agent-run column still returns a
         # valid `Summary` with the missing trailing column defaulted
         # to zero -- mirrors the `get_summary` legacy-tuple guard.
-        _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
+        analytics_read = _reload_read()
         conn = _FakeConnection()
         conn.rows_for = {
-            "AS total_cost_usd": [(1.0, 100, 200, 50, 25)],
+            _SCALARS_CTE: [(1.0, 100, 200, 50, 25)],
         }
-        result = analytics_read.get_kpi_prev(connect=_connector(conn))
-        self.assertEqual(result.total_cost_usd, 1.0)
-        self.assertEqual(result.total_agent_runs, 0)
+        summary = analytics_read.get_kpi_prev(connect=conn.as_connect)
+        self.assertEqual(summary.total_cost_usd, 1.0)
+        self.assertEqual(summary.total_agent_runs, 0)
 
 
 class TimeSeriesTest(unittest.TestCase):
 
     def test_unset_db_url_returns_empty_list(self) -> None:
-        _, analytics_read = _reload({"ANALYTICS_DB_URL": ""})
+        analytics_read = _reload_read(db_url="")
         self.assertEqual(
             analytics_read.get_time_series(
                 connect=lambda url: _FakeConnection(),
@@ -353,25 +381,25 @@ class TimeSeriesTest(unittest.TestCase):
         )
 
     def test_groups_by_day_and_event(self) -> None:
-        _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
+        analytics_read = _reload_read()
         conn = _FakeConnection()
         # Reads the daily rollup -- the rollup's `day` column is
         # the GROUP BY key, so the SQL no longer needs a
         # `date_trunc('day', ts)` expression.
         conn.rows_for = {
-            "FROM analytics_daily_rollup": [
-                (date(2026, 5, 25), "stage_enter", 5),
-                (date(2026, 5, 25), "agent_exit", 2),
-                (date(2026, 5, 26), "stage_enter", 7),
+            _ROLLUP_SCAN: [
+                (_TS_DAY, _STAGE_ENTER, 5),
+                (_TS_DAY, _AGENT_EXIT, 2),
+                (_TS_NEXT_DAY, _STAGE_ENTER, 7),
             ],
         }
-        points = analytics_read.get_time_series(connect=_connector(conn))
+        points = analytics_read.get_time_series(connect=conn.as_connect)
         self.assertEqual(
             points,
             [
-                analytics_read.TimeSeriesPoint(date(2026, 5, 25), "stage_enter", 5),
-                analytics_read.TimeSeriesPoint(date(2026, 5, 25), "agent_exit", 2),
-                analytics_read.TimeSeriesPoint(date(2026, 5, 26), "stage_enter", 7),
+                analytics_read.TimeSeriesPoint(_TS_DAY, _STAGE_ENTER, 5),
+                analytics_read.TimeSeriesPoint(_TS_DAY, _AGENT_EXIT, 2),
+                analytics_read.TimeSeriesPoint(_TS_NEXT_DAY, _STAGE_ENTER, 7),
             ],
         )
 
@@ -379,15 +407,15 @@ class TimeSeriesTest(unittest.TestCase):
         # Some drivers return the `day` column as a timestamp even
         # when the underlying type is `date`; the read model
         # normalises so the dashboard sees `date`.
-        _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
+        analytics_read = _reload_read()
         conn = _FakeConnection()
         conn.rows_for = {
-            "FROM analytics_daily_rollup": [
-                (datetime(2026, 5, 25, 0, 0, tzinfo=timezone.utc), "x", 1),
+            _ROLLUP_SCAN: [
+                (datetime(_YEAR, 5, 25, 0, 0, tzinfo=timezone.utc), "x", 1),
             ],
         }
-        points = analytics_read.get_time_series(connect=_connector(conn))
-        self.assertEqual(points[0].day, date(2026, 5, 25))
+        points = analytics_read.get_time_series(connect=conn.as_connect)
+        self.assertEqual(points[0].day, _TS_DAY)
         self.assertEqual(points[0].count, 1)
 
 
@@ -402,17 +430,14 @@ class TimeSeriesAggregatesTest(unittest.TestCase):
         # redesigned hero chart's Cache band. After Layer 4 the
         # reader sums the rollup's pre-derived `total_*` columns
         # instead of the raw event-table columns.
-        _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
+        analytics_read = _reload_read()
         conn = _FakeConnection()
         conn.rows_for = {
-            "FROM analytics_daily_rollup": [
-                (
-                    date(2026, 5, 25), "agent_exit",
-                    3, 0.42, 1000, 500, 200, 100,
-                ),
+            _ROLLUP_SCAN: [
+                (_TS_DAY, _AGENT_EXIT, 3, 0.42, 1000, 500, 200, 100),
             ],
         }
-        points = analytics_read.get_time_series(connect=_connector(conn))
+        points = analytics_read.get_time_series(connect=conn.as_connect)
         self.assertEqual(len(points), 1)
         point = points[0]
         self.assertEqual(point.count, 3)
@@ -421,24 +446,29 @@ class TimeSeriesAggregatesTest(unittest.TestCase):
         self.assertEqual(point.output_tokens, 500)
         self.assertEqual(point.cache_read_tokens, 200)
         self.assertEqual(point.cache_write_tokens, 100)
-        sql, _ = conn.executed[0]
-        self.assertIn("SUM(total_cost_usd)", sql)
-        self.assertIn("SUM(total_input_tokens)", sql)
-        self.assertIn("SUM(total_output_tokens)", sql)
-        self.assertIn("SUM(total_cache_read_tokens)", sql)
-        self.assertIn("SUM(total_cache_write_tokens)", sql)
+        sql, _ = conn.first_query
+        # Every per-day aggregate is summed from the rollup's
+        # pre-derived `total_*` columns, not the raw event columns.
+        for rollup_column in (
+            "total_cost_usd",
+            "total_input_tokens",
+            "total_output_tokens",
+            "total_cache_read_tokens",
+            "total_cache_write_tokens",
+        ):
+            self.assertIn("SUM({0})".format(rollup_column), sql)
 
-    def test_legacy_6tuple_defaults_cache_to_zero(self) -> None:
+    def test_legacy_six_tuple_defaults_cache_to_zero(self) -> None:
         # Older fixtures still emit 6-tuple `(day, event, count,
         # cost, in, out)` rows; the reader defaults the cache fields
         # to zero so unrelated tests round-trip.
-        _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
+        analytics_read = _reload_read()
         conn = _FakeConnection()
         conn.rows_for = {
-            "FROM analytics_daily_rollup": [
-                (date(2026, 5, 25), "agent_exit", 3, 0.42, 1000, 500),
+            _ROLLUP_SCAN: [
+                (_TS_DAY, _AGENT_EXIT, 3, 0.42, 1000, 500),
             ],
         }
-        point = analytics_read.get_time_series(connect=_connector(conn))[0]
+        point = analytics_read.get_time_series(connect=conn.as_connect)[0]
         self.assertEqual(point.cache_read_tokens, 0)
         self.assertEqual(point.cache_write_tokens, 0)

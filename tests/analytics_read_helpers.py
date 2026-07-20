@@ -10,9 +10,16 @@ so the fakes and the `_reload` shim live here in one place.
 """
 from __future__ import annotations
 
+import importlib
 import os
 import sys
 from unittest.mock import patch
+
+# The stand-in Postgres DSN every read-model test wires into
+# `ANALYTICS_DB_URL`; only its presence matters, the fake connection
+# never dials it.
+_POSTGRES_URL = "postgresql://h/db"
+_DB_URL_ENV = "ANALYTICS_DB_URL"
 
 
 def _hermetic_env(extra: dict[str, str] | None = None) -> dict[str, str]:
@@ -41,9 +48,24 @@ def _reload(env: dict[str, str] | None = None):
         sys.modules.pop("orchestrator.config", None)
         sys.modules.pop("orchestrator.analytics.read", None)
         sys.modules.pop("orchestrator.analytics", None)
-        import orchestrator.analytics as analytics
-        from orchestrator.analytics import read as analytics_read
+        # `import_module` re-imports off `sys.modules`, so popping the
+        # entries above forces a fresh load against the patched env; a
+        # `from orchestrator import analytics` would instead rebind the
+        # stale package attribute and skip the reload.
+        analytics = importlib.import_module("orchestrator.analytics")
+        analytics_read = importlib.import_module("orchestrator.analytics.read")
         return analytics, analytics_read
+
+
+def _reload_read(db_url: str = _POSTGRES_URL):
+    """Reload only `orchestrator.analytics.read` against `db_url`.
+
+    Most read-model tests never inspect the parent `analytics`
+    module, so this folds the `ANALYTICS_DB_URL` wiring behind a
+    single default and returns just the reloaded `read` module.
+    """
+    _, analytics_read = _reload({_DB_URL_ENV: db_url})
+    return analytics_read
 
 
 class _FakeCursor:
@@ -66,10 +88,10 @@ class _FakeCursor:
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:
-        return None
+        """No resources to release; the fake never suppresses."""
 
-    def execute(self, sql: str, params: tuple) -> None:
-        self._conn.executed.append((sql, tuple(params)))
+    def execute(self, sql: str, sql_params: tuple) -> None:
+        self._conn.executed.append((sql, tuple(sql_params)))
         if self._conn.raise_on_execute is not None:
             raise self._conn.raise_on_execute
         self._next_rows = []
@@ -95,13 +117,14 @@ class _FakeConnection:
     def close(self) -> None:
         self.close_called += 1
 
+    def as_connect(self, _url: str) -> "_FakeConnection":
+        """Serve as the reader's `connect(db_url) -> conn` callable,
+        always yielding this same fake so a test can inspect the
+        executed SQL after the reader returns.
+        """
+        return self
 
-def _connector(conn: _FakeConnection):
-    """Build a `connect(db_url) -> conn` factory that always returns
-    the same fake connection, so tests can inspect it after.
-    """
-
-    def _connect(_url: str) -> _FakeConnection:
-        return conn
-
-    return _connect
+    @property
+    def first_query(self) -> tuple[str, tuple]:
+        """The single (sql, params) round-trip the reader issued."""
+        return self.executed[0]

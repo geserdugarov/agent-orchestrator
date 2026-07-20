@@ -19,10 +19,11 @@ whatever the earlier test-session import left cached.
 """
 from __future__ import annotations
 
+import importlib
 import os
 import sys
 import unittest
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from datetime import date, datetime, timezone
 from functools import partial
 from types import SimpleNamespace
@@ -34,6 +35,36 @@ from unittest.mock import patch
 SKIP_DOTENV_ENV = "ORCHESTRATOR_SKIP_DOTENV"
 TOKEN_FILE_ENV = "ORCHESTRATOR_TOKEN_FILE"
 MISSING_TOKEN_FILE = "/tmp/agent-orchestrator-token-missing"
+
+# Package + submodule dotted names the reload cycle drops from
+# `sys.modules` and the extraction tests look up. Named once so the
+# repeated dotted strings do not drift between the reload pop-list and
+# the per-module assertions.
+ORCHESTRATOR_PKG = "orchestrator"
+DASHBOARD_MODULE = "orchestrator.dashboard"
+DASHBOARD_CARDS_MODULE = "orchestrator.dashboard_cards"
+DASHBOARD_KPI_STRIP_MODULE = "orchestrator.dashboard_kpi_strip"
+DASHBOARD_READS_MODULE = "orchestrator.dashboard_reads"
+DASHBOARD_WIDGETS_MODULE = "orchestrator.dashboard_widgets"
+DASHBOARD_STATE_MODULE = "orchestrator.dashboard_state"
+DASHBOARD_CHARTS_MODULE = "orchestrator.dashboard_charts"
+
+# Modules the hermetic reload evicts before re-importing so the fresh
+# facade re-binds every extracted leaf against the patched env.
+_RELOAD_POP_MODULES = (
+    "orchestrator.config",
+    "orchestrator.analytics.read",
+    "orchestrator.analytics",
+    DASHBOARD_STATE_MODULE,
+    "orchestrator.dashboard_kpis",
+    "orchestrator.dashboard_html",
+    DASHBOARD_CARDS_MODULE,
+    DASHBOARD_KPI_STRIP_MODULE,
+    "orchestrator.dashboard_skill_matrix",
+    DASHBOARD_READS_MODULE,
+    DASHBOARD_WIDGETS_MODULE,
+    DASHBOARD_MODULE,
+)
 
 
 def _hermetic_env(extra: dict[str, str] | None = None) -> dict[str, str]:
@@ -75,20 +106,15 @@ def _reload(env: dict[str, str] | None = None):
     discarded `dashboard_html` module, defeating the hermetic reload.
     """
     with patch.dict(os.environ, _hermetic_env(env), clear=True):
-        sys.modules.pop("orchestrator.config", None)
-        sys.modules.pop("orchestrator.analytics.read", None)
-        sys.modules.pop("orchestrator.analytics", None)
-        sys.modules.pop("orchestrator.dashboard_state", None)
-        sys.modules.pop("orchestrator.dashboard_kpis", None)
-        sys.modules.pop("orchestrator.dashboard_html", None)
-        sys.modules.pop("orchestrator.dashboard_cards", None)
-        sys.modules.pop("orchestrator.dashboard_kpi_strip", None)
-        sys.modules.pop("orchestrator.dashboard_skill_matrix", None)
-        sys.modules.pop("orchestrator.dashboard_reads", None)
-        sys.modules.pop("orchestrator.dashboard_widgets", None)
-        sys.modules.pop("orchestrator.dashboard", None)
-        import orchestrator.analytics as analytics
-        import orchestrator.dashboard as dashboard
+        for stale_module in _RELOAD_POP_MODULES:
+            sys.modules.pop(stale_module, None)
+        # `import_module` re-imports the popped module fresh (a plain
+        # `from orchestrator import ...` would resolve the stale parent
+        # attribute instead). `analytics` must load first so its fresh
+        # object is the package attribute `dashboard`'s `from orchestrator
+        # import analytics` resolves against.
+        analytics = importlib.import_module("orchestrator.analytics")
+        dashboard = importlib.import_module(DASHBOARD_MODULE)
         return analytics, dashboard
 
 
@@ -99,26 +125,33 @@ def _reload(env: dict[str, str] | None = None):
 ANALYTICS_DB_URL_ENV = "ANALYTICS_DB_URL"
 PARALLEL_READS_ENV = "DASHBOARD_PARALLEL_READS"
 CONFIGURED_DB_URL = "postgresql://h/db"
+# The reload env that the source-inspection tests share: a configured
+# Postgres URL so `dashboard.main` resolves its read wrappers.
+CONFIGURED_DB_ENV = {ANALYTICS_DB_URL_ENV: CONFIGURED_DB_URL}
+
+# Every date/datetime fixture builds off this single calendar year so the
+# window math reads as day/month offsets rather than repeated literals.
+_YEAR = 2026
 
 # Recurring May-2026 anchors for the window / preset / KPI-delta tests.
-# The canonical current window is MAY_22..MAY_28 (7 days); the preset
-# data extent spans MAY_1..MAY_28 with its exclusive end at MAY_29, and
-# the 3-day preset opens at MAY_26.
-MAY_1 = date(2026, 5, 1)
-MAY_2 = date(2026, 5, 2)
-MAY_3 = date(2026, 5, 3)
-MAY_4 = date(2026, 5, 4)
-MAY_5 = date(2026, 5, 5)
-MAY_6 = date(2026, 5, 6)
-MAY_7 = date(2026, 5, 7)
-MAY_15 = date(2026, 5, 15)
-MAY_22 = date(2026, 5, 22)
-MAY_26 = date(2026, 5, 26)
-MAY_28 = date(2026, 5, 28)
-MAY_29 = date(2026, 5, 29)
-JAN_1 = date(2026, 1, 1)
-JUN_5_NOON_UTC = datetime(2026, 6, 5, 12, 0, tzinfo=timezone.utc)
-JUN_5_NOON_NAIVE = datetime(2026, 6, 5, 12, 0)
+# The canonical current window is MAY22..MAY28 (7 days); the preset
+# data extent spans MAY01..MAY28 with its exclusive end at MAY29, and
+# the 3-day preset opens at MAY26.
+MAY01 = date(_YEAR, 5, 1)
+MAY02 = date(_YEAR, 5, 2)
+MAY03 = date(_YEAR, 5, 3)
+MAY04 = date(_YEAR, 5, 4)
+MAY05 = date(_YEAR, 5, 5)
+MAY06 = date(_YEAR, 5, 6)
+MAY07 = date(_YEAR, 5, 7)
+MAY15 = date(_YEAR, 5, 15)
+MAY22 = date(_YEAR, 5, 22)
+MAY26 = date(_YEAR, 5, 26)
+MAY28 = date(_YEAR, 5, 28)
+MAY29 = date(_YEAR, 5, 29)
+JAN01 = date(_YEAR, 1, 1)
+JUN05_NOON_UTC = datetime(_YEAR, 6, 5, 12, 0, tzinfo=timezone.utc)
+JUN05_NOON_NAIVE = datetime(_YEAR, 6, 5, 12, 0)
 
 
 def _utc_midnight(day: date) -> datetime:
@@ -127,10 +160,10 @@ def _utc_midnight(day: date) -> datetime:
 
 # Incidental first/last-seen timestamps stamped by the issue-summary row
 # builders. Never asserted -- the builders only need a valid ordered pair.
-FIRST_SEEN = datetime(2026, 5, 1, tzinfo=timezone.utc)
-LAST_SEEN = datetime(2026, 5, 2, tzinfo=timezone.utc)
+FIRST_SEEN = datetime(_YEAR, 5, 1, tzinfo=timezone.utc)
+LAST_SEEN = datetime(_YEAR, 5, 2, tzinfo=timezone.utc)
 
-# Sample repo slugs shared by the issue-summary builders.
+# Sample repo slugs.
 REPO_A = "acme/a"
 REPO_B = "acme/b"
 REPO_C = "acme/c"
@@ -169,7 +202,6 @@ WIDGET_READER_WRAPPER_NAMES = (
     "_read_skill_trigger_matrix",
 )
 
-# Canonical drill-down issue number, shared by the parse + cache-key tests.
 ISSUE_NUMBER = 42
 
 # Summary-wide reliability totals used to prove the dashboard ignores
@@ -197,9 +229,30 @@ KPI_TIMEOUTS = "Timeouts"
 KPI_TOTAL_TOKENS = "Total tokens"
 COLUMN_RUNS = "Runs"
 
+# Review-round bucket labels (`ReviewRoundBucketRow.bucket`): "0" is the
+# initial, pre-rework pass that rework cost excludes; "1" is the first
+# review round.
+BUCKET_INITIAL = "0"
+BUCKET_FIRST_ROUND = "1"
+
 SCOPED_READ_CALL_FRAGMENT = "_scoped_read("
 REPO_C_CELL_FRAGMENT = ">c/repo<"
 ROLE_WITH_MARKUP = "dev<&>"
+
+# Dashboard member / attribute names the source-inspection tests fetch
+# through `_source_of`, plus the load-source dispatch fragments they
+# search for. Named once so the repeated identifiers stay in sync across
+# the assertion bodies (the re-export registries below keep their own
+# plain-string listing).
+ENTRYPOINT_ATTR = "main"
+SCOPED_READ_MEMBER = "_scoped_read"
+FIRST_WAVE_READERS_MEMBER = "_first_wave_readers"
+SECOND_WAVE_READERS_MEMBER = "_second_wave_readers"
+RUN_READ_WAVES_MEMBER = "_run_read_waves"
+RENDER_FIRST_WAVE_MEMBER = "_render_first_wave"
+SKILL_MATRIX_READER_MEMBER = "_read_skill_trigger_matrix"
+DISPATCH_FIRST_WAVE = "reads.first_wave"
+DISPATCH_SECOND_WAVE = "reads.second_wave"
 
 # Cache-key fixture inputs: a sample repo plus the event / stage filter
 # selections whose list->tuple normalization the cache key must preserve.
@@ -216,10 +269,13 @@ SORT_DESC = "desc"
 MTX_SORT_KEYS = (
     "repo", "role", "backend", "skill", "runs", "skill_runs", "rate",
 )
+# The numeric-column sort key the header-click and parse tests exercise
+# most; named so the repeated query-param value stays a single token.
+SORT_KEY_RUNS = "runs"
 
 
 def _is_orchestrator_module(name: str) -> bool:
-    return name == "orchestrator" or name.startswith("orchestrator.")
+    return name == ORCHESTRATOR_PKG or name.startswith("orchestrator.")
 
 
 def _is_orchestrator_launch_module(name: str) -> bool:
@@ -231,7 +287,7 @@ def _is_orchestrator_launch_module(name: str) -> bool:
 
 def _is_dashboard_script_launch_module(name: str) -> bool:
     return name in (
-        "orchestrator.dashboard",
+        DASHBOARD_MODULE,
         "orchestrator.script_launch",
         "script_launch",
     )
@@ -247,9 +303,53 @@ def _restore_sys_path(path_entries: list[str]) -> None:
     sys.path[:] = path_entries
 
 
-def _record_reader_call(name: str, value: int, calls: list[str]) -> int:
+def _dashboard_launch_paths() -> SimpleNamespace:
+    from pathlib import Path
+
+    repo_root = Path(__file__).resolve().parent.parent
+    dashboard_path = repo_root / ORCHESTRATOR_PKG / "dashboard.py"
+    return SimpleNamespace(
+        repo_root=repo_root,
+        dashboard_path=dashboard_path,
+        script_dir=dashboard_path.parent,
+    )
+
+
+def _drop_repo_root_from_sys_path(repo_root) -> None:
+    from pathlib import Path
+
+    resolved_root = repo_root.resolve()
+    sys.path[:] = [
+        path_entry for path_entry in sys.path
+        if not path_entry or Path(path_entry).resolve() != resolved_root
+    ]
+
+
+@contextmanager
+def _script_launch_sandbox(predicate):
+    """Isolate a script-launch import behind sys.path / module restoration.
+
+    Snapshots `sys.path` and the predicate-matched `sys.modules` entries,
+    then restores both (and re-clears the predicate's modules) on exit so a
+    successful re-import inside the sandbox cannot poison the rest of the
+    test session with a half-initialised package. Yields the `ExitStack`
+    so a caller can register its own temp dirs on the same teardown scope.
+    """
+    original_path = list(sys.path)
+    saved_modules = {
+        name: module for name, module in sys.modules.items()
+        if predicate(name)
+    }
+    with ExitStack() as cleanup:
+        cleanup.callback(sys.modules.update, saved_modules)
+        cleanup.callback(_clear_modules, predicate)
+        cleanup.callback(_restore_sys_path, original_path)
+        yield cleanup
+
+
+def _record_reader_call(name: str, payload: int, calls: list[str]) -> int:
     calls.append(name)
-    return value
+    return payload
 
 
 def _raise_read_error(
@@ -270,8 +370,8 @@ def _increment_reader_count(name: str, counts: dict[str, int]) -> str:
     return name
 
 
-def _return_value(value: int) -> int:
-    return value
+def _return_value(payload: int) -> int:
+    return payload
 
 
 def _record_threaded_reader(
@@ -288,11 +388,33 @@ def _record_threaded_reader(
     return name
 
 
-def _sleep_then_return(delay: float, value: str) -> str:
+def _sleep_then_return(delay: float, payload: str) -> str:
     import time
 
     time.sleep(delay)
-    return value
+    return payload
+
+
+def _tile_value_tones(tiles) -> dict:
+    """Project `reliability_tile_data` triples to `{label: (value, tone)}`."""
+    return {label: (tile_value, tone) for tile_value, label, tone in tiles}
+
+
+def _tile_values(tiles) -> dict:
+    """Project `reliability_tile_data` triples to `{label: value}`."""
+    return {label: tile_value for tile_value, label, _ in tiles}
+
+
+def _tile_tones(tiles) -> dict:
+    """Project `reliability_tile_data` triples to `{label: tone}`."""
+    return {label: tone for _, label, tone in tiles}
+
+
+def _signature_slice(source: str, marker: str) -> str:
+    """Return the `def name(...)` header slice starting at `marker`."""
+    head = source.index(marker)
+    tail = source.index("):", head)
+    return source[head:tail]
 
 
 class _MainSourceTest(unittest.TestCase):
@@ -307,11 +429,11 @@ class _MainSourceTest(unittest.TestCase):
     """
 
     def _main_source(self) -> str:
-        return self._source_of("main")
+        return self._source_of(ENTRYPOINT_ATTR)
 
     def _source_of(self, name: str) -> str:
         import inspect
-        _, dashboard = _reload({ANALYTICS_DB_URL_ENV: CONFIGURED_DB_URL})
+        _, dashboard = _reload(CONFIGURED_DB_ENV)
         return inspect.getsource(getattr(dashboard, name))
 
 
@@ -320,15 +442,15 @@ class DefaultDateRangeTest(unittest.TestCase):
     def test_window_includes_today_and_n_days(self) -> None:
         _, dashboard = _reload()
         start, end = dashboard.default_date_range(
-            today=MAY_28, days=7
+            today=MAY28, days=7
         )
-        self.assertEqual(end, MAY_28)
-        self.assertEqual(start, MAY_22)
+        self.assertEqual(end, MAY28)
+        self.assertEqual(start, MAY22)
 
     def test_days_one_yields_today_only(self) -> None:
         _, dashboard = _reload()
         start, end = dashboard.default_date_range(
-            today=MAY_28, days=1
+            today=MAY28, days=1
         )
         self.assertEqual(start, end)
 
@@ -337,10 +459,10 @@ class DefaultDateRangeTest(unittest.TestCase):
         # clamps to "today only" instead of returning end < start.
         _, dashboard = _reload()
         start, end = dashboard.default_date_range(
-            today=MAY_28, days=0
+            today=MAY28, days=0
         )
-        self.assertEqual(start, MAY_28)
-        self.assertEqual(end, MAY_28)
+        self.assertEqual(start, MAY28)
+        self.assertEqual(end, MAY28)
 
 
 class ToWindowTest(unittest.TestCase):
@@ -349,24 +471,24 @@ class ToWindowTest(unittest.TestCase):
         # `analytics_read` uses `ts < end`; midnight on the day after
         # `end_date` is what makes events from `end_date` visible.
         _, dashboard = _reload()
-        window = dashboard.to_window(MAY_1, MAY_3)
-        self.assertEqual(window.start, _utc_midnight(MAY_1))
-        self.assertEqual(window.end, _utc_midnight(MAY_4))
+        window = dashboard.to_window(MAY01, MAY03)
+        self.assertEqual(window.start, _utc_midnight(MAY01))
+        self.assertEqual(window.end, _utc_midnight(MAY04))
 
     def test_reversed_range_is_swapped(self) -> None:
         # The Streamlit two-date input lets the user type end < start.
         # Swapping silently keeps the dashboard useful instead of
         # collapsing to an empty SQL window.
         _, dashboard = _reload()
-        window = dashboard.to_window(MAY_5, MAY_1)
-        self.assertEqual(window.start.date(), MAY_1)
-        self.assertEqual(window.end.date(), MAY_6)
+        window = dashboard.to_window(MAY05, MAY01)
+        self.assertEqual(window.start.date(), MAY01)
+        self.assertEqual(window.end.date(), MAY06)
 
     def test_single_day_window(self) -> None:
         _, dashboard = _reload()
-        window = dashboard.to_window(MAY_1, MAY_1)
-        self.assertEqual(window.start, _utc_midnight(MAY_1))
-        self.assertEqual(window.end, _utc_midnight(MAY_2))
+        window = dashboard.to_window(MAY01, MAY01)
+        self.assertEqual(window.start, _utc_midnight(MAY01))
+        self.assertEqual(window.end, _utc_midnight(MAY02))
 
 
 class ParseIssueNumberTest(unittest.TestCase):
@@ -420,9 +542,7 @@ class DbUnconfiguredMessageTest(unittest.TestCase):
                 )
 
     def test_configured_url_returns_none(self) -> None:
-        _, dashboard = _reload(
-            {ANALYTICS_DB_URL_ENV: CONFIGURED_DB_URL}
-        )
+        _, dashboard = _reload(CONFIGURED_DB_ENV)
         self.assertIsNone(dashboard.db_unconfigured_message())
 
 
@@ -438,20 +558,20 @@ class LazyImportTest(unittest.TestCase):
     """
 
     def test_dashboard_only_modules_absent_after_load(self) -> None:
+        optional_deps = ("streamlit", "pandas", "plotly")
         with patch.dict(os.environ, _hermetic_env(), clear=True):
-            sys.modules.pop("orchestrator.config", None)
-            sys.modules.pop("orchestrator.analytics.read", None)
-            sys.modules.pop("orchestrator.analytics", None)
-            sys.modules.pop("orchestrator.dashboard", None)
-            sys.modules.pop("orchestrator.dashboard_charts", None)
-            sys.modules.pop("streamlit", None)
-            sys.modules.pop("pandas", None)
-            sys.modules.pop("plotly", None)
-            import orchestrator.dashboard  # noqa: F401
-            self.assertNotIn("streamlit", sys.modules)
-            self.assertNotIn("pandas", sys.modules)
-            self.assertNotIn("plotly", sys.modules)
-            self.assertNotIn("orchestrator.dashboard_charts", sys.modules)
+            for stale_module in (
+                "orchestrator.config",
+                "orchestrator.analytics.read",
+                "orchestrator.analytics",
+                DASHBOARD_MODULE,
+                DASHBOARD_CHARTS_MODULE,
+                *optional_deps,
+            ):
+                sys.modules.pop(stale_module, None)
+            importlib.import_module(DASHBOARD_MODULE)
+            for absent in (*optional_deps, DASHBOARD_CHARTS_MODULE):
+                self.assertNotIn(absent, sys.modules)
 
 
 class ScriptPathLaunchTest(unittest.TestCase):
@@ -473,32 +593,13 @@ class ScriptPathLaunchTest(unittest.TestCase):
 
     def test_runs_without_repo_root_on_syspath(self) -> None:
         import runpy
-        from pathlib import Path
 
-        repo_root = Path(__file__).resolve().parent.parent
-        dashboard_path = repo_root / "orchestrator" / "dashboard.py"
-        script_dir = dashboard_path.parent
-
-        original_path = list(sys.path)
-        # Snapshot the `orchestrator.*` modules so a successful
-        # re-import inside `runpy` does not poison the rest of the
-        # test session with a half-initialised package.
-        saved_modules = {
-            module_name: module for module_name, module in sys.modules.items()
-            if _is_orchestrator_module(module_name)
-        }
-        with ExitStack() as cleanup:
-            cleanup.callback(sys.modules.update, saved_modules)
-            cleanup.callback(_clear_modules, _is_orchestrator_module)
-            cleanup.callback(_restore_sys_path, original_path)
+        launch = _dashboard_launch_paths()
+        with _script_launch_sandbox(_is_orchestrator_module):
             # Match Streamlit's launch shape: only the script's
             # directory is on sys.path, the repo root is not.
-            resolved_root = repo_root.resolve()
-            sys.path[:] = [
-                p for p in sys.path
-                if not p or Path(p).resolve() != resolved_root
-            ]
-            sys.path.insert(0, str(script_dir))
+            _drop_repo_root_from_sys_path(launch.repo_root)
+            sys.path.insert(0, str(launch.script_dir))
             _clear_modules(_is_orchestrator_module)
 
             # `run_name="not_main"` keeps the `if __name__ == "__main__":`
@@ -506,9 +607,9 @@ class ScriptPathLaunchTest(unittest.TestCase):
             # to be installed -- only the top-level imports must
             # succeed under the script-launch sys.path.
             namespace = runpy.run_path(
-                str(dashboard_path), run_name="not_main"
+                str(launch.dashboard_path), run_name="not_main"
             )
-            self.assertIn("main", namespace)
+            self.assertIn(ENTRYPOINT_ATTR, namespace)
             self.assertIn("analytics_read", namespace)
 
     def test_stale_parent_cannot_shadow_repo(self) -> None:
@@ -523,40 +624,25 @@ class ScriptPathLaunchTest(unittest.TestCase):
         import tempfile
         from pathlib import Path
 
-        repo_root = Path(__file__).resolve().parent.parent
-        dashboard_path = repo_root / "orchestrator" / "dashboard.py"
-        script_dir = dashboard_path.parent
-
-        original_path = list(sys.path)
-        saved_modules = {
-            name: module for name, module in sys.modules.items()
-            if _is_orchestrator_launch_module(name)
-        }
-        with ExitStack() as cleanup:
+        launch = _dashboard_launch_paths()
+        with _script_launch_sandbox(_is_orchestrator_launch_module) as cleanup:
             decoy_root = cleanup.enter_context(tempfile.TemporaryDirectory())
-            cleanup.callback(sys.modules.update, saved_modules)
-            cleanup.callback(_clear_modules, _is_orchestrator_launch_module)
-            cleanup.callback(_restore_sys_path, original_path)
             # A bare `orchestrator` package with none of the real submodules,
             # standing in for a stale install that shadows the repo root.
-            decoy_pkg = Path(decoy_root) / "orchestrator"
+            decoy_pkg = Path(decoy_root) / ORCHESTRATOR_PKG
             decoy_pkg.mkdir()
             (decoy_pkg / "__init__.py").write_text("")
-            resolved_root = repo_root.resolve()
-            sys.path[:] = [
-                p for p in sys.path
-                if not p or Path(p).resolve() != resolved_root
-            ]
+            _drop_repo_root_from_sys_path(launch.repo_root)
             # Streamlit's shape (script's own dir first), with the decoy
             # parent reachable just behind it.
             sys.path.insert(0, decoy_root)
-            sys.path.insert(0, str(script_dir))
+            sys.path.insert(0, str(launch.script_dir))
             _clear_modules(_is_orchestrator_launch_module)
 
             namespace = runpy.run_path(
-                str(dashboard_path), run_name="not_main"
+                str(launch.dashboard_path), run_name="not_main"
             )
-            self.assertIn("main", namespace)
+            self.assertIn(ENTRYPOINT_ATTR, namespace)
             # The real read model landed -- not the decoy package (which
             # has no `analytics` submodule and would raise on import).
             self.assertEqual(
@@ -574,16 +660,8 @@ class ScriptPathLaunchTest(unittest.TestCase):
         import tempfile
         from pathlib import Path
 
-        original_path = list(sys.path)
-        saved_modules = {
-            name: module for name, module in sys.modules.items()
-            if _is_dashboard_script_launch_module(name)
-        }
-        with ExitStack() as cleanup:
+        with _script_launch_sandbox(_is_dashboard_script_launch_module) as cleanup:
             stray_dir = cleanup.enter_context(tempfile.TemporaryDirectory())
-            cleanup.callback(sys.modules.update, saved_modules)
-            cleanup.callback(_clear_modules, _is_dashboard_script_launch_module)
-            cleanup.callback(_restore_sys_path, original_path)
             # A stray top-level `script_launch` that detonates on import, so a
             # bare `import script_launch` during the package import would fail
             # loudly instead of silently binding the wrong helper.
@@ -592,8 +670,8 @@ class ScriptPathLaunchTest(unittest.TestCase):
             )
             sys.path.insert(0, stray_dir)
             _clear_modules(_is_dashboard_script_launch_module)
-            module = importlib.import_module("orchestrator.dashboard")
-            self.assertTrue(hasattr(module, "main"))
+            module = importlib.import_module(DASHBOARD_MODULE)
+            self.assertTrue(hasattr(module, ENTRYPOINT_ATTR))
             # The package path used `orchestrator.script_launch` and never
             # probed the bare name, so the stray stayed unimported.
             self.assertNotIn("script_launch", sys.modules)
@@ -612,21 +690,21 @@ class ResolveStageFilterTest(unittest.TestCase):
 
     def test_all_selected_collapses_to_none(self) -> None:
         _, dashboard = _reload()
-        result = dashboard.resolve_stage_filter(
+        resolved = dashboard.resolve_stage_filter(
             selected=[STAGE_IMPLEMENTING, STAGE_VALIDATING],
             available=(STAGE_IMPLEMENTING, STAGE_VALIDATING),
         )
-        self.assertIsNone(result)
+        self.assertIsNone(resolved)
 
     def test_no_available_options_returns_none(self) -> None:
         # Empty filter options (DB is empty or has no non-null
         # stages yet) collapses to `None` so the read-model query
         # runs unconstrained on the stage column.
         _, dashboard = _reload()
-        result = dashboard.resolve_stage_filter(
+        resolved = dashboard.resolve_stage_filter(
             selected=[], available=()
         )
-        self.assertIsNone(result)
+        self.assertIsNone(resolved)
 
     def test_cleared_multiselect_returns_empty_list(self) -> None:
         # Options exist but the operator cleared the selection.
@@ -634,19 +712,19 @@ class ResolveStageFilterTest(unittest.TestCase):
         # predicate; without this branch the cleared state would
         # be indistinguishable from the all-selected default.
         _, dashboard = _reload()
-        result = dashboard.resolve_stage_filter(
+        resolved = dashboard.resolve_stage_filter(
             selected=[],
             available=(STAGE_IMPLEMENTING, STAGE_VALIDATING),
         )
-        self.assertEqual(result, [])
+        self.assertEqual(resolved, [])
 
     def test_proper_subset_passes_through(self) -> None:
         _, dashboard = _reload()
-        result = dashboard.resolve_stage_filter(
+        resolved = dashboard.resolve_stage_filter(
             selected=[STAGE_IMPLEMENTING],
             available=(STAGE_IMPLEMENTING, STAGE_VALIDATING),
         )
-        self.assertEqual(result, [STAGE_IMPLEMENTING])
+        self.assertEqual(resolved, [STAGE_IMPLEMENTING])
 
 
 class PresetWindowTest(unittest.TestCase):
@@ -658,51 +736,42 @@ class PresetWindowTest(unittest.TestCase):
     in the topbar; `Custom` stays available as the sidebar fallback.
     """
 
-    def _extent(self, min_d, max_d):
-        _, dashboard = _reload()
-        return dashboard.DataExtent(
-            min_ts=datetime(min_d.year, min_d.month, min_d.day,
-                            tzinfo=timezone.utc),
-            max_ts=datetime(max_d.year, max_d.month, max_d.day, 23, 59,
-                            tzinfo=timezone.utc),
-        )
-
     def test_three_day_preset_anchors_at_max(self) -> None:
         _, dashboard = _reload()
-        extent = self._extent(MAY_1, MAY_28)
+        extent = self._extent(MAY01, MAY28)
         window = dashboard.preset_window(dashboard.PRESET_3D, extent)
         self.assertIsNotNone(window)
         # Three-day preset spans the max date and the two days before
         # it, exclusive end at midnight the day after the max.
-        self.assertEqual(window.start.date(), MAY_26)
-        self.assertEqual(window.end.date(), MAY_29)
+        self.assertEqual(window.start.date(), MAY26)
+        self.assertEqual(window.end.date(), MAY29)
 
     def test_seven_day_preset_anchors_at_max(self) -> None:
         _, dashboard = _reload()
-        extent = self._extent(MAY_1, MAY_28)
+        extent = self._extent(MAY01, MAY28)
         window = dashboard.preset_window(dashboard.PRESET_7D, extent)
         self.assertIsNotNone(window)
-        self.assertEqual(window.start.date(), MAY_22)
-        self.assertEqual(window.end.date(), MAY_29)
+        self.assertEqual(window.start.date(), MAY22)
+        self.assertEqual(window.end.date(), MAY29)
 
     def test_seven_day_preset_clamps_to_min(self) -> None:
         # Data extent is only 3 days wide -- "Last 7 days" must
         # clamp the start at the data extent's min, not reach
         # before it.
         _, dashboard = _reload()
-        extent = self._extent(MAY_26, MAY_28)
+        extent = self._extent(MAY26, MAY28)
         window = dashboard.preset_window(dashboard.PRESET_7D, extent)
         self.assertIsNotNone(window)
-        self.assertEqual(window.start.date(), MAY_26)
-        self.assertEqual(window.end.date(), MAY_29)
+        self.assertEqual(window.start.date(), MAY26)
+        self.assertEqual(window.end.date(), MAY29)
 
     def test_all_preset_covers_full_extent(self) -> None:
         _, dashboard = _reload()
-        extent = self._extent(JAN_1, MAY_28)
+        extent = self._extent(JAN01, MAY28)
         window = dashboard.preset_window(dashboard.PRESET_ALL, extent)
         self.assertIsNotNone(window)
-        self.assertEqual(window.start.date(), JAN_1)
-        self.assertEqual(window.end.date(), MAY_29)
+        self.assertEqual(window.start.date(), JAN01)
+        self.assertEqual(window.end.date(), MAY29)
 
     def test_custom_preset_returns_none(self) -> None:
         # The caller renders a date-range picker when the preset is
@@ -710,7 +779,7 @@ class PresetWindowTest(unittest.TestCase):
         # branch on a falsy value rather than special-casing the
         # preset string in two places.
         _, dashboard = _reload()
-        extent = self._extent(MAY_1, MAY_28)
+        extent = self._extent(MAY01, MAY28)
         self.assertIsNone(
             dashboard.preset_window(dashboard.PRESET_CUSTOM, extent)
         )
@@ -724,7 +793,7 @@ class PresetWindowTest(unittest.TestCase):
 
     def test_unknown_preset_returns_none(self) -> None:
         _, dashboard = _reload()
-        extent = self._extent(MAY_1, MAY_28)
+        extent = self._extent(MAY01, MAY28)
         self.assertIsNone(
             dashboard.preset_window("not-a-preset", extent)
         )
@@ -746,6 +815,15 @@ class PresetWindowTest(unittest.TestCase):
              dashboard.PRESET_ALL},
         )
 
+    def _extent(self, min_d, max_d):
+        _, dashboard = _reload()
+        return dashboard.DataExtent(
+            min_ts=datetime(min_d.year, min_d.month, min_d.day,
+                            tzinfo=timezone.utc),
+            max_ts=datetime(max_d.year, max_d.month, max_d.day, 23, 59,
+                            tzinfo=timezone.utc),
+        )
+
 
 class PreviousWindowTest(unittest.TestCase):
     """The previous-window helper feeds the KPI delta column. It must
@@ -756,20 +834,20 @@ class PreviousWindowTest(unittest.TestCase):
 
     def test_length_preserved(self) -> None:
         _, dashboard = _reload()
-        win = dashboard.to_window(MAY_1, MAY_7)
+        win = dashboard.to_window(MAY01, MAY07)
         prev = dashboard.previous_window(win)
         self.assertEqual(prev.end, win.start)
         self.assertEqual(prev.end - prev.start, win.end - win.start)
 
     def test_seven_day_window_has_seven_day_prior(self) -> None:
         _, dashboard = _reload()
-        win = dashboard.to_window(MAY_22, MAY_28)
+        win = dashboard.to_window(MAY22, MAY28)
         prev = dashboard.previous_window(win)
         # `to_window`'s end is exclusive (one day past `end_date`),
         # so the seven-day window spans 7 calendar days; the previous
         # window starts seven days before the current start.
-        self.assertEqual(prev.start.date(), MAY_15)
-        self.assertEqual(prev.end.date(), MAY_22)
+        self.assertEqual(prev.start.date(), MAY15)
+        self.assertEqual(prev.end.date(), MAY22)
 
 
 class KpiDeltaTest(unittest.TestCase):
@@ -798,22 +876,6 @@ class ComputeInsightsTest(unittest.TestCase):
     read-model rows; this test pins the threshold semantics so a
     future tuning pass changes them deliberately.
     """
-
-    def _summary(
-        self,
-        *,
-        events=0,
-        cost=0.0,
-        agent_runs=0,
-        failed=0,
-    ):
-        _, dashboard = _reload()
-        return dashboard.Summary(
-            total_events=events,
-            total_agent_runs=agent_runs,
-            failed_agent_runs=failed,
-            total_cost_usd=cost,
-        )
 
     def test_no_banners_for_healthy_window(self) -> None:
         _, dashboard = _reload()
@@ -848,9 +910,9 @@ class ComputeInsightsTest(unittest.TestCase):
         # 30 / 100 = 30% unpriced -- well over the 10% threshold.
         self.assertTrue(
             any(
-                b.severity == "warning"
-                and "30 of 100" in b.message
-                for b in banners
+                banner.severity == "warning"
+                and "30 of 100" in banner.message
+                for banner in banners
             )
         )
 
@@ -867,6 +929,22 @@ class ComputeInsightsTest(unittest.TestCase):
             [],
         )
 
+    def _summary(
+        self,
+        *,
+        events=0,
+        cost=0.0,
+        agent_runs=0,
+        failed=0,
+    ):
+        _, dashboard = _reload()
+        return dashboard.Summary(
+            total_events=events,
+            total_agent_runs=agent_runs,
+            failed_agent_runs=failed,
+            total_cost_usd=cost,
+        )
+
 
 class ReliabilityTileDataTest(unittest.TestCase):
     """The redesigned reliability panel sources every tile from
@@ -874,11 +952,6 @@ class ReliabilityTileDataTest(unittest.TestCase):
     than `DEFAULT_RECENT_AGENT_EXITS` (100) rows still sees every
     timeout / failure -- the earlier draft computed these off the
     LIMIT-capped recent-runs read and silently undercounted."""
-
-    def _summary(self, **kw):
-        _, dashboard = _reload()
-        from orchestrator.analytics.read import Summary
-        return Summary(**kw)
 
     def test_timeouts_use_full_window_summary(self) -> None:
         _, dashboard = _reload()
@@ -892,7 +965,7 @@ class ReliabilityTileDataTest(unittest.TestCase):
         tiles = dashboard.reliability_tile_data(
             summary, resolved=12, rejected=2,
         )
-        by_label = {lbl: (val, tone) for val, lbl, tone in tiles}
+        by_label = _tile_value_tones(tiles)
         # Headline tiles all pulled off Summary directly:
         self.assertEqual(by_label[KPI_AGENT_RUNS][0], FULL_WINDOW_AGENT_RUNS)
         self.assertEqual(by_label[KPI_FAILURES][0], FULL_WINDOW_FAILURES)
@@ -914,7 +987,7 @@ class ReliabilityTileDataTest(unittest.TestCase):
             timed_out_agent_runs=0,
         )
         tiles = dashboard.reliability_tile_data(summary)
-        by_label = {lbl: val for val, lbl, _ in tiles}
+        by_label = _tile_values(tiles)
         self.assertEqual(by_label[KPI_AGENT_RUNS], 0)
         self.assertEqual(by_label["Success rate"], "0%")
         self.assertEqual(by_label[KPI_TIMEOUTS], 0)
@@ -929,9 +1002,14 @@ class ReliabilityTileDataTest(unittest.TestCase):
             timed_out_agent_runs=0,
         )
         tiles = dashboard.reliability_tile_data(summary)
-        by_label = {lbl: tone for _, lbl, tone in tiles}
+        by_label = _tile_tones(tiles)
         self.assertEqual(by_label[KPI_FAILURES], "")
         self.assertEqual(by_label[KPI_TIMEOUTS], "")
+
+    def _summary(self, **kw):
+        _, dashboard = _reload()
+        from orchestrator.analytics.read import Summary
+        return Summary(**kw)
 
 
 class ReworkTotalsTest(unittest.TestCase):
@@ -945,10 +1023,10 @@ class ReworkTotalsTest(unittest.TestCase):
         from orchestrator.analytics.read import ReviewRoundBucketRow
         rows = [
             ReviewRoundBucketRow(
-                bucket="0", runs=5, failed=0, total_cost_usd=50.0
+                bucket=BUCKET_INITIAL, runs=5, failed=0, total_cost_usd=50.0
             ),
             ReviewRoundBucketRow(
-                bucket="1", runs=2, failed=1, total_cost_usd=20.0
+                bucket=BUCKET_FIRST_ROUND, runs=2, failed=1, total_cost_usd=20.0
             ),
         ]
         total, rework = dashboard.rework_totals(rows)
@@ -975,10 +1053,50 @@ class ReworkTotalsTest(unittest.TestCase):
     def test_empty_rows_returns_zero(self) -> None:
         _, dashboard = _reload()
         total, rework = dashboard.rework_totals([])
-        self.assertEqual((total, rework), (0.0, 0.0))
+        self.assertAlmostEqual(total, 0.0)
+        self.assertAlmostEqual(rework, 0.0)
 
 
 class TopExpensiveIssuesTest(unittest.TestCase):
+
+    def test_sorts_by_cost_desc(self) -> None:
+        _, dashboard = _reload()
+        rows = [
+            self._issue(REPO_A, 1, 0.1),
+            self._issue(REPO_B, 2, 1.0),
+            self._issue(REPO_C, 3, 0.5),
+        ]
+        top = dashboard.top_expensive_issues(rows, limit=2)
+        self.assertEqual([(row.repo, row.issue) for row in top],
+                         [(REPO_B, 2), (REPO_C, 3)])
+
+    def test_none_cost_sorts_last(self) -> None:
+        _, dashboard = _reload()
+        rows = [
+            self._issue(REPO_A, 1, None),
+            self._issue(REPO_B, 2, 0.1),
+        ]
+        top = dashboard.top_expensive_issues(rows, limit=5)
+        self.assertEqual([row.issue for row in top], [2, 1])
+
+    def test_limit_zero_returns_empty(self) -> None:
+        _, dashboard = _reload()
+        rows = [self._issue(REPO_A, 1, 0.1)]
+        self.assertEqual(dashboard.top_expensive_issues(rows, limit=0), [])
+
+    def test_ties_break_on_event_count_then_identity(self) -> None:
+        _, dashboard = _reload()
+        rows = [
+            self._issue(REPO_A, 1, 1.0, events=2),
+            self._issue(REPO_A, 2, 1.0, events=10),
+            self._issue(REPO_B, 1, 1.0, events=2),
+        ]
+        top = dashboard.top_expensive_issues(rows)
+        # Higher event count first, then (repo, issue) ascending.
+        self.assertEqual(
+            [(row.repo, row.issue) for row in top],
+            [(REPO_A, 2), (REPO_A, 1), (REPO_B, 1)],
+        )
 
     def _issue(self, repo, num, cost, events=1):
         _, dashboard = _reload()
@@ -996,71 +1114,12 @@ class TopExpensiveIssuesTest(unittest.TestCase):
             total_output_tokens=0,
         )
 
-    def test_sorts_by_cost_desc(self) -> None:
-        _, dashboard = _reload()
-        rows = [
-            self._issue(REPO_A, 1, 0.10),
-            self._issue(REPO_B, 2, 1.00),
-            self._issue(REPO_C, 3, 0.50),
-        ]
-        top = dashboard.top_expensive_issues(rows, limit=2)
-        self.assertEqual([(r.repo, r.issue) for r in top],
-                         [(REPO_B, 2), (REPO_C, 3)])
-
-    def test_none_cost_sorts_last(self) -> None:
-        _, dashboard = _reload()
-        rows = [
-            self._issue(REPO_A, 1, None),
-            self._issue(REPO_B, 2, 0.10),
-        ]
-        top = dashboard.top_expensive_issues(rows, limit=5)
-        self.assertEqual([r.issue for r in top], [2, 1])
-
-    def test_limit_zero_returns_empty(self) -> None:
-        _, dashboard = _reload()
-        rows = [self._issue(REPO_A, 1, 0.10)]
-        self.assertEqual(dashboard.top_expensive_issues(rows, limit=0), [])
-
-    def test_ties_break_on_event_count_then_identity(self) -> None:
-        _, dashboard = _reload()
-        rows = [
-            self._issue(REPO_A, 1, 1.00, events=2),
-            self._issue(REPO_A, 2, 1.00, events=10),
-            self._issue(REPO_B, 1, 1.00, events=2),
-        ]
-        top = dashboard.top_expensive_issues(rows)
-        # Higher event count first, then (repo, issue) ascending.
-        self.assertEqual(
-            [(r.repo, r.issue) for r in top],
-            [(REPO_A, 2), (REPO_A, 1), (REPO_B, 1)],
-        )
-
 
 class IssuesTableHtmlTest(unittest.TestCase):
     """The "Most expensive issues" panel is hand-rolled HTML (rather
     than `st.dataframe`) so it can carry the standalone mock's
     in-row cost bars and clean / fail status pills.
     """
-
-    def _row(self, repo, issue, cost, *, failed=0, max_round=None,
-             max_retry=None):
-        _, dashboard = _reload()
-        from orchestrator.analytics.read import IssueSummaryRow
-        return IssueSummaryRow(
-            repo=repo,
-            issue=issue,
-            event_count=10,
-            first_seen=FIRST_SEEN,
-            last_seen=LAST_SEEN,
-            latest_stage=STAGE_IMPLEMENTING,
-            agent_exits=4,
-            total_cost_usd=cost,
-            total_input_tokens=0,
-            total_output_tokens=0,
-            max_review_round=max_round,
-            failed_agent_runs=failed,
-            max_retry_count=max_retry,
-        )
 
     def test_columns_match_standalone_mock(self) -> None:
         _, dashboard = _reload()
@@ -1107,6 +1166,26 @@ class IssuesTableHtmlTest(unittest.TestCase):
         # can spot rework-heavy issues at a glance.
         self.assertIn('class="orch-badge-warn">4', html)
 
+    def _row(self, repo, issue, cost, *, failed=0, max_round=None,
+             max_retry=None):
+        _, dashboard = _reload()
+        from orchestrator.analytics.read import IssueSummaryRow
+        return IssueSummaryRow(
+            repo=repo,
+            issue=issue,
+            event_count=10,
+            first_seen=FIRST_SEEN,
+            last_seen=LAST_SEEN,
+            latest_stage=STAGE_IMPLEMENTING,
+            agent_exits=4,
+            total_cost_usd=cost,
+            total_input_tokens=0,
+            total_output_tokens=0,
+            max_review_round=max_round,
+            failed_agent_runs=failed,
+            max_retry_count=max_retry,
+        )
+
 
 class SkillTriggersHtmlTest(unittest.TestCase):
     """The "Skill trigger rates" panel is hand-rolled HTML (matching
@@ -1114,16 +1193,6 @@ class SkillTriggersHtmlTest(unittest.TestCase):
     categorical per-(role, backend) table reads cleanly even when every
     rate is 0% -- the `TRACK_SKILL_TRIGGERS=off` baseline.
     """
-
-    def _row(self, role, backend, runs, skill_runs, triggers):
-        from orchestrator.analytics.read import SkillTriggerRateRow
-        return SkillTriggerRateRow(
-            agent_role=role,
-            backend=backend,
-            runs=runs,
-            skill_runs=skill_runs,
-            total_triggers=triggers,
-        )
 
     def test_columns_present(self) -> None:
         _, dashboard = _reload()
@@ -1167,6 +1236,16 @@ class SkillTriggersHtmlTest(unittest.TestCase):
         self.assertIn("dev&lt;&amp;&gt;", html)
         self.assertNotIn(ROLE_WITH_MARKUP, html)
 
+    def _row(self, role, backend, runs, skill_runs, triggers):
+        from orchestrator.analytics.read import SkillTriggerRateRow
+        return SkillTriggerRateRow(
+            agent_role=role,
+            backend=backend,
+            runs=runs,
+            skill_runs=skill_runs,
+            total_triggers=triggers,
+        )
+
 
 class SkillMatrixHtmlTest(unittest.TestCase):
     """The per-skill trigger matrix is the second table under the
@@ -1177,17 +1256,6 @@ class SkillMatrixHtmlTest(unittest.TestCase):
     triggered skill renders as an explicit `0` cell, and degrades to a
     clear fallback notice when no catalog-backed matrix can be built.
     """
-
-    def _row(self, repo, skill, role, backend, runs, skill_runs=None):
-        from orchestrator.analytics.read import SkillTriggerMatrixRow
-        return SkillTriggerMatrixRow(
-            repo=repo,
-            skill=skill,
-            agent_role=role,
-            backend=backend,
-            runs=runs,
-            skill_runs=runs if skill_runs is None else skill_runs,
-        )
 
     def test_columns_match_issue_spec(self) -> None:
         _, dashboard = _reload()
@@ -1269,15 +1337,6 @@ class SkillMatrixHtmlTest(unittest.TestCase):
         html = dashboard._skill_matrix_html([])
         self.assertIn("&#x27;", html)
 
-
-class SkillMatrixSortTest(unittest.TestCase):
-    """The per-skill trigger matrix column headers are clickable sort
-    controls: each is an anchor writing `mtx_sort` / `mtx_dir` query
-    params, and the caller feeds the parsed `(column, direction)` back
-    into `_skill_matrix_html` so the rows re-sort on that column and the
-    active header shows a ▲ / ▼ indicator.
-    """
-
     def _row(self, repo, skill, role, backend, runs, skill_runs=None):
         from orchestrator.analytics.read import SkillTriggerMatrixRow
         return SkillTriggerMatrixRow(
@@ -1289,14 +1348,14 @@ class SkillMatrixSortTest(unittest.TestCase):
             skill_runs=runs if skill_runs is None else skill_runs,
         )
 
-    def _rows(self):
-        # Distinct repo / runs values per row so an ordering assertion can
-        # key off either without ambiguity.
-        return [
-            self._row("b/repo", "alpha", ROLE_DEVELOPER, BACKEND_CLAUDE, 2, 1),
-            self._row("a/repo", "beta", ROLE_REVIEWER, BACKEND_CODEX, 9, 9),
-            self._row("c/repo", "gamma", ROLE_DEVELOPER, BACKEND_CLAUDE, 5, 0),
-        ]
+
+class SkillMatrixSortTest(unittest.TestCase):
+    """The per-skill trigger matrix column headers are clickable sort
+    controls: each is an anchor writing `mtx_sort` / `mtx_dir` query
+    params, and the caller feeds the parsed `(column, direction)` back
+    into `_skill_matrix_html` so the rows re-sort on that column and the
+    active header shows a ▲ / ▼ indicator.
+    """
 
     def test_headers_link_to_self_for_sorting(self) -> None:
         _, dashboard = _reload()
@@ -1318,7 +1377,7 @@ class SkillMatrixSortTest(unittest.TestCase):
     def test_descending_shows_down_arrow_and_flips(self) -> None:
         _, dashboard = _reload()
         html = dashboard._skill_matrix_html(
-            self._rows(), sort_key="runs", descending=True,
+            self._rows(), sort_key=SORT_KEY_RUNS, descending=True,
         )
         # Exactly one column is marked active, and it shows the ▼ arrow.
         self.assertEqual(
@@ -1347,13 +1406,13 @@ class SkillMatrixSortTest(unittest.TestCase):
     def test_rows_render_in_selected_column_order(self) -> None:
         _, dashboard = _reload()
         asc = dashboard._skill_matrix_html(
-            self._rows(), sort_key="runs", descending=False,
+            self._rows(), sort_key=SORT_KEY_RUNS, descending=False,
         )
         # runs 2 < 5 < 9 -> repos b, c, a in that order.
         self.assertLess(asc.index(">b/repo<"), asc.index(REPO_C_CELL_FRAGMENT))
         self.assertLess(asc.index(REPO_C_CELL_FRAGMENT), asc.index(">a/repo<"))
         desc = dashboard._skill_matrix_html(
-            self._rows(), sort_key="runs", descending=True,
+            self._rows(), sort_key=SORT_KEY_RUNS, descending=True,
         )
         self.assertLess(desc.index(">a/repo<"), desc.index(REPO_C_CELL_FRAGMENT))
         self.assertLess(desc.index(REPO_C_CELL_FRAGMENT), desc.index(">b/repo<"))
@@ -1391,25 +1450,45 @@ class SkillMatrixSortTest(unittest.TestCase):
         _, dashboard = _reload()
         cases = [
             ({}, (None, False)),
-            ({MTX_SORT_PARAM: "runs"}, ("runs", False)),
-            ({MTX_SORT_PARAM: "runs", MTX_DIR_PARAM: SORT_DESC}, ("runs", True)),
-            ({MTX_SORT_PARAM: "runs", MTX_DIR_PARAM: SORT_ASC}, ("runs", False)),
+            ({MTX_SORT_PARAM: SORT_KEY_RUNS}, (SORT_KEY_RUNS, False)),
+            ({MTX_SORT_PARAM: SORT_KEY_RUNS, MTX_DIR_PARAM: SORT_DESC}, (SORT_KEY_RUNS, True)),
+            ({MTX_SORT_PARAM: SORT_KEY_RUNS, MTX_DIR_PARAM: SORT_ASC}, (SORT_KEY_RUNS, False)),
             ({MTX_SORT_PARAM: "rate", MTX_DIR_PARAM: SORT_DESC}, ("rate", True)),
             # An unknown / stale column degrades to the default order
             # rather than raising.
             ({MTX_SORT_PARAM: "bogus", MTX_DIR_PARAM: SORT_DESC}, (None, False)),
             ({MTX_DIR_PARAM: SORT_DESC}, (None, False)),
         ]
-        for params, expected in cases:
-            with self.subTest(params=params):
+        for query_params, expected in cases:
+            with self.subTest(params=query_params):
                 self.assertEqual(
-                    dashboard.parse_skill_matrix_sort(params), expected,
+                    dashboard.parse_skill_matrix_sort(query_params), expected,
                 )
         # `params` is the public keyword; callers may pass it by name.
         self.assertEqual(
-            dashboard.parse_skill_matrix_sort(params={MTX_SORT_PARAM: "runs"}),
-            ("runs", False),
+            dashboard.parse_skill_matrix_sort(params={MTX_SORT_PARAM: SORT_KEY_RUNS}),
+            (SORT_KEY_RUNS, False),
         )
+
+    def _row(self, repo, skill, role, backend, runs, skill_runs=None):
+        from orchestrator.analytics.read import SkillTriggerMatrixRow
+        return SkillTriggerMatrixRow(
+            repo=repo,
+            skill=skill,
+            agent_role=role,
+            backend=backend,
+            runs=runs,
+            skill_runs=runs if skill_runs is None else skill_runs,
+        )
+
+    def _rows(self):
+        # Distinct repo / runs values per row so an ordering assertion can
+        # key off either without ambiguity.
+        return [
+            self._row("b/repo", "alpha", ROLE_DEVELOPER, BACKEND_CLAUDE, 2, 1),
+            self._row("a/repo", "beta", ROLE_REVIEWER, BACKEND_CODEX, 9, 9),
+            self._row("c/repo", "gamma", ROLE_DEVELOPER, BACKEND_CLAUDE, 5, 0),
+        ]
 
 
 class DeltaPillTest(unittest.TestCase):
@@ -1509,10 +1588,6 @@ class BackendEfficiencyCardHtmlTest(unittest.TestCase):
     input)` -- the share of billable input served from cache.
     """
 
-    def _row(self, **kw):
-        from orchestrator.analytics.read import BackendEfficiencyRow
-        return BackendEfficiencyRow(**kw)
-
     def test_headline_and_metrics_rendered(self) -> None:
         _, dashboard = _reload()
         from orchestrator import dashboard_theme as theme
@@ -1548,6 +1623,10 @@ class BackendEfficiencyCardHtmlTest(unittest.TestCase):
         self.assertIn("ba&lt;ck&gt;", html)
         self.assertNotIn("ba<ck>", html)
 
+    def _row(self, **kw):
+        from orchestrator.analytics.read import BackendEfficiencyRow
+        return BackendEfficiencyRow(**kw)
+
 
 class CostCoverageBarHtmlTest(unittest.TestCase):
     """The cost-attribution coverage bar sizes segments by token share
@@ -1555,12 +1634,6 @@ class CostCoverageBarHtmlTest(unittest.TestCase):
     only when it does not -- a few high-token runs can dominate cost
     while looking like a thin slice of the run count.
     """
-
-    def _row(self, source, runs, tokens):
-        from orchestrator.analytics.read import CostCoverageRow
-        return CostCoverageRow(
-            cost_source=source, runs=runs, total_tokens=tokens
-        )
 
     def test_segments_sized_by_token_share(self) -> None:
         _, dashboard = _reload()
@@ -1579,7 +1652,10 @@ class CostCoverageBarHtmlTest(unittest.TestCase):
         _, dashboard = _reload()
         from orchestrator import dashboard_theme as theme
         # No token volume yet -> size by run share: 3 / 4 = 75%.
-        rows = [self._row(COST_SOURCE_REPORTED, 3, 0), self._row("unknown", 1, 0)]
+        rows = [
+            self._row(COST_SOURCE_REPORTED, 3, 0),
+            self._row("unknown", 1, 0),
+        ]
         html = dashboard._cost_coverage_bar_html(rows, theme=theme)
         self.assertIn("width:75.0%", html)
 
@@ -1590,6 +1666,12 @@ class CostCoverageBarHtmlTest(unittest.TestCase):
         html = dashboard._cost_coverage_bar_html(rows, theme=theme)
         self.assertIn("src&lt;&amp;&gt;", html)
         self.assertNotIn("src<&>", html)
+
+    def _row(self, source, runs, tokens):
+        from orchestrator.analytics.read import CostCoverageRow
+        return CostCoverageRow(
+            cost_source=source, runs=runs, total_tokens=tokens
+        )
 
 
 class ReliabilityTilesHtmlTest(unittest.TestCase):
@@ -1607,7 +1689,7 @@ class ReliabilityTilesHtmlTest(unittest.TestCase):
             (FULL_WINDOW_TIMEOUTS, KPI_TIMEOUTS, "bad"),
         ]
         html = dashboard._reliability_tiles_html(
-            tiles, fmt_num=lambda n: f"{n}"
+            tiles, fmt_num=lambda count: f"{count}"
         )
         self.assertIn("orch-rel-tiles", html)
         self.assertIn(f">{FULL_WINDOW_AGENT_RUNS}<", html)
@@ -1632,7 +1714,7 @@ class BuildReadKeysTest(unittest.TestCase):
 
     def test_current_and_previous_keys(self) -> None:
         _, dashboard = _reload()
-        window = dashboard.to_window(MAY_22, MAY_28)
+        window = dashboard.to_window(MAY22, MAY28)
         key, prev_key = dashboard._build_read_keys(
             window=window,
             repo_filter=CACHE_REPO,
@@ -1681,27 +1763,27 @@ class DashboardDataPrepTest(unittest.TestCase):
         )
         ts_points = [
             TimeSeriesPoint(
-                day=MAY_1, event=EVENT_AGENT_EXIT, count=1,
+                day=MAY01, event=EVENT_AGENT_EXIT, count=1,
                 cost_usd=1.5, input_tokens=10, output_tokens=5,
                 cache_read_tokens=2, cache_write_tokens=3,
             ),
             TimeSeriesPoint(
-                day=MAY_1, event=EVENT_AGENT_EXIT, count=1,
+                day=MAY01, event=EVENT_AGENT_EXIT, count=1,
                 cost_usd=0.5, input_tokens=1, output_tokens=2,
             ),
             TimeSeriesPoint(
-                day=MAY_7, event=EVENT_AGENT_EXIT, count=1,
+                day=MAY07, event=EVENT_AGENT_EXIT, count=1,
                 cost_usd=4.0, input_tokens=2, output_tokens=3,
                 cache_read_tokens=1, cache_write_tokens=1,
             ),
         ]
         throughput_rows = [
-            ThroughputDayRow(day=MAY_1, resolved=2, rejected=1),
-            ThroughputDayRow(day=MAY_7, resolved=0, rejected=1),
+            ThroughputDayRow(day=MAY01, resolved=2, rejected=1),
+            ThroughputDayRow(day=MAY07, resolved=0, rejected=1),
         ]
         review_round_rows = [
-            ReviewRoundBucketRow(bucket="0", runs=2, total_cost_usd=5.0),
-            ReviewRoundBucketRow(bucket="1", runs=1, total_cost_usd=3.0),
+            ReviewRoundBucketRow(bucket=BUCKET_INITIAL, runs=2, total_cost_usd=5.0),
+            ReviewRoundBucketRow(bucket=BUCKET_FIRST_ROUND, runs=1, total_cost_usd=3.0),
         ]
 
         kpis, resolved, rejected = dashboard._build_kpi_strip_data(
@@ -1717,7 +1799,8 @@ class DashboardDataPrepTest(unittest.TestCase):
         )
 
         by_label = {kpi["label"]: kpi for kpi in kpis}
-        self.assertEqual((resolved, rejected), (2, 2))
+        self.assertEqual(resolved, 2)
+        self.assertEqual(rejected, 2)
         self.assertEqual(by_label[KPI_TOTAL_TOKENS]["value"], "40")
         self.assertEqual(by_label[KPI_TOTAL_TOKENS]["delta"], 1.0)
         self.assertEqual(by_label[KPI_TOTAL_TOKENS]["spark"], [23.0, 7.0])
@@ -1733,17 +1816,17 @@ class DashboardDataPrepTest(unittest.TestCase):
         from orchestrator.analytics.read import BackendDailyTokensRow
 
         rows = [
-            BackendDailyTokensRow(day=MAY_1, backend=BACKEND_CLAUDE, total_tokens=10),
-            BackendDailyTokensRow(day=MAY_1, backend=BACKEND_CLAUDE, total_tokens=5),
-            BackendDailyTokensRow(day=MAY_1, backend=BACKEND_CODEX, total_tokens=3),
-            BackendDailyTokensRow(day=MAY_7, backend=BACKEND_CLAUDE, total_tokens=8),
+            BackendDailyTokensRow(day=MAY01, backend=BACKEND_CLAUDE, total_tokens=10),
+            BackendDailyTokensRow(day=MAY01, backend=BACKEND_CLAUDE, total_tokens=5),
+            BackendDailyTokensRow(day=MAY01, backend=BACKEND_CODEX, total_tokens=3),
+            BackendDailyTokensRow(day=MAY07, backend=BACKEND_CLAUDE, total_tokens=8),
         ]
 
         self.assertEqual(
             dashboard._backend_tokens_by_day(rows),
             {
-                MAY_1: {BACKEND_CLAUDE: 15.0, BACKEND_CODEX: 3.0},
-                MAY_7: {BACKEND_CLAUDE: 8.0},
+                MAY01: {BACKEND_CLAUDE: 15.0, BACKEND_CODEX: 3.0},
+                MAY07: {BACKEND_CLAUDE: 8.0},
             },
         )
 
@@ -1770,7 +1853,7 @@ class CacheKeyTest(unittest.TestCase):
 
     def test_lists_become_tuples(self) -> None:
         _, dashboard = _reload()
-        window = dashboard.to_window(MAY_1, MAY_7)
+        window = dashboard.to_window(MAY01, MAY07)
         key = dashboard.cache_key(
             window, CACHE_REPO,
             list(EVENT_NAMES), list(STAGE_NAMES), ISSUE_NUMBER,
@@ -1790,7 +1873,7 @@ class CacheKeyTest(unittest.TestCase):
 
     def test_none_is_preserved(self) -> None:
         _, dashboard = _reload()
-        window = dashboard.to_window(MAY_1, MAY_7)
+        window = dashboard.to_window(MAY01, MAY07)
         key = dashboard.cache_key(window, None, None, None, None)
         self.assertEqual(
             key, (window.start, window.end, None, None, None, None)
@@ -1801,7 +1884,7 @@ class CacheKeyTest(unittest.TestCase):
         # nothing"; the cache key must keep the empty tuple distinct
         # from None so the two SQL shapes do not collide in cache.
         _, dashboard = _reload()
-        window = dashboard.to_window(MAY_1, MAY_7)
+        window = dashboard.to_window(MAY01, MAY07)
         empty = dashboard.cache_key(window, CACHE_REPO, [], [], None)
         none = dashboard.cache_key(window, CACHE_REPO, None, None, None)
         self.assertNotEqual(empty, none)
@@ -1809,59 +1892,113 @@ class CacheKeyTest(unittest.TestCase):
         self.assertEqual(empty[4], ())
 
 
+# Every read member the extraction owns (functions + the read-plan
+# dataclass), each of which carries a `__module__`.
+_MOVED_READ_MEMBERS = (
+    "_filter_list",
+    "_read_filter_kwargs",
+    "_scoped_read",
+    "_read_filtered",
+    "_read_data_extent",
+    "_read_filter_options",
+    "_read_static_metadata",
+    *WIDGET_READER_WRAPPER_NAMES,
+    "_widget_task",
+    "_first_wave_readers",
+    "_second_wave_readers",
+    "_widget_readers",
+    "_build_read_keys",
+    "_dispatch_reads",
+    "_log_dashboard_load",
+    "_run_read_waves",
+    "_DashboardReadPlan",
+)
+
+# The read cache / load constants re-exported alongside the members.
+_READS_FACADE_CONSTANTS = (
+    "DEFAULT_RECENT_AGENT_EXITS",
+    "STATIC_METADATA_TTL_SECONDS",
+    "LOADING_INDICATOR_MESSAGE",
+)
+
+# The moved page-pipeline members the facade re-exports (functions +
+# page-state dataclasses), each of which carries a `__module__`. The
+# purely internal token / layout math helpers are not re-exported and
+# stay private to the widgets module.
+_MOVED_WIDGET_MEMBERS = (
+    "_DashboardModules",
+    "_DashboardFilters",
+    "_DashboardControls",
+    "_DashboardPage",
+    "_backend_tokens_by_day",
+    "_load_dashboard_data",
+    "_render_topbar_and_meta",
+    "_render_first_wave",
+    "_render_chart_widgets",
+    "_render_remaining_widgets",
+    "_render_dashboard_widgets",
+    "_render_dashboard_footer",
+    "_render_no_data",
+    "_render_empty_window",
+    "_render_hero_usage",
+    "_render_stage_review_bars",
+    "_render_issues_and_backends",
+    "_render_repo_and_reliability",
+    "_render_activity_heatmap",
+    "_render_skill_triggers",
+    "_render_skill_matrix_expander",
+    "_render_recent_runs",
+    "_render_drilldown_view",
+)
+
+# The page-level constants re-exported alongside the widget members (in
+# the facade `__all__`, unlike the module-private members above).
+_WIDGETS_FACADE_CONSTANTS = (
+    "PLOTLY_CONFIG",
+    "NO_DATA_MESSAGE",
+    "EMPTY_WINDOW_MESSAGE",
+)
+
+# The inline-HTML card builders the facade re-exports from the cards leaf.
+_MOVED_CARD_MEMBERS = (
+    "_card_header_html",
+    "_insights_html",
+    "_backend_efficiency_card_html",
+    "_cost_coverage_bar_html",
+    "_reliability_tiles_html",
+)
+
+# The KPI-strip members the facade re-exports from the kpi-strip leaf.
+_MOVED_KPI_MEMBERS = (
+    "_KpiInputs",
+    "_build_kpi_strip_data",
+)
+
+
 class ReadOrchestrationExtractionTest(unittest.TestCase):
     """The dashboard read orchestration -- filter-to-query adapters,
     cached reader wrappers, reader registries, the staged parallel
     dispatch + two-wave data load, the static-metadata load, and the
     load-timing log -- lives in `orchestrator.dashboard_reads`, and
-    `orchestrator.dashboard` re-exports every member under its original
-    name so the historical `dashboard.<name>` surface and its test patch
+    `orchestrator.dashboard` re-exports every member under the same
+    name so the `dashboard.<name>` surface and its test patch
     points keep resolving to the same object.
     """
 
-    # Every read member the extraction owns (functions + the read-plan
-    # dataclass), each of which carries a `__module__`.
-    _MOVED_READ_MEMBERS = (
-        "_filter_list",
-        "_read_filter_kwargs",
-        "_scoped_read",
-        "_read_filtered",
-        "_read_data_extent",
-        "_read_filter_options",
-        "_read_static_metadata",
-        *WIDGET_READER_WRAPPER_NAMES,
-        "_widget_task",
-        "_first_wave_readers",
-        "_second_wave_readers",
-        "_widget_readers",
-        "_build_read_keys",
-        "_dispatch_reads",
-        "_log_dashboard_load",
-        "_run_read_waves",
-        "_DashboardReadPlan",
-    )
-
-    # The cache / load constants re-exported alongside the members.
-    _FACADE_CONSTANTS = (
-        "DEFAULT_RECENT_AGENT_EXITS",
-        "STATIC_METADATA_TTL_SECONDS",
-        "LOADING_INDICATOR_MESSAGE",
-    )
-
     def test_read_members_defined_in_reads_module(self) -> None:
-        _reload({ANALYTICS_DB_URL_ENV: CONFIGURED_DB_URL})
-        reads = sys.modules["orchestrator.dashboard_reads"]
-        for name in self._MOVED_READ_MEMBERS:
+        _reload(CONFIGURED_DB_ENV)
+        reads = sys.modules[DASHBOARD_READS_MODULE]
+        for name in _MOVED_READ_MEMBERS:
             with self.subTest(name=name):
                 self.assertEqual(
                     getattr(reads, name).__module__,
-                    "orchestrator.dashboard_reads",
+                    DASHBOARD_READS_MODULE,
                 )
 
-    def test_facade_reexports_share_the_reads_objects(self) -> None:
-        _, dashboard = _reload({ANALYTICS_DB_URL_ENV: CONFIGURED_DB_URL})
-        reads = sys.modules["orchestrator.dashboard_reads"]
-        for name in (*self._MOVED_READ_MEMBERS, *self._FACADE_CONSTANTS):
+    def test_facade_reexports_reads_objects(self) -> None:
+        _, dashboard = _reload(CONFIGURED_DB_ENV)
+        reads = sys.modules[DASHBOARD_READS_MODULE]
+        for name in (*_MOVED_READ_MEMBERS, *_READS_FACADE_CONSTANTS):
             with self.subTest(name=name):
                 self.assertTrue(
                     hasattr(dashboard, name),
@@ -1876,63 +2013,25 @@ class WidgetRenderingExtractionTest(unittest.TestCase):
     footer, and the page-state dataclasses the pipeline threads -- lives in
     `orchestrator.dashboard_widgets`, and `orchestrator.dashboard`
     re-exports the members the page pipeline and these tests reach under
-    their original names so the historical `dashboard.<name>` surface keeps
-    resolving to the same object. The KPI-strip aggregations live in
+    the same names so the `dashboard.<name>` surface keeps resolving to the
+    same object. The KPI-strip aggregations live in
     `orchestrator.dashboard_kpi_strip` (`KpiStripExtractionTest`).
     """
 
-    # The moved page-pipeline members the facade re-exports (functions +
-    # page-state dataclasses), each of which carries a `__module__`. The
-    # purely internal token / layout math helpers are not re-exported and
-    # stay private to the widgets module.
-    _MOVED_WIDGET_MEMBERS = (
-        "_DashboardModules",
-        "_DashboardFilters",
-        "_DashboardControls",
-        "_DashboardPage",
-        "_backend_tokens_by_day",
-        "_load_dashboard_data",
-        "_render_topbar_and_meta",
-        "_render_first_wave",
-        "_render_chart_widgets",
-        "_render_remaining_widgets",
-        "_render_dashboard_widgets",
-        "_render_dashboard_footer",
-        "_render_no_data",
-        "_render_empty_window",
-        "_render_hero_usage",
-        "_render_stage_review_bars",
-        "_render_issues_and_backends",
-        "_render_repo_and_reliability",
-        "_render_activity_heatmap",
-        "_render_skill_triggers",
-        "_render_skill_matrix_expander",
-        "_render_recent_runs",
-        "_render_drilldown_view",
-    )
-
-    # The page-level constants re-exported alongside the members (in the
-    # facade `__all__`, unlike the module-private members above).
-    _FACADE_CONSTANTS = (
-        "PLOTLY_CONFIG",
-        "NO_DATA_MESSAGE",
-        "EMPTY_WINDOW_MESSAGE",
-    )
-
     def test_widget_members_defined_in_widgets_module(self) -> None:
-        _reload({ANALYTICS_DB_URL_ENV: CONFIGURED_DB_URL})
-        widgets = sys.modules["orchestrator.dashboard_widgets"]
-        for name in self._MOVED_WIDGET_MEMBERS:
+        _reload(CONFIGURED_DB_ENV)
+        widgets = sys.modules[DASHBOARD_WIDGETS_MODULE]
+        for name in _MOVED_WIDGET_MEMBERS:
             with self.subTest(name=name):
                 self.assertEqual(
                     getattr(widgets, name).__module__,
-                    "orchestrator.dashboard_widgets",
+                    DASHBOARD_WIDGETS_MODULE,
                 )
 
-    def test_facade_reexports_share_the_widgets_objects(self) -> None:
-        _, dashboard = _reload({ANALYTICS_DB_URL_ENV: CONFIGURED_DB_URL})
-        widgets = sys.modules["orchestrator.dashboard_widgets"]
-        for name in (*self._MOVED_WIDGET_MEMBERS, *self._FACADE_CONSTANTS):
+    def test_facade_reexports_widgets_objects(self) -> None:
+        _, dashboard = _reload(CONFIGURED_DB_ENV)
+        widgets = sys.modules[DASHBOARD_WIDGETS_MODULE]
+        for name in (*_MOVED_WIDGET_MEMBERS, *_WIDGETS_FACADE_CONSTANTS):
             with self.subTest(name=name):
                 self.assertTrue(
                     hasattr(dashboard, name),
@@ -1946,33 +2045,25 @@ class WidgetRenderingExtractionTest(unittest.TestCase):
 class CardHtmlExtractionTest(unittest.TestCase):
     """The insight / backend-efficiency / cost-coverage / reliability-tile
     inline-HTML card family lives in `orchestrator.dashboard_cards`, and
-    `orchestrator.dashboard` re-exports each builder under its original
-    name so the page pipeline and the historical `dashboard.<name>`
+    `orchestrator.dashboard` re-exports each builder under the same
+    name so the page pipeline and the `dashboard.<name>`
     surface keep resolving to the same object.
     """
 
-    _MOVED_CARD_MEMBERS = (
-        "_card_header_html",
-        "_insights_html",
-        "_backend_efficiency_card_html",
-        "_cost_coverage_bar_html",
-        "_reliability_tiles_html",
-    )
-
     def test_card_members_defined_in_cards_module(self) -> None:
-        _reload({ANALYTICS_DB_URL_ENV: CONFIGURED_DB_URL})
-        cards = sys.modules["orchestrator.dashboard_cards"]
-        for name in self._MOVED_CARD_MEMBERS:
+        _reload(CONFIGURED_DB_ENV)
+        cards = sys.modules[DASHBOARD_CARDS_MODULE]
+        for name in _MOVED_CARD_MEMBERS:
             with self.subTest(name=name):
                 self.assertEqual(
                     getattr(cards, name).__module__,
-                    "orchestrator.dashboard_cards",
+                    DASHBOARD_CARDS_MODULE,
                 )
 
-    def test_facade_reexports_share_the_cards_objects(self) -> None:
-        _, dashboard = _reload({ANALYTICS_DB_URL_ENV: CONFIGURED_DB_URL})
-        cards = sys.modules["orchestrator.dashboard_cards"]
-        for name in self._MOVED_CARD_MEMBERS:
+    def test_facade_reexports_cards_objects(self) -> None:
+        _, dashboard = _reload(CONFIGURED_DB_ENV)
+        cards = sys.modules[DASHBOARD_CARDS_MODULE]
+        for name in _MOVED_CARD_MEMBERS:
             with self.subTest(name=name):
                 self.assertTrue(
                     hasattr(dashboard, name),
@@ -1987,29 +2078,24 @@ class KpiStripExtractionTest(unittest.TestCase):
     into the four KPI tiles and the resolved / rejected throughput totals
     -- live in `orchestrator.dashboard_kpi_strip`. `orchestrator.dashboard`
     re-exports the two members the page pipeline and these tests reach
-    (`_KpiInputs` / `_build_kpi_strip_data`) under their original names, and
+    (`_KpiInputs` / `_build_kpi_strip_data`) under the same names, and
     `dashboard_widgets` imports `_KpiInputs` back from the leaf.
     """
 
-    _MOVED_KPI_MEMBERS = (
-        "_KpiInputs",
-        "_build_kpi_strip_data",
-    )
-
     def test_kpi_members_defined_in_kpi_strip_module(self) -> None:
-        _reload({ANALYTICS_DB_URL_ENV: CONFIGURED_DB_URL})
-        kpi_strip = sys.modules["orchestrator.dashboard_kpi_strip"]
-        for name in self._MOVED_KPI_MEMBERS:
+        _reload(CONFIGURED_DB_ENV)
+        kpi_strip = sys.modules[DASHBOARD_KPI_STRIP_MODULE]
+        for name in _MOVED_KPI_MEMBERS:
             with self.subTest(name=name):
                 self.assertEqual(
                     getattr(kpi_strip, name).__module__,
-                    "orchestrator.dashboard_kpi_strip",
+                    DASHBOARD_KPI_STRIP_MODULE,
                 )
 
-    def test_facade_reexports_share_the_kpi_strip_objects(self) -> None:
-        _, dashboard = _reload({ANALYTICS_DB_URL_ENV: CONFIGURED_DB_URL})
-        kpi_strip = sys.modules["orchestrator.dashboard_kpi_strip"]
-        for name in self._MOVED_KPI_MEMBERS:
+    def test_facade_reexports_kpi_strip_objects(self) -> None:
+        _, dashboard = _reload(CONFIGURED_DB_ENV)
+        kpi_strip = sys.modules[DASHBOARD_KPI_STRIP_MODULE]
+        for name in _MOVED_KPI_MEMBERS:
             with self.subTest(name=name):
                 self.assertTrue(
                     hasattr(dashboard, name),
@@ -2020,9 +2106,9 @@ class KpiStripExtractionTest(unittest.TestCase):
                 )
 
     def test_widgets_imports_kpi_inputs_from_the_leaf(self) -> None:
-        _reload({ANALYTICS_DB_URL_ENV: CONFIGURED_DB_URL})
-        widgets = sys.modules["orchestrator.dashboard_widgets"]
-        kpi_strip = sys.modules["orchestrator.dashboard_kpi_strip"]
+        _reload(CONFIGURED_DB_ENV)
+        widgets = sys.modules[DASHBOARD_WIDGETS_MODULE]
+        kpi_strip = sys.modules[DASHBOARD_KPI_STRIP_MODULE]
         self.assertIs(widgets._KpiInputs, kpi_strip._KpiInputs)
 
 
@@ -2050,10 +2136,10 @@ class _RecordingStreamlit:
         return _NullContext()
 
     def markdown(self, *args, **kwargs) -> None:
-        return None
+        """No-op stand-in for `st.markdown`."""
 
     def selectbox(self, *args, **kwargs) -> None:
-        return None
+        """No-op stand-in for `st.selectbox`."""
 
     def plotly_chart(self, figure, *, config=None, **kwargs) -> None:
         self.plotly_configs.append(config)
@@ -2075,30 +2161,30 @@ class FacadePatchInterceptionTest(unittest.TestCase):
     def test_patched_run_read_waves_drives_data_load(self) -> None:
         # `_load_dashboard_data` reaches the read-wave dispatch through the
         # facade, so a patched `dashboard._run_read_waves` supplies the data.
-        _, dashboard = _reload({ANALYTICS_DB_URL_ENV: CONFIGURED_DB_URL})
-        results = {"summary": object()}
+        _, dashboard = _reload(CONFIGURED_DB_ENV)
+        read_results = {"summary": object()}
         kpis = object()
         modules = SimpleNamespace(st=object())
         page = SimpleNamespace(reads=object())
         with patch.object(
-            dashboard, "_run_read_waves", return_value=(results, kpis),
+            dashboard, RUN_READ_WAVES_MEMBER, return_value=(read_results, kpis),
         ) as stub:
             loaded = dashboard._load_dashboard_data(modules, page)
-        stub.assert_called_once()
-        self.assertIs(loaded.read_results, results)
+            stub.assert_called_once()
+        self.assertIs(loaded.read_results, read_results)
         self.assertIs(loaded.kpis, kpis)
 
-    def test_patched_widget_sections_drive_page_render(self) -> None:
+    def test_patched_sections_drive_page_render(self) -> None:
         # `_render_dashboard_widgets` reaches both wave renderers through the
         # facade, so patched stubs run in place of the real sections.
-        _, dashboard = _reload({ANALYTICS_DB_URL_ENV: CONFIGURED_DB_URL})
+        _, dashboard = _reload(CONFIGURED_DB_ENV)
         calls: list[str] = []
         with patch.object(
             dashboard, "_render_chart_widgets",
-            side_effect=lambda *a: calls.append("chart"),
+            side_effect=lambda *args: calls.append("chart"),
         ), patch.object(
             dashboard, "_render_remaining_widgets",
-            side_effect=lambda *a: calls.append("remaining"),
+            side_effect=lambda *args: calls.append("remaining"),
         ):
             dashboard._render_dashboard_widgets(object(), object(), object())
         self.assertEqual(calls, ["chart", "remaining"])
@@ -2108,7 +2194,7 @@ class FacadePatchInterceptionTest(unittest.TestCase):
         # Plotly a plain-dict copy, so patching `dashboard.PLOTLY_CONFIG`
         # changes the config the chart receives (never the mapping proxy,
         # which is not JSON-serializable).
-        _, dashboard = _reload({ANALYTICS_DB_URL_ENV: CONFIGURED_DB_URL})
+        _, dashboard = _reload(CONFIGURED_DB_ENV)
         fake_st = _RecordingStreamlit()
         sentinel = {"displayModeBar": True, "scrollZoom": True}
         with patch.object(dashboard, "PLOTLY_CONFIG", sentinel):
@@ -2137,21 +2223,6 @@ class CachedReadConnectionScopingTest(_MainSourceTest):
     Streamlit and Plotly dependency group.
     """
 
-    def _readers_source(self) -> str:
-        return self._combined_source(WIDGET_READER_WRAPPER_NAMES)
-
-    def _read_filtered_source(self) -> str:
-        return self._source_of("_read_filtered")
-
-    def _metadata_source(self) -> str:
-        return self._source_of("_read_static_metadata")
-
-    def _drilldown_source(self) -> str:
-        return self._source_of("_render_drilldown_view")
-
-    def _combined_source(self, names) -> str:
-        return "\n\n".join(self._source_of(name) for name in names)
-
     def test_reads_scope_through_analytics_connection(self) -> None:
         # `_scoped_read` is the one place the per-thread persistent socket
         # is checked out via `analytics_connection`; the cached widget
@@ -2160,7 +2231,7 @@ class CachedReadConnectionScopingTest(_MainSourceTest):
         # widgets.
         self.assertIn(
             "analytics_read.analytics_connection()",
-            self._source_of("_scoped_read"),
+            self._source_of(SCOPED_READ_MEMBER),
         )
         self.assertIn("_read_filtered(", self._readers_source())
         for label, src in (
@@ -2184,9 +2255,7 @@ class CachedReadConnectionScopingTest(_MainSourceTest):
                 src = self._source_of(name)
                 marker = f"def {name}("
                 self.assertIn(marker, src)
-                head = src.index(marker)
-                tail = src.index("):", head)
-                signature = src[head:tail]
+                signature = _signature_slice(src, marker)
                 self.assertNotIn(
                     " conn", signature,
                     f"{name} must not accept a `conn` argument "
@@ -2215,7 +2284,7 @@ class CachedReadConnectionScopingTest(_MainSourceTest):
         self.assertIn(SCOPED_READ_CALL_FRAGMENT, self._drilldown_source())
         # `_scoped_read` is the single place the scoped connection is
         # opened and forwarded to the read helper.
-        scoped_src = self._source_of("_scoped_read")
+        scoped_src = self._source_of(SCOPED_READ_MEMBER)
         self.assertIn("analytics_read.analytics_connection()", scoped_src)
         self.assertIn("conn=conn", scoped_src)
 
@@ -2234,11 +2303,26 @@ class CachedReadConnectionScopingTest(_MainSourceTest):
         # And the `prev_summary` entry in the reader fan-out must
         # dispatch through `_read_prev_kpi` so the lightweight path
         # is the one that actually fires when the dashboard renders.
-        src = self._source_of("_first_wave_readers")
+        src = self._source_of(FIRST_WAVE_READERS_MEMBER)
         self.assertIn(
             '_widget_task(st, "prev_summary", _read_prev_kpi, prev_key)',
             src,
         )
+
+    def _readers_source(self) -> str:
+        return self._combined_source(WIDGET_READER_WRAPPER_NAMES)
+
+    def _read_filtered_source(self) -> str:
+        return self._source_of("_read_filtered")
+
+    def _metadata_source(self) -> str:
+        return self._source_of("_read_static_metadata")
+
+    def _drilldown_source(self) -> str:
+        return self._source_of("_render_drilldown_view")
+
+    def _combined_source(self, names) -> str:
+        return "\n\n".join(self._source_of(name) for name in names)
 
 
 class AnalyticsConnectionExposureTest(unittest.TestCase):
@@ -2338,7 +2422,7 @@ class FacadeReExportCompatibilityTest(unittest.TestCase):
 
     def test_parallel_read_internals_are_reexported(self) -> None:
         _, dashboard = _reload({ANALYTICS_DB_URL_ENV: ""})
-        import orchestrator.dashboard_state as state
+        state = importlib.import_module(DASHBOARD_STATE_MODULE)
         # Each facade name is the very object the extracted module
         # defines -- a genuine re-export, not a shadow copy.
         self.assertIs(
@@ -2356,7 +2440,7 @@ class DashboardCompatibilityHelperTest(_MainSourceTest):
     def test_topbar_signature_is_stable(self) -> None:
         import inspect
 
-        _, dashboard = _reload({ANALYTICS_DB_URL_ENV: CONFIGURED_DB_URL})
+        _, dashboard = _reload(CONFIGURED_DB_ENV)
         self.assertEqual(
             tuple(inspect.signature(dashboard._topbar_html).parameters),
             (
@@ -2369,10 +2453,10 @@ class DashboardCompatibilityHelperTest(_MainSourceTest):
             ),
         )
 
-    def test_drilldown_signature_and_typed_delegate_are_stable(self) -> None:
+    def test_drilldown_signature_and_delegate_stable(self) -> None:
         import inspect
 
-        _, dashboard = _reload({ANALYTICS_DB_URL_ENV: CONFIGURED_DB_URL})
+        _, dashboard = _reload(CONFIGURED_DB_ENV)
         self.assertEqual(
             tuple(inspect.signature(dashboard._render_drilldown).parameters),
             (
@@ -2408,8 +2492,8 @@ class FanOutReadsSequentialTest(unittest.TestCase):
             ("b", partial(_record_reader_call, "b", 2, order)),
             ("c", partial(_record_reader_call, "c", 3, order)),
         ]
-        results = dashboard._fan_out_reads(readers, parallel=False)
-        self.assertEqual(results, {"a": 1, "b": 2, "c": 3})
+        read_results = dashboard._fan_out_reads(readers, parallel=False)
+        self.assertEqual(read_results, {"a": 1, "b": 2, "c": 3})
         # Sequential path runs in submission order so a deterministic
         # log line / error message references the right reader.
         self.assertEqual(order, ["a", "b", "c"])
@@ -2453,12 +2537,14 @@ class FanOutReadsParallelTest(unittest.TestCase):
     def test_all_results_returned_keyed_by_name(self) -> None:
         _, dashboard = _reload()
 
-        readers = [(f"r{i}", partial(_return_value, i)) for i in range(5)]
-        results = dashboard._fan_out_reads(
+        readers = [
+            (f"r{idx}", partial(_return_value, idx)) for idx in range(5)
+        ]
+        read_results = dashboard._fan_out_reads(
             readers, parallel=True, max_workers=4
         )
         self.assertEqual(
-            results, {f"r{i}": i for i in range(5)}
+            read_results, {f"r{idx}": idx for idx in range(5)}
         )
 
     def test_each_reader_runs_once_on_worker(self) -> None:
@@ -2475,14 +2561,17 @@ class FanOutReadsParallelTest(unittest.TestCase):
         lock = threading.Lock()
 
         readers = [
-            (f"r{i}", partial(_record_threaded_reader, f"r{i}", calls, threads, lock))
-            for i in range(8)
+            (
+                f"r{idx}",
+                partial(_record_threaded_reader, f"r{idx}", calls, threads, lock),
+            )
+            for idx in range(8)
         ]
         dashboard._fan_out_reads(
             readers, parallel=True, max_workers=4
         )
         self.assertEqual(set(calls.values()), {1})
-        self.assertEqual(set(calls), {f"r{i}" for i in range(8)})
+        self.assertEqual(set(calls), {f"r{idx}" for idx in range(8)})
         self.assertNotIn(threading.get_ident(), threads)
 
     def test_parallel_wall_clock_beats_sequential_sum(self) -> None:
@@ -2496,15 +2585,15 @@ class FanOutReadsParallelTest(unittest.TestCase):
         delay = 0.08
 
         readers = [
-            (f"r{i}", partial(_sleep_then_return, delay, "ok"))
-            for i in range(4)
+            (f"r{idx}", partial(_sleep_then_return, delay, "ok"))
+            for idx in range(4)
         ]
         t0 = time.perf_counter()
-        results = dashboard._fan_out_reads(
+        read_results = dashboard._fan_out_reads(
             readers, parallel=True, max_workers=4
         )
         elapsed = time.perf_counter() - t0
-        self.assertEqual(len(results), 4)
+        self.assertEqual(len(read_results), 4)
         # Sequential sum would be 4 * delay = 320 ms; one wave on
         # four workers should land well under 2 * delay.
         self.assertLess(elapsed, delay * 2.5)
@@ -2575,9 +2664,9 @@ class MainRenderDispatchTest(_MainSourceTest):
             ("_render_dashboard", "_render_no_data("),
             ("_prepare_dashboard_page", "_widget_readers("),
             ("_load_dashboard_data", "_run_read_waves("),
-            ("_run_read_waves", "_dispatch_reads("),
-            ("_run_read_waves", "_log_dashboard_load("),
-            ("_render_first_wave", "_render_empty_window("),
+            (RUN_READ_WAVES_MEMBER, "_dispatch_reads("),
+            (RUN_READ_WAVES_MEMBER, "_log_dashboard_load("),
+            (RENDER_FIRST_WAVE_MEMBER, "_render_empty_window("),
         ):
             with self.subTest(helper=helper, marker=marker):
                 self.assertIn(marker, self._source_of(helper))
@@ -2609,7 +2698,7 @@ class MainParallelFanOutWiringTest(_MainSourceTest):
             "_run_read_waves(", self._source_of("_load_dashboard_data"),
         )
         self.assertIn(
-            "_dispatch_reads(", self._source_of("_run_read_waves"),
+            "_dispatch_reads(", self._source_of(RUN_READ_WAVES_MEMBER),
         )
         self.assertIn(
             "_fan_out_reads(", self._source_of("_dispatch_reads"),
@@ -2628,7 +2717,7 @@ class MainParallelFanOutWiringTest(_MainSourceTest):
         # single grep; it is emitted by `_log_dashboard_load`, which the
         # `_run_read_waves` data load calls (clocked from the
         # `perf_counter` stamped in `_prepare_dashboard_page`).
-        load_src = self._source_of("_run_read_waves")
+        load_src = self._source_of(RUN_READ_WAVES_MEMBER)
         prepare_src = self._source_of("_prepare_dashboard_page")
         self.assertIn("_log_dashboard_load(", load_src)
         self.assertIn("perf_counter()", prepare_src)
@@ -2658,7 +2747,7 @@ class SkillMatrixWiringTest(_MainSourceTest):
     """
 
     def test_matrix_read_calls_matrix_read_model(self) -> None:
-        src = self._source_of("_read_skill_trigger_matrix")
+        src = self._source_of(SKILL_MATRIX_READER_MEMBER)
         self.assertIn("analytics_read.get_skill_trigger_matrix", src)
 
     def test_matrix_read_forwards_scoped_connection(self) -> None:
@@ -2666,12 +2755,12 @@ class SkillMatrixWiringTest(_MainSourceTest):
         # `_read_filtered` to `_scoped_read`, which checks out the thread-local
         # connection and forwards it to the read helper, so the matrix
         # read shares the open socket rather than opening its own.
-        src = self._source_of("_read_skill_trigger_matrix")
+        src = self._source_of(SKILL_MATRIX_READER_MEMBER)
         self.assertIn("_read_filtered(", src)
         self.assertIn("analytics_read.get_skill_trigger_matrix", src)
         filtered_src = self._source_of("_read_filtered")
         self.assertIn(SCOPED_READ_CALL_FRAGMENT, filtered_src)
-        scoped_src = self._source_of("_scoped_read")
+        scoped_src = self._source_of(SCOPED_READ_MEMBER)
         self.assertIn("analytics_read.analytics_connection()", scoped_src)
         self.assertIn("conn=conn", scoped_src)
 
@@ -2679,14 +2768,14 @@ class SkillMatrixWiringTest(_MainSourceTest):
         # `conn` must not appear in the wrapper's parameter list -- it
         # would land in the `st.cache_data` key and crash on the
         # unhashable psycopg connection.
-        src = self._source_of("_read_skill_trigger_matrix")
+        src = self._source_of(SKILL_MATRIX_READER_MEMBER)
         marker = "def _read_skill_trigger_matrix("
         head = src.index(marker)
         tail = src.index("):", head)
         self.assertNotIn(" conn", src[head:tail])
 
     def test_matrix_dispatched_in_second_wave(self) -> None:
-        src = self._source_of("_second_wave_readers")
+        src = self._source_of(SECOND_WAVE_READERS_MEMBER)
         self.assertIn(
             '_widget_task(st, "skill_matrix_rows", '
             "_read_skill_trigger_matrix, key)",
@@ -2738,9 +2827,6 @@ class StaticMetadataCacheTest(_MainSourceTest):
     the topbar / sidebar round-trip on every Streamlit rerun.
     """
 
-    def _metadata_source(self) -> str:
-        return self._source_of("_read_static_metadata")
-
     def test_ttl_is_five_minutes(self) -> None:
         # Pin the constant so a future tweak changes it deliberately.
         # A 5-minute TTL is long enough to absorb the typical rerun
@@ -2790,7 +2876,7 @@ class StaticMetadataCacheTest(_MainSourceTest):
                 marker = f"def {name}("
                 head = src.index(marker)
                 tail = src.index("):", head)
-                self.assertEqual(src[head:tail + 1], marker + ")")
+                self.assertEqual(src[head:tail + 1], f"{marker})")
 
     def test_main_dispatches_through_metadata_helper(self) -> None:
         # `main` reads the extent / options through the
@@ -2807,18 +2893,12 @@ class StaticMetadataCacheTest(_MainSourceTest):
         self.assertIn("read_data_extent()", meta_src)
         self.assertIn("read_filter_options()", meta_src)
 
+    def _metadata_source(self) -> str:
+        return self._source_of("_read_static_metadata")
+
 
 class StagedRenderTest(_MainSourceTest):
     """The two read waves preserve their inputs and progressive render order."""
-
-    def _first_wave_source(self) -> str:
-        return self._source_of("_first_wave_readers")
-
-    def _second_wave_source(self) -> str:
-        return self._source_of("_second_wave_readers")
-
-    def _load_source(self) -> str:
-        return self._source_of("_run_read_waves")
 
     def test_first_wave_has_only_topbar_inputs(self) -> None:
         wave = self._first_wave_source()
@@ -2840,13 +2920,13 @@ class StagedRenderTest(_MainSourceTest):
 
     def test_topbar_and_meta_render_between_waves(self) -> None:
         load_source = self._load_source()
-        first = load_source.index("reads.first_wave")
+        first = load_source.index(DISPATCH_FIRST_WAVE)
         render = load_source.index("render_first_wave(")
-        second = load_source.index("reads.second_wave")
+        second = load_source.index(DISPATCH_SECOND_WAVE)
         self.assertLess(first, render)
         self.assertLess(render, second)
 
-        first_render_source = self._source_of("_render_first_wave")
+        first_render_source = self._source_of(RENDER_FIRST_WAVE_MEMBER)
         self.assertIn("_render_topbar_and_meta(", first_render_source)
         self.assertIn("_kpi_strip_html(", first_render_source)
         topbar_source = self._source_of("_render_topbar_and_meta")
@@ -2862,13 +2942,13 @@ class StagedRenderTest(_MainSourceTest):
         spinner = source.index(
             "with st.spinner(LOADING_INDICATOR_MESSAGE):"
         )
-        first = source.index("reads.first_wave")
-        second = source.index("reads.second_wave")
+        first = source.index(DISPATCH_FIRST_WAVE)
+        second = source.index(DISPATCH_SECOND_WAVE)
         self.assertLess(spinner, first)
         self.assertLess(spinner, second)
 
     def test_widgets_render_on_main_thread(self) -> None:
-        for helper in ("_first_wave_readers", "_second_wave_readers"):
+        for helper in (FIRST_WAVE_READERS_MEMBER, SECOND_WAVE_READERS_MEMBER):
             with self.subTest(helper=helper):
                 wave_source = self._source_of(helper)
                 self.assertIn("_widget_task(", wave_source)
@@ -2882,36 +2962,47 @@ class StagedRenderTest(_MainSourceTest):
     def test_empty_window_short_circuits_second_wave(self) -> None:
         load_source = self._load_source()
         first_render = load_source.index("render_first_wave(")
-        second = load_source.index("reads.second_wave")
+        second = load_source.index(DISPATCH_SECOND_WAVE)
         short_circuit = load_source[first_render:second]
         self.assertIn("if first_wave is None:", short_circuit)
         self.assertIn("return None", short_circuit)
 
-        first_wave_source = self._source_of("_render_first_wave")
+        first_wave_source = self._source_of(RENDER_FIRST_WAVE_MEMBER)
         empty_check = first_wave_source.index("summary.total_events == 0")
         empty_render = first_wave_source.index("_render_empty_window(")
         self.assertLess(empty_check, empty_render)
         self.assertIn("return None", first_wave_source[empty_check:])
+
+    def _first_wave_source(self) -> str:
+        return self._source_of(FIRST_WAVE_READERS_MEMBER)
+
+    def _second_wave_source(self) -> str:
+        return self._source_of(SECOND_WAVE_READERS_MEMBER)
+
+    def _load_source(self) -> str:
+        return self._source_of(RUN_READ_WAVES_MEMBER)
 
 
 class StagedRenderErrorTest(_MainSourceTest):
     """Both read waves share error handling and retain their render order."""
 
     def test_both_waves_route_through_dispatch_helper(self) -> None:
-        source = self._source_of("_run_read_waves")
-        self.assertIn("reads.first_wave", source)
-        self.assertIn("reads.second_wave", source)
+        source = self._source_of(RUN_READ_WAVES_MEMBER)
+        self.assertIn(DISPATCH_FIRST_WAVE, source)
+        self.assertIn(DISPATCH_SECOND_WAVE, source)
         self.assertEqual(source.count("_dispatch_reads("), 2)
 
     def test_second_wave_error_after_topbar_paints(self) -> None:
-        source = self._source_of("_run_read_waves")
+        source = self._source_of(RUN_READ_WAVES_MEMBER)
         first_wave_render = source.index("render_first_wave(")
-        second_dispatch = source.index("reads.second_wave")
+        second_dispatch = source.index(DISPATCH_SECOND_WAVE)
         self.assertLess(first_wave_render, second_dispatch)
         self.assertIn(
             "_render_topbar_and_meta(",
-            self._source_of("_render_first_wave"),
+            self._source_of(RENDER_FIRST_WAVE_MEMBER),
         )
+
+
 class FanOutReadsErrorPropagationTest(unittest.TestCase):
     """The first-wave error path must NOT swallow the worker's
     `AnalyticsReadError` -- the existing fan-out helper already
@@ -2976,7 +3067,7 @@ class ShiftTsTest(unittest.TestCase):
     def test_aware_ts_converted_to_offset(self) -> None:
         from datetime import timedelta
         _, dashboard = _reload()
-        ts = JUN_5_NOON_UTC
+        ts = JUN05_NOON_UTC
         shifted = dashboard.shift_ts(ts, timedelta(hours=7))
         self.assertEqual(shifted.hour, 19)
         self.assertEqual(shifted.utcoffset(), timedelta(hours=7))
@@ -2984,7 +3075,7 @@ class ShiftTsTest(unittest.TestCase):
     def test_aware_ts_negative_offset(self) -> None:
         from datetime import timedelta
         _, dashboard = _reload()
-        ts = JUN_5_NOON_UTC
+        ts = JUN05_NOON_UTC
         shifted = dashboard.shift_ts(ts, timedelta(hours=-5))
         self.assertEqual(shifted.hour, 7)
         self.assertEqual(shifted.utcoffset(), timedelta(hours=-5))
@@ -2992,9 +3083,9 @@ class ShiftTsTest(unittest.TestCase):
     def test_naive_ts_shifted_in_place(self) -> None:
         from datetime import timedelta
         _, dashboard = _reload()
-        ts = JUN_5_NOON_NAIVE
+        ts = JUN05_NOON_NAIVE
         shifted = dashboard.shift_ts(ts, timedelta(hours=7))
-        self.assertEqual(shifted, JUN_5_NOON_NAIVE.replace(hour=19))
+        self.assertEqual(shifted, JUN05_NOON_NAIVE.replace(hour=19))
 
 
 if __name__ == "__main__":

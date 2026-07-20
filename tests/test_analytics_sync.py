@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 from __future__ import annotations
 
+import contextlib
+import importlib
 import io
 import json
 import logging
@@ -22,6 +24,57 @@ SAMPLE_NAIVE_TIMESTAMP = "2026-05-25T12:00:00"
 TEST_BATCH_SIZE = 3
 PARTIAL_BATCH_RECORD_COUNT = TEST_BATCH_SIZE + 2
 CLI_CLOCK_TOLERANCE_SECONDS = 5
+
+# A SHA-256 content hash is 64 hex chars; the promoted-column tests
+# assert that width on the trailing hash param.
+_CONTENT_HASH_HEX_LEN = 64
+# A batch cap comfortably larger than any test's record count, so the
+# whole file flushes as one trailing partial batch.
+_LARGE_BATCH_SIZE = 500
+
+# Analytics event names asserted as JSONL `event` values, plus the one
+# pipeline stage carried on `stage` records that recurs across tests.
+_STAGE_ENTER = "stage_enter"
+_AGENT_EXIT = "agent_exit"
+_STAGE_IMPLEMENTING = "implementing"
+
+# JSONL field key the record fixtures and live-DB lookups share.
+_ISSUE_KEY = "issue"
+
+# Config env keys the sync re-parses at reload time, plus the "disabled"
+# sentinel and a throwaway libpq URL for the enabled-sink tests.
+# Credential-bearing URLs stay inline where the redaction assertions
+# need their exact shape.
+_LOG_PATH_ENV = "ANALYTICS_LOG_PATH"
+_DB_URL_ENV = "ANALYTICS_DB_URL"
+_SENTINEL_DISABLED = "off"
+_DB_URL = "postgresql://h/db"
+
+# Opt-in libpq URL for the live-Postgres integration test; unset skips it.
+_TEST_DB_URL_ENV = "ANALYTICS_TEST_DB_URL"
+
+# The module under test is also the logger name its records land under,
+# so both the reload and `assertLogs` key off the same string. The
+# rollup refresh statement and the CLI patch targets recur enough to
+# name.
+_SYNC_MODULE = "orchestrator.analytics.sync"
+_LOG_LEVEL_INFO = "INFO"
+_REFRESH_STMT = "REFRESH MATERIALIZED VIEW"
+_BATCH_SIZE_ATTR = "_BATCH_SIZE"
+_STDOUT = "sys.stdout"
+
+# JSONL fixtures land in this file inside each test's temp dir.
+_LOG_FILENAME = "a.jsonl"
+_ENCODING = "utf-8"
+
+# One recorded `executemany` batch: the SQL text plus its params list.
+_Batch = tuple[str, list[tuple]]
+
+
+def _passthrough(json_obj):
+    """Identity `json_adapter`: the fake connection stores Python
+    objects verbatim, so the sync needs no psycopg JSON wrapping."""
+    return json_obj
 
 
 def _hermetic_env(extra: dict[str, str] | None = None) -> dict[str, str]:
@@ -47,9 +100,12 @@ def _reload(env: dict[str, str] | None = None):
     with patch.dict(os.environ, _hermetic_env(env), clear=True):
         sys.modules.pop("orchestrator.config", None)
         sys.modules.pop("orchestrator.analytics", None)
-        sys.modules.pop("orchestrator.analytics.sync", None)
-        import orchestrator.analytics as analytics
-        import orchestrator.analytics.sync as analytics_sync
+        sys.modules.pop(_SYNC_MODULE, None)
+        # `import_module` re-executes each freshly-popped module against
+        # the patched env; a `from orchestrator import analytics` would
+        # instead hand back the parent package's stale cached attribute.
+        analytics = importlib.import_module("orchestrator.analytics")
+        analytics_sync = importlib.import_module(_SYNC_MODULE)
         return analytics, analytics_sync
 
 
@@ -83,26 +139,28 @@ class _FakeCursor:
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:
-        return None
+        """Never suppress the exception: sync errors must propagate."""
 
-    def execute(self, sql: str, params=None) -> None:
-        self._store.select_calls.append((sql, params))
+    def execute(self, sql: str, sql_params=None) -> None:
+        self._store.select_calls.append((sql, sql_params))
         # Refresh of `analytics_daily_rollup` rides on `cur.execute`
         # (not `executemany`), so a separate raise flag lets tests
         # exercise the swallow-and-log path without affecting the
         # batched insert path that `raise_on_executemany` covers.
         if (
             self._store.raise_on_refresh is not None
-            and "REFRESH MATERIALIZED VIEW" in sql.upper()
+            and _REFRESH_STMT in sql.upper()
         ):
             raise self._store.raise_on_refresh
         if sql.lstrip().upper().startswith("SELECT"):
             source = (
-                self._store.pre_check_hashes
-                if self._store.pre_check_hashes is not None
-                else self._store.seen_hashes
+                self._store.seen_hashes
+                if self._store.pre_check_hashes is None
+                else self._store.pre_check_hashes
             )
-            self._select_rows = [(h,) for h in sorted(source)]
+            self._select_rows = [
+                (content_hash,) for content_hash in sorted(source)
+            ]
         else:
             self._select_rows = []
         self.rowcount = len(self._select_rows)
@@ -111,23 +169,28 @@ class _FakeCursor:
         return iter(self._select_rows)
 
     def executemany(self, sql: str, params_seq) -> None:
+        # A configured driver-failure flag raises before any batch is
+        # recorded, so the transaction test sees the rollback path with
+        # no partial batch persisted.
+        if self._store.raise_on_executemany is not None:
+            raise self._store.raise_on_executemany
         # Materialize once so a generator caller can't double-spend
         # the iterator between the recorder and the rowcount math.
         params_list = list(params_seq)
         self._store.batches.append((sql, params_list))
         inserted_in_batch = 0
-        for params in params_list:
+        for row_params in params_list:
             # Hash is the last param; relies on the column order
             # baked into `_build_insert_sql`. If the schema's column
             # order ever changes the test will fail loudly here --
             # which is fine, the test would be wrong in lock-step
             # with the production code.
-            content_hash = params[-1]
+            content_hash = row_params[-1]
             if content_hash in self._store.seen_hashes:
-                self._store.duplicate_calls.append((sql, params))
+                self._store.duplicate_calls.append((sql, row_params))
             else:
                 self._store.seen_hashes.add(content_hash)
-                self._store.inserts.append((sql, params))
+                self._store.inserts.append((sql, row_params))
                 inserted_in_batch += 1
         self.rowcount = inserted_in_batch
 
@@ -149,7 +212,7 @@ class _FakeConnection:
     def __init__(self) -> None:
         self.inserts: list[tuple[str, tuple]] = []
         self.duplicate_calls: list[tuple[str, tuple]] = []
-        self.batches: list[tuple[str, list[tuple]]] = []
+        self.batches: list[_Batch] = []
         self.select_calls: list[tuple[str, object]] = []
         self.seen_hashes: set[str] = set()
         self.pre_check_hashes: set[str] | None = None
@@ -160,14 +223,8 @@ class _FakeConnection:
         self.raise_on_refresh: Exception | None = None
 
     def cursor(self) -> _FakeCursor:
-        if self.raise_on_executemany is not None:
-            cur = _FakeCursor(self)
-
-            def _raise(sql: str, params_seq) -> None:
-                raise self.raise_on_executemany  # type: ignore[misc]
-
-            cur.executemany = _raise  # type: ignore[method-assign]
-            return cur
+        # `_FakeCursor.executemany` consults `raise_on_executemany`
+        # itself, so every call gets the same plain cursor.
         return _FakeCursor(self)
 
     def commit(self) -> None:
@@ -179,29 +236,46 @@ class _FakeConnection:
     def close(self) -> None:
         self.close_called += 1
 
+    def as_connect(self, _url: str) -> "_FakeConnection":
+        """Serve as the sync's `connect(db_url) -> conn` callable,
+        always yielding this same fake so a test can inspect the
+        executed SQL / commits after the sync returns."""
+        return self
+
 
 def _write_jsonl(path: Path, records: list[dict]) -> None:
     """Mirror `analytics.append_record`'s on-disk encoding so the
     content hash the sync computes matches what a real writer would
     produce.
     """
+    _write_raw_lines(
+        path, [json.dumps(record, sort_keys=True) for record in records]
+    )
+
+
+def _write_raw_lines(path: Path, lines: list[str]) -> None:
+    """Write pre-rendered JSONL rows (or deliberate garbage / blanks)
+    verbatim, one per line, so the malformed-input tests can mix good
+    records with non-JSON without repeating the open / encode dance.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as fh:
-        for record in records:
-            fh.write(json.dumps(record, sort_keys=True) + "\n")
+    with path.open("w", encoding=_ENCODING) as fh:
+        for line in lines:
+            fh.write(line)
+            fh.write("\n")
 
 
 def _sample_record(
     *,
     issue: int = 1,
-    event: str = "stage_enter",
+    event: str = _STAGE_ENTER,
     ts: str = SAMPLE_TIMESTAMP,
     **extras,
 ) -> dict:
     record = {
         "ts": ts,
         "repo": "owner/repo",
-        "issue": issue,
+        _ISSUE_KEY: issue,
         "event": event,
     }
     record.update(extras)
@@ -210,6 +284,88 @@ def _sample_record(
 
 def _sample_records(count: int) -> list[dict]:
     return [_sample_record(issue=issue) for issue in range(1, count + 1)]
+
+
+def _record_line(**kwargs) -> str:
+    """Canonical single-line JSONL encoding of a sample record, for the
+    malformed-input tests that interleave a good record with raw garbage
+    lines."""
+    return json.dumps(_sample_record(**kwargs), sort_keys=True)
+
+
+@contextlib.contextmanager
+def _reloaded_sync(
+    write_log, *, db_url: str = _DB_URL, filename: str = _LOG_FILENAME,
+):
+    """Materialize a JSONL log under a temp dir via `write_log(path)`,
+    reload the sync module bound to that path + `db_url`, and yield
+    `(path, analytics_sync)`. Folds the temp-file / reload boilerplate
+    the insert-path tests otherwise repeat verbatim.
+    """
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        path = Path(tmp_dir) / filename
+        write_log(path)
+        _, analytics_sync = _reload({
+            _LOG_PATH_ENV: str(path),
+            _DB_URL_ENV: db_url,
+        })
+        yield path, analytics_sync
+
+
+def _sync_for_records(records: list[dict], **kwargs):
+    """`_reloaded_sync` seeded from well-formed record dicts."""
+    return _reloaded_sync(lambda path: _write_jsonl(path, records), **kwargs)
+
+
+def _sync_for_lines(lines: list[str], **kwargs):
+    """`_reloaded_sync` seeded from raw JSONL / garbage lines."""
+    return _reloaded_sync(lambda path: _write_raw_lines(path, lines), **kwargs)
+
+
+def _run_sync(analytics_sync, connection, **kwargs):
+    """Drive the sync through a fake connection with the identity JSON
+    adapter every insert-path test shares."""
+    return analytics_sync.sync_jsonl_to_postgres(
+        connect=connection.as_connect,
+        json_adapter=_passthrough,
+        **kwargs,
+    )
+
+
+def _sync_capturing_logs(test_case, analytics_sync, connection, **kwargs):
+    """Run the sync through `connection`, assert it emits at least one
+    INFO record, and return `(sync_result, log_lines)` so callers read
+    the captured output off a plain list rather than the `assertLogs`
+    control variable.
+    """
+    with test_case.assertLogs(_SYNC_MODULE, level=_LOG_LEVEL_INFO) as cm:
+        sync_result = _run_sync(analytics_sync, connection, **kwargs)
+    return sync_result, list(cm.output)
+
+
+def _reset_root_logger() -> None:
+    """Drop every handler off the root logger so a UTC `StreamHandler`
+    a CLI test installs never leaks into a sibling test in the same
+    process."""
+    root = logging.getLogger()
+    for stale_handler in list(root.handlers):
+        root.removeHandler(stale_handler)
+
+
+def _select_sqls(connection) -> list[str]:
+    """SQL text of every startup SELECT the fake recorded, dropping the
+    post-commit REFRESH so a pre-check tally never overcounts it."""
+    return [
+        sql for sql, _ in connection.select_calls
+        if sql.lstrip().upper().startswith("SELECT")
+    ]
+
+
+def _refresh_sqls(connection) -> list[str]:
+    """Every `REFRESH MATERIALIZED VIEW` statement the fake recorded."""
+    return [
+        sql for sql, _ in connection.select_calls if _REFRESH_STMT in sql
+    ]
 
 
 class AnalyticsDbUrlConfigTest(unittest.TestCase):
@@ -223,23 +379,23 @@ class AnalyticsDbUrlConfigTest(unittest.TestCase):
         self.assertIsNone(analytics.ANALYTICS_DB_URL)
 
     def test_empty_string_disables(self) -> None:
-        analytics, _ = _reload({"ANALYTICS_DB_URL": ""})
+        analytics, _ = _reload({_DB_URL_ENV: ""})
         self.assertIsNone(analytics.ANALYTICS_DB_URL)
 
     def test_sentinel_values_disable(self) -> None:
-        for value in ("off", "OFF", " off ", "disabled", "none", "None"):
-            with self.subTest(value=value):
-                analytics, _ = _reload({"ANALYTICS_DB_URL": value})
+        for sentinel in ("off", "OFF", " off ", "disabled", "none", "None"):
+            with self.subTest(value=sentinel):
+                analytics, _ = _reload({_DB_URL_ENV: sentinel})
                 self.assertIsNone(analytics.ANALYTICS_DB_URL)
 
     def test_real_url_passes_through(self) -> None:
         url = "postgresql://u:p@db.example.com:5432/orchestrator_analytics"
-        analytics, _ = _reload({"ANALYTICS_DB_URL": url})
+        analytics, _ = _reload({_DB_URL_ENV: url})
         self.assertEqual(analytics.ANALYTICS_DB_URL, url)
 
     def test_whitespace_stripped(self) -> None:
         analytics, _ = _reload(
-            {"ANALYTICS_DB_URL": "  postgresql://h/db  "}
+            {_DB_URL_ENV: "  postgresql://h/db  "}
         )
         self.assertEqual(analytics.ANALYTICS_DB_URL, "postgresql://h/db")
 
@@ -251,48 +407,39 @@ class AnalyticsSyncDisabledTest(unittest.TestCase):
     """
 
     def test_no_op_when_db_url_unset(self) -> None:
-        with tempfile.TemporaryDirectory() as td:
-            path = Path(td) / "a.jsonl"
-            _write_jsonl(path, [_sample_record()])
-            _, analytics_sync = _reload({
-                "ANALYTICS_LOG_PATH": str(path),
-                "ANALYTICS_DB_URL": "",
-            })
+        records = [_sample_record()]
+        with _sync_for_records(records, db_url="") as (_, analytics_sync):
             connected = []
-            result = analytics_sync.sync_jsonl_to_postgres(
+            sync_result = analytics_sync.sync_jsonl_to_postgres(
                 connect=lambda url: connected.append(url) or _FakeConnection(),
             )
             self.assertEqual(connected, [])
-            self.assertEqual(result.inserted, 0)
-            self.assertEqual(result.total_lines, 0)
+            self.assertEqual(sync_result.inserted, 0)
+            self.assertEqual(sync_result.total_lines, 0)
 
     def test_no_op_when_log_path_unset(self) -> None:
         _, analytics_sync = _reload({
-            "ANALYTICS_LOG_PATH": "off",
-            "ANALYTICS_DB_URL": "postgresql://h/db",
+            _LOG_PATH_ENV: _SENTINEL_DISABLED,
+            _DB_URL_ENV: _DB_URL,
         })
         connected = []
-        result = analytics_sync.sync_jsonl_to_postgres(
+        sync_result = analytics_sync.sync_jsonl_to_postgres(
             connect=lambda url: connected.append(url) or _FakeConnection(),
         )
         self.assertEqual(connected, [])
-        self.assertEqual(result.inserted, 0)
+        self.assertEqual(sync_result.inserted, 0)
 
     def test_no_op_when_log_file_missing(self) -> None:
         # Configured but file not created yet (orchestrator hasn't
-        # emitted any record). Don't connect, don't fail.
-        with tempfile.TemporaryDirectory() as td:
-            path = Path(td) / "absent.jsonl"
-            _, analytics_sync = _reload({
-                "ANALYTICS_LOG_PATH": str(path),
-                "ANALYTICS_DB_URL": "postgresql://h/db",
-            })
+        # emitted any record). Don't connect, don't fail. The no-op
+        # writer leaves the path absent so the sync sees a missing file.
+        with _reloaded_sync(lambda path: None) as (_, analytics_sync):
             connected = []
-            result = analytics_sync.sync_jsonl_to_postgres(
+            sync_result = analytics_sync.sync_jsonl_to_postgres(
                 connect=lambda url: connected.append(url) or _FakeConnection(),
             )
             self.assertEqual(connected, [])
-            self.assertEqual(result.inserted, 0)
+            self.assertEqual(sync_result.inserted, 0)
 
 
 class AnalyticsSyncInsertTest(unittest.TestCase):
@@ -302,26 +449,17 @@ class AnalyticsSyncInsertTest(unittest.TestCase):
     """
 
     def test_inserts_each_record_once(self) -> None:
-        with tempfile.TemporaryDirectory() as td:
-            path = Path(td) / "a.jsonl"
-            records = [
-                _sample_record(issue=1, event="stage_enter", stage="implementing"),
-                _sample_record(issue=2, event="agent_exit", duration_s=12.5),
-            ]
-            _write_jsonl(path, records)
-            _, analytics_sync = _reload({
-                "ANALYTICS_LOG_PATH": str(path),
-                "ANALYTICS_DB_URL": "postgresql://h/db",
-            })
+        records = [
+            _sample_record(issue=1, event=_STAGE_ENTER, stage=_STAGE_IMPLEMENTING),
+            _sample_record(issue=2, event=_AGENT_EXIT, duration_s=12.5),
+        ]
+        with _sync_for_records(records) as (_, analytics_sync):
             fake = _FakeConnection()
-            result = analytics_sync.sync_jsonl_to_postgres(
-                connect=lambda url: fake,
-                json_adapter=lambda v: v,
-            )
-            self.assertEqual(result.inserted, len(records))
-            self.assertEqual(result.skipped_duplicate, 0)
-            self.assertEqual(result.skipped_malformed, 0)
-            self.assertEqual(result.total_lines, len(records))
+            sync_result = _run_sync(analytics_sync, fake)
+            self.assertEqual(sync_result.inserted, len(records))
+            self.assertEqual(sync_result.skipped_duplicate, 0)
+            self.assertEqual(sync_result.skipped_malformed, 0)
+            self.assertEqual(sync_result.total_lines, len(records))
             self.assertEqual(len(fake.inserts), len(records))
             # Two commits: one for the events insert, one after the
             # post-commit refresh of `analytics_daily_rollup`.
@@ -330,28 +468,19 @@ class AnalyticsSyncInsertTest(unittest.TestCase):
             self.assertEqual(fake.close_called, 1)
 
     def test_promoted_columns_and_extras_split(self) -> None:
-        with tempfile.TemporaryDirectory() as td:
-            path = Path(td) / "a.jsonl"
-            record = _sample_record(
-                event="agent_exit",
-                stage="implementing",
-                duration_s=42.0,
-                backend="claude",
-                session_id="sess-abc",
-                input_tokens=100,
-                custom_future_key="something-new",
-            )
-            _write_jsonl(path, [record])
-            _, analytics_sync = _reload({
-                "ANALYTICS_LOG_PATH": str(path),
-                "ANALYTICS_DB_URL": "postgresql://h/db",
-            })
+        record = _sample_record(
+            event=_AGENT_EXIT,
+            stage=_STAGE_IMPLEMENTING,
+            duration_s=42.0,
+            backend="claude",
+            session_id="sess-abc",
+            input_tokens=100,
+            custom_future_key="something-new",
+        )
+        with _sync_for_records([record]) as (path, analytics_sync):
             fake = _FakeConnection()
-            analytics_sync.sync_jsonl_to_postgres(
-                connect=lambda url: fake,
-                json_adapter=lambda v: v,
-            )
-            sql, params = fake.inserts[0]
+            _run_sync(analytics_sync, fake)
+            _, row_values = fake.inserts[0]
             promoted = _sync_rows._PROMOTED_COLUMNS
             for column in (
                 "repo",
@@ -362,39 +491,32 @@ class AnalyticsSyncInsertTest(unittest.TestCase):
                 "session_id",
                 "input_tokens",
             ):
-                self.assertEqual(params[promoted.index(column)], record[column])
+                self.assertEqual(row_values[promoted.index(column)], record[column])
             # Extras column lives after the promoted block.
             extras_idx = len(promoted)
             self.assertEqual(
-                params[extras_idx], {"custom_future_key": "something-new"}
+                row_values[extras_idx], {"custom_future_key": "something-new"}
             )
             # source_path / source_line / content_hash trail it.
-            self.assertEqual(params[extras_idx + 1], str(path))
-            self.assertEqual(params[extras_idx + 2], 1)
+            self.assertEqual(row_values[extras_idx + 1], str(path))
+            self.assertEqual(row_values[extras_idx + 2], 1)
             # Content hash matches the canonical encoding of the source
             # record, not the unsorted one we passed in -- this is
             # what makes dedup robust against prune-induced rewrites.
-            self.assertIsInstance(params[extras_idx + 3], str)
-            self.assertEqual(len(params[extras_idx + 3]), 64)
+            self.assertIsInstance(row_values[extras_idx + 3], str)
+            self.assertEqual(len(row_values[extras_idx + 3]), _CONTENT_HASH_HEX_LEN)
 
     def test_ts_parsed_to_datetime(self) -> None:
         # The ts column is TIMESTAMPTZ; psycopg expects a datetime,
         # not a string. A naive string would be silently inserted as
         # text in some configurations.
-        with tempfile.TemporaryDirectory() as td:
-            path = Path(td) / "a.jsonl"
-            _write_jsonl(path, [_sample_record(ts=SAMPLE_TIMESTAMP)])
-            _, analytics_sync = _reload({
-                "ANALYTICS_LOG_PATH": str(path),
-                "ANALYTICS_DB_URL": "postgresql://h/db",
-            })
+        with _sync_for_records([_sample_record(ts=SAMPLE_TIMESTAMP)]) as (
+            _, analytics_sync,
+        ):
             fake = _FakeConnection()
-            analytics_sync.sync_jsonl_to_postgres(
-                connect=lambda url: fake,
-                json_adapter=lambda v: v,
-            )
-            _, params = fake.inserts[0]
-            ts_value = params[_sync_rows._PROMOTED_COLUMNS.index("ts")]
+            _run_sync(analytics_sync, fake)
+            _, row_values = fake.inserts[0]
+            ts_value = row_values[_sync_rows._PROMOTED_COLUMNS.index("ts")]
             self.assertIsInstance(ts_value, datetime)
             self.assertIsNotNone(ts_value.tzinfo)
 
@@ -406,23 +528,11 @@ class AnalyticsSyncDedupTest(unittest.TestCase):
     """
 
     def test_second_run_inserts_nothing(self) -> None:
-        with tempfile.TemporaryDirectory() as td:
-            path = Path(td) / "a.jsonl"
-            records = _sample_records(2)
-            _write_jsonl(path, records)
-            _, analytics_sync = _reload({
-                "ANALYTICS_LOG_PATH": str(path),
-                "ANALYTICS_DB_URL": "postgresql://h/db",
-            })
+        records = _sample_records(2)
+        with _sync_for_records(records) as (_, analytics_sync):
             fake = _FakeConnection()
-            first = analytics_sync.sync_jsonl_to_postgres(
-                connect=lambda url: fake,
-                json_adapter=lambda v: v,
-            )
-            second = analytics_sync.sync_jsonl_to_postgres(
-                connect=lambda url: fake,
-                json_adapter=lambda v: v,
-            )
+            first = _run_sync(analytics_sync, fake)
+            second = _run_sync(analytics_sync, fake)
             self.assertEqual(first.inserted, len(records))
             self.assertEqual(second.inserted, 0)
             self.assertEqual(second.skipped_duplicate, len(records))
@@ -435,32 +545,19 @@ class AnalyticsSyncDedupTest(unittest.TestCase):
         # and 2. A naive (source_path, source_line) key would
         # re-insert them under the freed (path, 1) / (path, 2) keys.
         # Content-hash dedup keeps them out.
-        with tempfile.TemporaryDirectory() as td:
-            path = Path(td) / "a.jsonl"
-            original_records = [
-                _sample_record(issue=1, event="a"),
-                _sample_record(issue=2, event="b"),
-                _sample_record(issue=3, event="c"),
-            ]
-            _write_jsonl(path, original_records)
-            _, analytics_sync = _reload({
-                "ANALYTICS_LOG_PATH": str(path),
-                "ANALYTICS_DB_URL": "postgresql://h/db",
-            })
+        original_records = [
+            _sample_record(issue=1, event="a"),
+            _sample_record(issue=2, event="b"),
+            _sample_record(issue=3, event="c"),
+        ]
+        with _sync_for_records(original_records) as (path, analytics_sync):
             fake = _FakeConnection()
-            analytics_sync.sync_jsonl_to_postgres(
-                connect=lambda url: fake,
-                json_adapter=lambda v: v,
-            )
+            _run_sync(analytics_sync, fake)
             # Operator runs prune; file now has only #2 + #3 at lines 1 + 2.
-            retained_records = original_records[1:]
-            _write_jsonl(path, retained_records)
-            second = analytics_sync.sync_jsonl_to_postgres(
-                connect=lambda url: fake,
-                json_adapter=lambda v: v,
-            )
+            _write_jsonl(path, original_records[1:])
+            second = _run_sync(analytics_sync, fake)
             self.assertEqual(second.inserted, 0)
-            self.assertEqual(second.skipped_duplicate, len(retained_records))
+            self.assertEqual(second.skipped_duplicate, len(original_records[1:]))
 
 
 class AnalyticsSyncMalformedTest(unittest.TestCase):
@@ -470,45 +567,22 @@ class AnalyticsSyncMalformedTest(unittest.TestCase):
     """
 
     def test_blank_lines_are_silent(self) -> None:
-        with tempfile.TemporaryDirectory() as td:
-            path = Path(td) / "a.jsonl"
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with path.open("w", encoding="utf-8") as fh:
-                fh.write("\n")
-                fh.write(json.dumps(_sample_record(), sort_keys=True) + "\n")
-                fh.write("   \n")
-            _, analytics_sync = _reload({
-                "ANALYTICS_LOG_PATH": str(path),
-                "ANALYTICS_DB_URL": "postgresql://h/db",
-            })
+        lines = ["", _record_line(), "   "]
+        with _sync_for_lines(lines) as (_, analytics_sync):
             fake = _FakeConnection()
-            result = analytics_sync.sync_jsonl_to_postgres(
-                connect=lambda url: fake,
-                json_adapter=lambda v: v,
-            )
-            self.assertEqual(result.inserted, 1)
-            self.assertEqual(result.skipped_malformed, 0)
-            self.assertEqual(result.total_lines, 3)
+            sync_result = _run_sync(analytics_sync, fake)
+            self.assertEqual(sync_result.inserted, 1)
+            self.assertEqual(sync_result.skipped_malformed, 0)
+            self.assertEqual(sync_result.total_lines, 3)
 
     def test_non_json_line_counted_and_skipped(self) -> None:
-        with tempfile.TemporaryDirectory() as td:
-            path = Path(td) / "a.jsonl"
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with path.open("w", encoding="utf-8") as fh:
-                fh.write("this is not json\n")
-                fh.write(json.dumps(_sample_record(), sort_keys=True) + "\n")
-            _, analytics_sync = _reload({
-                "ANALYTICS_LOG_PATH": str(path),
-                "ANALYTICS_DB_URL": "postgresql://h/db",
-            })
+        lines = ["this is not json", _record_line()]
+        with _sync_for_lines(lines) as (_, analytics_sync):
             fake = _FakeConnection()
-            result = analytics_sync.sync_jsonl_to_postgres(
-                connect=lambda url: fake,
-                json_adapter=lambda v: v,
-            )
-            self.assertEqual(result.inserted, 1)
-            self.assertEqual(result.skipped_malformed, 1)
-            self.assertEqual(result.malformed_line_numbers, (1,))
+            sync_result = _run_sync(analytics_sync, fake)
+            self.assertEqual(sync_result.inserted, 1)
+            self.assertEqual(sync_result.skipped_malformed, 1)
+            self.assertEqual(sync_result.malformed_line_numbers, (1,))
             # The good record on line 2 still gets inserted -- one bad
             # line cannot poison the whole sync.
             self.assertEqual(len(fake.inserts), 1)
@@ -516,96 +590,59 @@ class AnalyticsSyncMalformedTest(unittest.TestCase):
     def test_json_non_object_skipped(self) -> None:
         # `null`, lists, numbers parse cleanly but aren't dict
         # records; treat them as malformed rather than crashing.
-        with tempfile.TemporaryDirectory() as td:
-            path = Path(td) / "a.jsonl"
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with path.open("w", encoding="utf-8") as fh:
-                fh.write("null\n")
-                fh.write("[1, 2, 3]\n")
-                fh.write("42\n")
-                fh.write(json.dumps(_sample_record(), sort_keys=True) + "\n")
-            _, analytics_sync = _reload({
-                "ANALYTICS_LOG_PATH": str(path),
-                "ANALYTICS_DB_URL": "postgresql://h/db",
-            })
+        lines = ["null", "[1, 2, 3]", "42", _record_line()]
+        with _sync_for_lines(lines) as (_, analytics_sync):
             fake = _FakeConnection()
-            result = analytics_sync.sync_jsonl_to_postgres(
-                connect=lambda url: fake,
-                json_adapter=lambda v: v,
-            )
-            self.assertEqual(result.inserted, 1)
-            self.assertEqual(result.skipped_malformed, 3)
+            sync_result = _run_sync(analytics_sync, fake)
+            self.assertEqual(sync_result.inserted, 1)
+            self.assertEqual(sync_result.skipped_malformed, 3)
 
     def test_missing_required_key_skipped(self) -> None:
         # Records missing `ts` / `repo` / `issue` / `event` cannot be
         # inserted (NOT NULL columns) so the sync filters them out
         # rather than letting psycopg raise mid-transaction.
-        with tempfile.TemporaryDirectory() as td:
-            path = Path(td) / "a.jsonl"
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with path.open("w", encoding="utf-8") as fh:
-                fh.write('{"repo": "o/r", "issue": 1, "event": "x"}\n')  # missing ts
-                fh.write('{"ts": "2026-05-25T12:00:00+00:00", "issue": 1, "event": "x"}\n')  # missing repo
-                fh.write('{"ts": "2026-05-25T12:00:00+00:00", "repo": "o/r", "event": "x"}\n')  # missing issue
-                fh.write('{"ts": "2026-05-25T12:00:00+00:00", "repo": "o/r", "issue": 1}\n')  # missing event
-                fh.write(json.dumps(_sample_record(), sort_keys=True) + "\n")
-            _, analytics_sync = _reload({
-                "ANALYTICS_LOG_PATH": str(path),
-                "ANALYTICS_DB_URL": "postgresql://h/db",
-            })
+        lines = [
+            '{"repo": "o/r", "issue": 1, "event": "x"}',  # missing ts
+            '{"ts": "2026-05-25T12:00:00+00:00", "issue": 1, "event": "x"}',  # missing repo
+            '{"ts": "2026-05-25T12:00:00+00:00", "repo": "o/r", "event": "x"}',  # missing issue
+            '{"ts": "2026-05-25T12:00:00+00:00", "repo": "o/r", "issue": 1}',  # missing event
+            _record_line(),
+        ]
+        with _sync_for_lines(lines) as (_, analytics_sync):
             fake = _FakeConnection()
-            result = analytics_sync.sync_jsonl_to_postgres(
-                connect=lambda url: fake,
-                json_adapter=lambda v: v,
-            )
-            self.assertEqual(result.inserted, 1)
-            self.assertEqual(result.skipped_malformed, 4)
+            sync_result = _run_sync(analytics_sync, fake)
+            self.assertEqual(sync_result.inserted, 1)
+            self.assertEqual(sync_result.skipped_malformed, 4)
 
     def test_unparseable_ts_skipped(self) -> None:
         # Parallel to `prune_old_records`'s behavior on a garbled `ts`:
         # the record is preserved verbatim in the JSONL file (sync is
         # read-only) but is not inserted.
-        with tempfile.TemporaryDirectory() as td:
-            path = Path(td) / "a.jsonl"
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with path.open("w", encoding="utf-8") as fh:
-                fh.write('{"ts": "not-a-date", "repo": "o/r", "issue": 1, "event": "x"}\n')
-                fh.write(json.dumps(_sample_record(), sort_keys=True) + "\n")
-            _, analytics_sync = _reload({
-                "ANALYTICS_LOG_PATH": str(path),
-                "ANALYTICS_DB_URL": "postgresql://h/db",
-            })
+        with _sync_for_lines([
+            '{"ts": "not-a-date", "repo": "o/r", "issue": 1, "event": "x"}',
+            _record_line(),
+        ]) as (path, analytics_sync):
             fake = _FakeConnection()
-            result = analytics_sync.sync_jsonl_to_postgres(
-                connect=lambda url: fake,
-                json_adapter=lambda v: v,
-            )
-            self.assertEqual(result.inserted, 1)
-            self.assertEqual(result.skipped_malformed, 1)
+            sync_result = _run_sync(analytics_sync, fake)
+            self.assertEqual(sync_result.inserted, 1)
+            self.assertEqual(sync_result.skipped_malformed, 1)
             # File untouched -- the sync never rewrites; operator
             # cleanup is the same as for `prune_old_records`.
-            preserved = path.read_text(encoding="utf-8").splitlines()
+            preserved = path.read_text(encoding=_ENCODING).splitlines()
             self.assertEqual(len(preserved), 2)
 
     def test_naive_ts_treated_as_utc(self) -> None:
         # Same forward-compat as `prune_old_records`: records written
         # by an older writer without tz info are interpreted as UTC
         # rather than being rejected as malformed.
-        with tempfile.TemporaryDirectory() as td:
-            path = Path(td) / "a.jsonl"
-            _write_jsonl(path, [_sample_record(ts=SAMPLE_NAIVE_TIMESTAMP)])
-            _, analytics_sync = _reload({
-                "ANALYTICS_LOG_PATH": str(path),
-                "ANALYTICS_DB_URL": "postgresql://h/db",
-            })
+        with _sync_for_records(
+            [_sample_record(ts=SAMPLE_NAIVE_TIMESTAMP)],
+        ) as (_, analytics_sync):
             fake = _FakeConnection()
-            result = analytics_sync.sync_jsonl_to_postgres(
-                connect=lambda url: fake,
-                json_adapter=lambda v: v,
-            )
-            self.assertEqual(result.inserted, 1)
-            _, params = fake.inserts[0]
-            ts_value = params[_sync_rows._PROMOTED_COLUMNS.index("ts")]
+            sync_result = _run_sync(analytics_sync, fake)
+            self.assertEqual(sync_result.inserted, 1)
+            _, row_values = fake.inserts[0]
+            ts_value = row_values[_sync_rows._PROMOTED_COLUMNS.index("ts")]
             self.assertEqual(ts_value.tzinfo, timezone.utc)
 
 
@@ -617,25 +654,41 @@ class AnalyticsSyncTransactionTest(unittest.TestCase):
     """
 
     def test_execute_error_rolls_back_and_propagates(self) -> None:
-        with tempfile.TemporaryDirectory() as td:
-            path = Path(td) / "a.jsonl"
-            _write_jsonl(path, [_sample_record()])
-            _, analytics_sync = _reload({
-                "ANALYTICS_LOG_PATH": str(path),
-                "ANALYTICS_DB_URL": "postgresql://h/db",
-            })
+        with _sync_for_records([_sample_record()]) as (_, analytics_sync):
             fake = _FakeConnection()
             fake.raise_on_executemany = RuntimeError(
                 "simulated driver failure"
             )
             with self.assertRaises(RuntimeError):
-                analytics_sync.sync_jsonl_to_postgres(
-                    connect=lambda url: fake,
-                    json_adapter=lambda v: v,
-                )
+                _run_sync(analytics_sync, fake)
             self.assertEqual(fake.commit_called, 0)
             self.assertEqual(fake.rollback_called, 1)
             self.assertEqual(fake.close_called, 1)
+
+
+class _NegativeRowcountCursor:
+    """Cursor stand-in whose driver strips the per-`executemany`
+    rowcount (reports -1), forcing `_flush_batch` onto its
+    whole-batch-inserted fallback."""
+
+    rowcount = -1
+
+    def __init__(self) -> None:
+        self.calls: list[list[tuple]] = []
+
+    def executemany(self, sql: str, params_seq) -> None:
+        # Materialize so a generator caller is not double-spent.
+        self.calls.append(list(params_seq))
+
+
+class _RejectingBatchCursor:
+    """Cursor stand-in that fails if `executemany` runs at all, pinning
+    the empty-batch no-op contract."""
+
+    rowcount = 0
+
+    def executemany(self, sql: str, params_seq) -> None:
+        raise AssertionError("executemany must not run on empty batch")
 
 
 class FlushBatchRowcountTest(unittest.TestCase):
@@ -647,18 +700,7 @@ class FlushBatchRowcountTest(unittest.TestCase):
 
     def test_negative_rowcount_marks_batch_inserted(self) -> None:
         _, analytics_sync = _reload()
-
-        class _Cur:
-            rowcount = -1
-
-            def __init__(self) -> None:
-                self.calls: list[list[tuple]] = []
-
-            def executemany(self, sql: str, params_seq) -> None:
-                # Materialize so a generator caller is not double-spent.
-                self.calls.append(list(params_seq))
-
-        cur = _Cur()
+        cur = _NegativeRowcountCursor()
         counters = analytics_sync._SyncCounters()
         batch = [("a",), ("b",), ("c",)]
         analytics_sync._flush_batch(
@@ -674,16 +716,9 @@ class FlushBatchRowcountTest(unittest.TestCase):
 
     def test_empty_batch_is_a_noop(self) -> None:
         _, analytics_sync = _reload()
-
-        class _Cur:
-            rowcount = 0
-
-            def executemany(self, sql: str, params_seq) -> None:
-                raise AssertionError("executemany must not run on empty batch")
-
         counters = analytics_sync._SyncCounters()
         analytics_sync._flush_batch(
-            _Cur(), "INSERT ...", [], counters, start=0.0,
+            _RejectingBatchCursor(), "INSERT ...", [], counters, start=0.0,
         )
         self.assertEqual(counters.inserted, 0)
         self.assertEqual(counters.skipped_duplicate, 0)
@@ -696,11 +731,11 @@ class AnalyticsSyncCliTest(unittest.TestCase):
 
     def test_cli_no_op_prints_zeros(self) -> None:
         _, analytics_sync = _reload({
-            "ANALYTICS_LOG_PATH": "off",
-            "ANALYTICS_DB_URL": "",
+            _LOG_PATH_ENV: _SENTINEL_DISABLED,
+            _DB_URL_ENV: "",
         })
         buf = io.StringIO()
-        with patch("sys.stdout", buf):
+        with patch(_STDOUT, buf):
             rc = analytics_sync.main([])
         self.assertEqual(rc, 0)
         self.assertIn("inserted=0", buf.getvalue())
@@ -713,8 +748,8 @@ class AnalyticsSyncCliTest(unittest.TestCase):
             path = Path(td) / "rotated.jsonl"
             _write_jsonl(path, [_sample_record()])
             _, analytics_sync = _reload({
-                "ANALYTICS_LOG_PATH": "off",
-                "ANALYTICS_DB_URL": "",
+                _LOG_PATH_ENV: _SENTINEL_DISABLED,
+                _DB_URL_ENV: "",
             })
 
             def fake_sync(*, log_path, db_url, **kwargs):
@@ -727,7 +762,7 @@ class AnalyticsSyncCliTest(unittest.TestCase):
                 analytics_sync, "sync_jsonl_to_postgres", side_effect=fake_sync
             ):
                 buf = io.StringIO()
-                with patch("sys.stdout", buf):
+                with patch(_STDOUT, buf):
                     rc = analytics_sync.main([
                         "--log-path", str(path),
                         "--db-url", "postgresql://override/db",
@@ -737,8 +772,8 @@ class AnalyticsSyncCliTest(unittest.TestCase):
 
     def test_cli_surfaces_failure_as_nonzero(self) -> None:
         _, analytics_sync = _reload({
-            "ANALYTICS_LOG_PATH": "off",
-            "ANALYTICS_DB_URL": "",
+            _LOG_PATH_ENV: _SENTINEL_DISABLED,
+            _DB_URL_ENV: "",
         })
         with patch.object(
             analytics_sync,
@@ -746,7 +781,7 @@ class AnalyticsSyncCliTest(unittest.TestCase):
             side_effect=RuntimeError("boom"),
         ):
             buf = io.StringIO()
-            with patch("sys.stdout", buf):
+            with patch(_STDOUT, buf):
                 rc = analytics_sync.main([])
         self.assertEqual(rc, 1)
 
@@ -757,23 +792,19 @@ class AnalyticsSyncCliTest(unittest.TestCase):
         # same event. With both pinned to UTC + an explicit "UTC"
         # marker, mixing stdout/stderr stays a coherent time stream.
         _, analytics_sync = _reload({
-            "ANALYTICS_LOG_PATH": "off",
-            "ANALYTICS_DB_URL": "",
+            _LOG_PATH_ENV: _SENTINEL_DISABLED,
+            _DB_URL_ENV: "",
         })
         err_buf = io.StringIO()
         out_buf = io.StringIO()
+        # Restore the root logger at teardown so the UTC handler
+        # `_configure_cli_logging` installs never leaks into a sibling.
+        self.addCleanup(_reset_root_logger)
         # Patch BEFORE main() so the StreamHandler that
         # `_configure_cli_logging` constructs captures the patched
         # stderr (StreamHandler() resolves `sys.stderr` at __init__).
-        try:
-            with patch("sys.stderr", err_buf), patch("sys.stdout", out_buf):
-                rc = analytics_sync.main([])
-        finally:
-            # Restore the root logger so a UTC handler doesn't leak
-            # into other tests in the same process.
-            root = logging.getLogger()
-            for handler in list(root.handlers):
-                root.removeHandler(handler)
+        with patch("sys.stderr", err_buf), patch(_STDOUT, out_buf):
+            rc = analytics_sync.main([])
         self.assertEqual(rc, 0)
         out_text = out_buf.getvalue()
         err_text = err_buf.getvalue()
@@ -809,7 +840,8 @@ class AnalyticsSyncCliTest(unittest.TestCase):
             "stdout summary timestamp is not UTC",
         )
         self.assertLess(
-            abs((err_ts - now_utc).total_seconds()), 5,
+            abs((err_ts - now_utc).total_seconds()),
+            CLI_CLOCK_TOLERANCE_SECONDS,
             "log timestamp is not UTC",
         )
 
@@ -818,11 +850,11 @@ class AnalyticsSyncCliTest(unittest.TestCase):
         # one-line summary with the elapsed wall-clock so a multi-thousand
         # record replay surfaces its cost without grepping the log lines.
         _, analytics_sync = _reload({
-            "ANALYTICS_LOG_PATH": "off",
-            "ANALYTICS_DB_URL": "",
+            _LOG_PATH_ENV: _SENTINEL_DISABLED,
+            _DB_URL_ENV: "",
         })
         buf = io.StringIO()
-        with patch("sys.stdout", buf):
+        with patch(_STDOUT, buf):
             rc = analytics_sync.main([])
         self.assertEqual(rc, 0)
         out = buf.getvalue()
@@ -846,20 +878,12 @@ class AnalyticsSyncConnectionLogTest(unittest.TestCase):
     """
 
     def test_connect_emits_connected_log(self) -> None:
-        with tempfile.TemporaryDirectory() as td:
-            path = Path(td) / "a.jsonl"
-            _write_jsonl(path, [_sample_record()])
-            _, analytics_sync = _reload({
-                "ANALYTICS_LOG_PATH": str(path),
-                "ANALYTICS_DB_URL": "postgresql://u:secret@h:5432/db",
-            })
+        with _sync_for_records(
+            [_sample_record()], db_url="postgresql://u:secret@h:5432/db",
+        ) as (_, analytics_sync):
             fake = _FakeConnection()
-            with self.assertLogs("orchestrator.analytics.sync", level="INFO") as cm:
-                analytics_sync.sync_jsonl_to_postgres(
-                    connect=lambda url: fake,
-                    json_adapter=lambda v: v,
-                )
-        joined = "\n".join(cm.output)
+            _, log_lines = _sync_capturing_logs(self, analytics_sync, fake)
+        joined = "\n".join(log_lines)
         self.assertIn("connecting to", joined)
         self.assertIn("connection established", joined)
         # The credential half of the URL must never appear; the redacted
@@ -922,24 +946,13 @@ class AnalyticsSyncConnectionLogTest(unittest.TestCase):
     def test_connect_log_redacts_query_password(self) -> None:
         # End-to-end regression: a query-string-password URL must not
         # leak the password into the connection log.
-        with tempfile.TemporaryDirectory() as td:
-            path = Path(td) / "a.jsonl"
-            _write_jsonl(path, [_sample_record()])
-            _, analytics_sync = _reload({
-                "ANALYTICS_LOG_PATH": str(path),
-                "ANALYTICS_DB_URL": (
-                    "postgresql://h:5432/db?user=u&password=qs-secret"
-                ),
-            })
+        with _sync_for_records(
+            [_sample_record()],
+            db_url="postgresql://h:5432/db?user=u&password=qs-secret",
+        ) as (_, analytics_sync):
             fake = _FakeConnection()
-            with self.assertLogs(
-                "orchestrator.analytics.sync", level="INFO"
-            ) as cm:
-                analytics_sync.sync_jsonl_to_postgres(
-                    connect=lambda url: fake,
-                    json_adapter=lambda v: v,
-                )
-        joined = "\n".join(cm.output)
+            _, log_lines = _sync_capturing_logs(self, analytics_sync, fake)
+        joined = "\n".join(log_lines)
         self.assertNotIn("qs-secret", joined)
         self.assertIn("connection established", joined)
 
@@ -956,30 +969,18 @@ class AnalyticsSyncBatchTest(unittest.TestCase):
         # Exactly `_BATCH_SIZE` records produce exactly one
         # `executemany` call carrying all the rows -- one Postgres
         # round-trip instead of one per row is the whole point.
-        with tempfile.TemporaryDirectory() as td:
-            path = Path(td) / "a.jsonl"
-            _, analytics_sync = _reload({
-                "ANALYTICS_LOG_PATH": str(path),
-                "ANALYTICS_DB_URL": "postgresql://h/db",
-            })
-            with patch.object(
-                analytics_sync, "_BATCH_SIZE", TEST_BATCH_SIZE,
-            ):
-                records = _sample_records(TEST_BATCH_SIZE)
-                _write_jsonl(path, records)
-                fake = _FakeConnection()
-                result = analytics_sync.sync_jsonl_to_postgres(
-                    connect=lambda url: fake,
-                    json_adapter=lambda v: v,
-                )
-            self.assertEqual(result.inserted, len(records))
-            self.assertEqual(result.skipped_duplicate, 0)
+        with _sync_for_records(_sample_records(TEST_BATCH_SIZE)) as (
+            _, analytics_sync,
+        ):
+            fake = _FakeConnection()
+            with patch.object(analytics_sync, _BATCH_SIZE_ATTR, TEST_BATCH_SIZE):
+                sync_result = _run_sync(analytics_sync, fake)
+            self.assertEqual(sync_result.inserted, TEST_BATCH_SIZE)
+            self.assertEqual(sync_result.skipped_duplicate, 0)
             self.assertEqual(len(fake.batches), 1)
-            sql, params_list = fake.batches[0]
-            self.assertEqual(len(params_list), TEST_BATCH_SIZE)
-            self.assertIn(
-                "ON CONFLICT (content_hash) DO NOTHING", sql,
-            )
+            sql, batch_rows = fake.batches[0]
+            self.assertEqual(len(batch_rows), TEST_BATCH_SIZE)
+            self.assertIn("ON CONFLICT (content_hash) DO NOTHING", sql)
 
     def test_rowcount_separates_inserted_duplicate(self) -> None:
         # Race-safe backstop: model a concurrent writer that landed
@@ -991,24 +992,16 @@ class AnalyticsSyncBatchTest(unittest.TestCase):
         # ON-CONFLICT-skipped, so the `len(batch) - rowcount`
         # duplicate-math stays correct even when the pre-check missed
         # what the database already had.
-        with tempfile.TemporaryDirectory() as td:
-            path = Path(td) / "a.jsonl"
-            _, analytics_sync = _reload({
-                "ANALYTICS_LOG_PATH": str(path),
-                "ANALYTICS_DB_URL": "postgresql://h/db",
-            })
-            records = _sample_records(TEST_BATCH_SIZE + 1)
-            _write_jsonl(path, records)
+        records = _sample_records(TEST_BATCH_SIZE + 1)
+        with _sync_for_records(records) as (_, analytics_sync):
             fake = _FakeConnection()
             fake.pre_check_hashes = set()
             racing_records = records[:2]
-            for record in racing_records:
-                fake.seen_hashes.add(_sync_rows._content_hash(record))
-            with patch.object(analytics_sync, "_BATCH_SIZE", len(records)):
-                sync_result = analytics_sync.sync_jsonl_to_postgres(
-                    connect=lambda url: fake,
-                    json_adapter=lambda v: v,
-                )
+            fake.seen_hashes.update(
+                _sync_rows._content_hash(rec) for rec in racing_records
+            )
+            with patch.object(analytics_sync, _BATCH_SIZE_ATTR, len(records)):
+                sync_result = _run_sync(analytics_sync, fake)
             self.assertEqual(
                 sync_result.inserted, len(records) - len(racing_records),
             )
@@ -1023,24 +1016,13 @@ class AnalyticsSyncBatchTest(unittest.TestCase):
         # plus a trailing partial batch of 2 at EOF; both must
         # reach Postgres or a multi-thousand-record replay would
         # silently drop its tail.
-        with tempfile.TemporaryDirectory() as td:
-            path = Path(td) / "a.jsonl"
-            _, analytics_sync = _reload({
-                "ANALYTICS_LOG_PATH": str(path),
-                "ANALYTICS_DB_URL": "postgresql://h/db",
-            })
-            records = _sample_records(PARTIAL_BATCH_RECORD_COUNT)
-            _write_jsonl(path, records)
+        records = _sample_records(PARTIAL_BATCH_RECORD_COUNT)
+        with _sync_for_records(records) as (_, analytics_sync):
             fake = _FakeConnection()
-            with patch.object(
-                analytics_sync, "_BATCH_SIZE", TEST_BATCH_SIZE,
-            ):
-                result = analytics_sync.sync_jsonl_to_postgres(
-                    connect=lambda url: fake,
-                    json_adapter=lambda v: v,
-                )
-            self.assertEqual(result.inserted, len(records))
-            self.assertEqual(result.skipped_duplicate, 0)
+            with patch.object(analytics_sync, _BATCH_SIZE_ATTR, TEST_BATCH_SIZE):
+                sync_result = _run_sync(analytics_sync, fake)
+            self.assertEqual(sync_result.inserted, len(records))
+            self.assertEqual(sync_result.skipped_duplicate, 0)
             self.assertEqual(len(fake.batches), 2)
             self.assertEqual(len(fake.batches[0][1]), TEST_BATCH_SIZE)
             self.assertEqual(
@@ -1055,20 +1037,11 @@ class AnalyticsSyncBatchTest(unittest.TestCase):
         # flush at EOF -- the no-rows-ever-reach-the-DB regression
         # is what makes this worth its own test even though
         # `test_final_partial_batch_flushed_at_eof` overlaps.
-        with tempfile.TemporaryDirectory() as td:
-            path = Path(td) / "a.jsonl"
-            _, analytics_sync = _reload({
-                "ANALYTICS_LOG_PATH": str(path),
-                "ANALYTICS_DB_URL": "postgresql://h/db",
-            })
-            _write_jsonl(path, [_sample_record()])
+        with _sync_for_records([_sample_record()]) as (_, analytics_sync):
             fake = _FakeConnection()
-            with patch.object(analytics_sync, "_BATCH_SIZE", 500):
-                result = analytics_sync.sync_jsonl_to_postgres(
-                    connect=lambda url: fake,
-                    json_adapter=lambda v: v,
-                )
-            self.assertEqual(result.inserted, 1)
+            with patch.object(analytics_sync, _BATCH_SIZE_ATTR, _LARGE_BATCH_SIZE):
+                sync_result = _run_sync(analytics_sync, fake)
+            self.assertEqual(sync_result.inserted, 1)
             self.assertEqual(len(fake.batches), 1)
             self.assertEqual(len(fake.batches[0][1]), 1)
 
@@ -1077,33 +1050,19 @@ class AnalyticsSyncBatchTest(unittest.TestCase):
         # before they reach the batch buffer; the `executemany` call
         # therefore carries only validated rows so a single bad line
         # cannot abort the surrounding batched INSERT.
-        with tempfile.TemporaryDirectory() as td:
-            path = Path(td) / "a.jsonl"
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with path.open("w", encoding="utf-8") as fh:
-                fh.write(
-                    json.dumps(_sample_record(issue=1), sort_keys=True) + "\n"
-                )
-                fh.write("\n")
-                fh.write("not json\n")
-                fh.write(
-                    '{"ts": "2026-05-25T12:00:00+00:00", "repo": "o/r"}\n'
-                )
-                fh.write(
-                    json.dumps(_sample_record(issue=2), sort_keys=True) + "\n"
-                )
-            _, analytics_sync = _reload({
-                "ANALYTICS_LOG_PATH": str(path),
-                "ANALYTICS_DB_URL": "postgresql://h/db",
-            })
+        lines = [
+            _record_line(issue=1),
+            "",
+            "not json",
+            '{"ts": "2026-05-25T12:00:00+00:00", "repo": "o/r"}',
+            _record_line(issue=2),
+        ]
+        with _sync_for_lines(lines) as (_, analytics_sync):
             fake = _FakeConnection()
-            result = analytics_sync.sync_jsonl_to_postgres(
-                connect=lambda url: fake,
-                json_adapter=lambda v: v,
-            )
-            self.assertEqual(result.inserted, 2)
-            self.assertEqual(result.skipped_malformed, 2)
-            self.assertEqual(result.total_lines, 5)
+            sync_result = _run_sync(analytics_sync, fake)
+            self.assertEqual(sync_result.inserted, 2)
+            self.assertEqual(sync_result.skipped_malformed, 2)
+            self.assertEqual(sync_result.total_lines, 5)
             self.assertEqual(len(fake.batches), 1)
             self.assertEqual(len(fake.batches[0][1]), 2)
 
@@ -1111,24 +1070,11 @@ class AnalyticsSyncBatchTest(unittest.TestCase):
         # A file with only blanks / malformed lines never builds a
         # batch and therefore never issues an `executemany` call --
         # the protocol stays quiet but the transaction still commits.
-        with tempfile.TemporaryDirectory() as td:
-            path = Path(td) / "a.jsonl"
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with path.open("w", encoding="utf-8") as fh:
-                fh.write("\n")
-                fh.write("not json\n")
-                fh.write("null\n")
-            _, analytics_sync = _reload({
-                "ANALYTICS_LOG_PATH": str(path),
-                "ANALYTICS_DB_URL": "postgresql://h/db",
-            })
+        with _sync_for_lines(["", "not json", "null"]) as (_, analytics_sync):
             fake = _FakeConnection()
-            result = analytics_sync.sync_jsonl_to_postgres(
-                connect=lambda url: fake,
-                json_adapter=lambda v: v,
-            )
-            self.assertEqual(result.inserted, 0)
-            self.assertEqual(result.skipped_malformed, 2)
+            sync_result = _run_sync(analytics_sync, fake)
+            self.assertEqual(sync_result.inserted, 0)
+            self.assertEqual(sync_result.skipped_malformed, 2)
             self.assertEqual(len(fake.batches), 0)
             # Two commits: events insert (no-op batch path still
             # commits to release the implicit transaction) + the
@@ -1153,31 +1099,16 @@ class AnalyticsSyncPreCheckTest(unittest.TestCase):
     def test_select_runs_once_before_input_read(self) -> None:
         # A single SELECT against the unique content_hash index is the
         # whole startup tax; fan-out per row would defeat the point.
-        with tempfile.TemporaryDirectory() as td:
-            path = Path(td) / "a.jsonl"
-            _write_jsonl(path, _sample_records(TEST_BATCH_SIZE))
-            _, analytics_sync = _reload({
-                "ANALYTICS_LOG_PATH": str(path),
-                "ANALYTICS_DB_URL": "postgresql://h/db",
-            })
+        with _sync_for_records(_sample_records(TEST_BATCH_SIZE)) as (
+            _, analytics_sync,
+        ):
             fake = _FakeConnection()
-            analytics_sync.sync_jsonl_to_postgres(
-                connect=lambda url: fake,
-                json_adapter=lambda v: v,
-            )
-        # `select_calls` records every `cur.execute`, including the
-        # post-commit REFRESH. Filter to the SELECT family so the
-        # pre-check assertion does not overcount once Layer 4's refresh
-        # hook starts firing.
-        select_calls = [
-            (sql, params) for sql, params in fake.select_calls
-            if sql.lstrip().upper().startswith("SELECT")
-        ]
-        self.assertEqual(len(select_calls), 1)
-        sql, _ = select_calls[0]
-        self.assertIn("SELECT content_hash", sql)
-        self.assertIn("analytics_events", sql)
-        self.assertIn("content_hash IS NOT NULL", sql)
+            _run_sync(analytics_sync, fake)
+        select_sqls = _select_sqls(fake)
+        self.assertEqual(len(select_sqls), 1)
+        self.assertIn("SELECT content_hash", select_sqls[0])
+        self.assertIn("analytics_events", select_sqls[0])
+        self.assertIn("content_hash IS NOT NULL", select_sqls[0])
 
     def test_startup_skips_existing_hashes(self) -> None:
         # Seed the fake's database-state set with two of the three
@@ -1186,32 +1117,22 @@ class AnalyticsSyncPreCheckTest(unittest.TestCase):
         # sees them. Only the third record reaches the wire, and the
         # duplicates are counted via `skipped_duplicate` without any
         # per-row round-trip.
-        with tempfile.TemporaryDirectory() as td:
-            path = Path(td) / "a.jsonl"
-            records = _sample_records(TEST_BATCH_SIZE)
-            _write_jsonl(path, records)
-            _, analytics_sync = _reload({
-                "ANALYTICS_LOG_PATH": str(path),
-                "ANALYTICS_DB_URL": "postgresql://h/db",
-            })
+        records = _sample_records(TEST_BATCH_SIZE)
+        with _sync_for_records(records) as (_, analytics_sync):
             fake = _FakeConnection()
-            existing_records = records[:-1]
-            for record in existing_records:
-                fake.seen_hashes.add(_sync_rows._content_hash(record))
-            result = analytics_sync.sync_jsonl_to_postgres(
-                connect=lambda url: fake,
-                json_adapter=lambda v: v,
+            fake.seen_hashes.update(
+                _sync_rows._content_hash(rec) for rec in records[:-1]
             )
-        self.assertEqual(result.inserted, 1)
-        self.assertEqual(result.skipped_duplicate, len(existing_records))
-        self.assertEqual(result.total_lines, len(records))
+            sync_result = _run_sync(analytics_sync, fake)
+        self.assertEqual(sync_result.inserted, 1)
+        self.assertEqual(sync_result.skipped_duplicate, len(records[:-1]))
+        self.assertEqual(sync_result.total_lines, len(records))
         # The batched `executemany` only carries the new third record;
         # the two pre-skipped rows never enter the batch buffer.
         self.assertEqual(len(fake.batches), 1)
         self.assertEqual(len(fake.batches[0][1]), 1)
-        new_record_hash = _sync_rows._content_hash(records[-1])
-        batched_hashes = {params[-1] for params in fake.batches[0][1]}
-        self.assertEqual(batched_hashes, {new_record_hash})
+        batched_hashes = {row[-1] for row in fake.batches[0][1]}
+        self.assertEqual(batched_hashes, {_sync_rows._content_hash(records[-1])})
 
     def test_duplicates_removed_before_batch_write(self) -> None:
         # Two identical records back-to-back in the same JSONL file
@@ -1219,59 +1140,36 @@ class AnalyticsSyncPreCheckTest(unittest.TestCase):
         # adds its hash to the in-Python skip set; the second hits the
         # set and is counted as `skipped_duplicate` without entering
         # the batch. The wire only sees one copy.
-        with tempfile.TemporaryDirectory() as td:
-            path = Path(td) / "a.jsonl"
-            duplicate = _sample_record(issue=1, event="stage_enter")
-            other = _sample_record(issue=2, event="agent_exit")
-            _write_jsonl(path, [duplicate, duplicate, other])
-            _, analytics_sync = _reload({
-                "ANALYTICS_LOG_PATH": str(path),
-                "ANALYTICS_DB_URL": "postgresql://h/db",
-            })
+        duplicate = _sample_record(issue=1, event=_STAGE_ENTER)
+        with _sync_for_records(
+            [duplicate, duplicate, _sample_record(issue=2, event=_AGENT_EXIT)],
+        ) as (_, analytics_sync):
             fake = _FakeConnection()
-            result = analytics_sync.sync_jsonl_to_postgres(
-                connect=lambda url: fake,
-                json_adapter=lambda v: v,
-            )
-        self.assertEqual(result.inserted, 2)
-        self.assertEqual(result.skipped_duplicate, 1)
-        self.assertEqual(result.total_lines, 3)
+            sync_result = _run_sync(analytics_sync, fake)
+        self.assertEqual(sync_result.inserted, 2)
+        self.assertEqual(sync_result.skipped_duplicate, 1)
+        self.assertEqual(sync_result.total_lines, 3)
         self.assertEqual(len(fake.batches), 1)
         self.assertEqual(len(fake.batches[0][1]), 2)
         # Each batched row carries a unique hash; the duplicate of
         # `duplicate` never made it past the in-Python filter.
-        batched_hashes = [params[-1] for params in fake.batches[0][1]]
+        batched_hashes = [row[-1] for row in fake.batches[0][1]]
         self.assertEqual(len(set(batched_hashes)), len(batched_hashes))
 
     def test_pre_check_runs_against_empty_database(self) -> None:
         # The pre-check is unconditional but harmless when the
         # database is empty: every JSONL record still lands and the
         # SELECT just returns no rows.
-        with tempfile.TemporaryDirectory() as td:
-            path = Path(td) / "a.jsonl"
-            records = _sample_records(TEST_BATCH_SIZE)
-            _write_jsonl(path, records)
-            _, analytics_sync = _reload({
-                "ANALYTICS_LOG_PATH": str(path),
-                "ANALYTICS_DB_URL": "postgresql://h/db",
-            })
+        records = _sample_records(TEST_BATCH_SIZE)
+        with _sync_for_records(records) as (_, analytics_sync):
             fake = _FakeConnection()
-            result = analytics_sync.sync_jsonl_to_postgres(
-                connect=lambda url: fake,
-                json_adapter=lambda v: v,
-            )
-        # Filter `select_calls` to the SELECT family so the post-commit
-        # REFRESH that fires on a successful insert does not show up in
-        # the pre-check tally.
-        select_calls = [
-            (sql, params) for sql, params in fake.select_calls
-            if sql.lstrip().upper().startswith("SELECT")
-        ]
-        self.assertEqual(len(select_calls), 1)
-        self.assertEqual(result.inserted, len(records))
-        self.assertEqual(result.skipped_duplicate, 0)
+            sync_result = _run_sync(analytics_sync, fake)
+        self.assertEqual(len(_select_sqls(fake)), 1)
+        self.assertEqual(sync_result.inserted, len(records))
+        self.assertEqual(sync_result.skipped_duplicate, 0)
         self.assertEqual(len(fake.batches), 1)
-        self.assertEqual(len(fake.batches[0][1]), len(records))
+        batch_rows = fake.batches[0][1]
+        self.assertEqual(len(batch_rows), len(records))
 
 
 class AnalyticsSyncProgressTest(unittest.TestCase):
@@ -1284,39 +1182,33 @@ class AnalyticsSyncProgressTest(unittest.TestCase):
     """
 
     def test_progress_logged_per_batch_flush(self) -> None:
-        with tempfile.TemporaryDirectory() as td:
-            path = Path(td) / "a.jsonl"
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / _LOG_FILENAME
             _, analytics_sync = _reload({
-                "ANALYTICS_LOG_PATH": str(path),
-                "ANALYTICS_DB_URL": "postgresql://h/db",
+                _LOG_PATH_ENV: str(path),
+                _DB_URL_ENV: _DB_URL,
             })
-            # Twice the configured batch size so the loop fills the
-            # buffer twice with no partial-batch tail; distinct
-            # `issue` values keep the content hashes unique so the
-            # run exercises the insert path rather than the dedup
-            # path.
             interval = analytics_sync._PROGRESS_INTERVAL
             self.assertEqual(analytics_sync._BATCH_SIZE, interval)
-            records = [
-                _sample_record(issue=i)
-                for i in range(1, interval * 2 + 1)
-            ]
-            _write_jsonl(path, records)
+            # Twice the configured batch size so the loop fills the
+            # buffer twice with no partial-batch tail; distinct issues
+            # keep the content hashes unique so the run exercises the
+            # insert path rather than the dedup path.
+            _write_jsonl(path, _sample_records(interval * 2))
             fake = _FakeConnection()
-            with self.assertLogs("orchestrator.analytics.sync", level="INFO") as cm:
-                analytics_sync.sync_jsonl_to_postgres(
-                    connect=lambda url: fake,
-                    json_adapter=lambda v: v,
-                )
-        progress_lines = [line for line in cm.output if "progress lines=" in line]
+            _, log_lines = _sync_capturing_logs(self, analytics_sync, fake)
+        progress_lines = [
+            line for line in log_lines if "progress lines=" in line
+        ]
         # Two full-batch flushes -> two progress records (no partial
         # batch at EOF because the count divides the batch size).
         self.assertEqual(len(progress_lines), 2)
         # Per-batch flush fires AFTER the flush, so the line count at
         # each emission is the cumulative `total_lines` consumed up
         # to that flush.
+        expected_total = interval * 2
         self.assertIn(f"lines={interval}", progress_lines[0])
-        self.assertIn(f"lines={interval * 2}", progress_lines[1])
+        self.assertIn(f"lines={expected_total}", progress_lines[1])
         # The two batches together reach Postgres; the fake records
         # each `executemany` invocation in lockstep with the
         # progress lines.
@@ -1327,26 +1219,14 @@ class AnalyticsSyncProgressTest(unittest.TestCase):
         # emits a progress line for the partial flush at EOF -- an
         # operator's "did the tail land?" answer must not depend on a
         # round-number record count.
-        with tempfile.TemporaryDirectory() as td:
-            path = Path(td) / "a.jsonl"
-            _, analytics_sync = _reload({
-                "ANALYTICS_LOG_PATH": str(path),
-                "ANALYTICS_DB_URL": "postgresql://h/db",
-            })
-            records = _sample_records(PARTIAL_BATCH_RECORD_COUNT)
-            _write_jsonl(path, records)
+        records = _sample_records(PARTIAL_BATCH_RECORD_COUNT)
+        with _sync_for_records(records) as (_, analytics_sync):
             fake = _FakeConnection()
-            with patch.object(
-                analytics_sync, "_BATCH_SIZE", TEST_BATCH_SIZE,
-            ):
-                with self.assertLogs(
-                    "orchestrator.analytics.sync", level="INFO"
-                ) as cm:
-                    analytics_sync.sync_jsonl_to_postgres(
-                        connect=lambda url: fake,
-                        json_adapter=lambda v: v,
-                    )
-        progress_lines = [line for line in cm.output if "progress lines=" in line]
+            with patch.object(analytics_sync, _BATCH_SIZE_ATTR, TEST_BATCH_SIZE):
+                _, log_lines = _sync_capturing_logs(self, analytics_sync, fake)
+        progress_lines = [
+            line for line in log_lines if "progress lines=" in line
+        ]
         self.assertEqual(len(progress_lines), 2)
         self.assertIn(f"lines={TEST_BATCH_SIZE}", progress_lines[0])
         self.assertIn(f"inserted={TEST_BATCH_SIZE}", progress_lines[0])
@@ -1354,24 +1234,16 @@ class AnalyticsSyncProgressTest(unittest.TestCase):
         self.assertIn(f"inserted={len(records)}", progress_lines[1])
 
     def test_completed_log_carries_duration_s(self) -> None:
-        with tempfile.TemporaryDirectory() as td:
-            path = Path(td) / "a.jsonl"
-            _write_jsonl(path, [_sample_record()])
-            _, analytics_sync = _reload({
-                "ANALYTICS_LOG_PATH": str(path),
-                "ANALYTICS_DB_URL": "postgresql://h/db",
-            })
+        with _sync_for_records([_sample_record()]) as (_, analytics_sync):
             fake = _FakeConnection()
-            with self.assertLogs("orchestrator.analytics.sync", level="INFO") as cm:
-                result = analytics_sync.sync_jsonl_to_postgres(
-                    connect=lambda url: fake,
-                    json_adapter=lambda v: v,
-                )
-        joined = "\n".join(cm.output)
+            sync_result, log_lines = _sync_capturing_logs(
+                self, analytics_sync, fake,
+            )
+        joined = "\n".join(log_lines)
         self.assertIn("completed in", joined)
         # The returned SyncResult carries the same wall-clock so the CLI
         # can print it without re-timing.
-        self.assertGreaterEqual(result.duration_s, 0.0)
+        self.assertGreaterEqual(sync_result.duration_s, 0.0)
 
     def test_no_op_paths_skip_connection_log(self) -> None:
         # `connect=lambda url: ...` must not be invoked when the sync
@@ -1379,14 +1251,15 @@ class AnalyticsSyncProgressTest(unittest.TestCase):
         # also confirms the new connecting/connected log lines do not
         # land in the no-op path (they imply a real connect was attempted).
         _, analytics_sync = _reload({
-            "ANALYTICS_LOG_PATH": "off",
-            "ANALYTICS_DB_URL": "postgresql://h/db",
+            _LOG_PATH_ENV: _SENTINEL_DISABLED,
+            _DB_URL_ENV: _DB_URL,
         })
-        with self.assertLogs("orchestrator.analytics.sync", level="INFO") as cm:
-            analytics_sync.sync_jsonl_to_postgres(
-                connect=lambda url: _FakeConnection(),
-            )
-        joined = "\n".join(cm.output)
+        # The disabled sink never dials `connect`, so a throwaway fake
+        # stands in only to satisfy the shared runner signature.
+        _, log_lines = _sync_capturing_logs(
+            self, analytics_sync, _FakeConnection(),
+        )
+        joined = "\n".join(log_lines)
         self.assertNotIn("connecting to", joined)
         self.assertNotIn("connection established", joined)
 
@@ -1409,32 +1282,18 @@ class AnalyticsSyncDailyRollupRefreshTest(unittest.TestCase):
     """
 
     def test_refresh_fires_after_successful_insert(self) -> None:
-        with tempfile.TemporaryDirectory() as td:
-            path = Path(td) / "a.jsonl"
-            _write_jsonl(path, [_sample_record(issue=1)])
-            _, analytics_sync = _reload({
-                "ANALYTICS_LOG_PATH": str(path),
-                "ANALYTICS_DB_URL": "postgresql://h/db",
-            })
+        with _sync_for_records([_sample_record(issue=1)]) as (_, analytics_sync):
             fake = _FakeConnection()
-            with self.assertLogs(
-                "orchestrator.analytics.sync", level="INFO",
-            ) as cm:
-                result = analytics_sync.sync_jsonl_to_postgres(
-                    connect=lambda url: fake,
-                    json_adapter=lambda v: v,
-                )
-        self.assertEqual(result.inserted, 1)
-        refresh_sqls = [
-            sql for sql, _ in fake.select_calls
-            if "REFRESH MATERIALIZED VIEW" in sql
-        ]
-        self.assertEqual(len(refresh_sqls), 1)
-        self.assertIn("analytics_daily_rollup", refresh_sqls[0])
+            sync_result, log_lines = _sync_capturing_logs(
+                self, analytics_sync, fake,
+            )
+        self.assertEqual(sync_result.inserted, 1)
+        self.assertEqual(len(_refresh_sqls(fake)), 1)
+        self.assertIn("analytics_daily_rollup", _refresh_sqls(fake)[0])
         # Two commits: the events insert plus the post-refresh commit.
         self.assertEqual(fake.commit_called, 2)
         self.assertEqual(fake.rollback_called, 0)
-        joined = "\n".join(cm.output)
+        joined = "\n".join(log_lines)
         self.assertIn("refreshing materialized view", joined)
         self.assertIn("refreshed analytics_daily_rollup", joined)
 
@@ -1446,27 +1305,16 @@ class AnalyticsSyncDailyRollupRefreshTest(unittest.TestCase):
         # a prior sync whose refresh failed left the rollup behind,
         # and the operator must be able to recover by rerunning even
         # when the new JSONL file carries only duplicates.
-        with tempfile.TemporaryDirectory() as td:
-            path = Path(td) / "a.jsonl"
-            records = _sample_records(2)
-            _write_jsonl(path, records)
-            _, analytics_sync = _reload({
-                "ANALYTICS_LOG_PATH": str(path),
-                "ANALYTICS_DB_URL": "postgresql://h/db",
-            })
+        records = _sample_records(2)
+        with _sync_for_records(records) as (_, analytics_sync):
             fake = _FakeConnection()
-            for record in records:
-                fake.seen_hashes.add(_sync_rows._content_hash(record))
-            result = analytics_sync.sync_jsonl_to_postgres(
-                connect=lambda url: fake,
-                json_adapter=lambda v: v,
+            fake.seen_hashes.update(
+                _sync_rows._content_hash(rec) for rec in records
             )
-        self.assertEqual(result.inserted, 0)
-        self.assertEqual(result.skipped_duplicate, len(records))
-        refresh_sqls = [
-            sql for sql, _ in fake.select_calls
-            if "REFRESH MATERIALIZED VIEW" in sql
-        ]
+            sync_result = _run_sync(analytics_sync, fake)
+        self.assertEqual(sync_result.inserted, 0)
+        self.assertEqual(sync_result.skipped_duplicate, len(records))
+        refresh_sqls = _refresh_sqls(fake)
         self.assertEqual(len(refresh_sqls), 1)
         self.assertIn("analytics_daily_rollup", refresh_sqls[0])
         # Two commits: events-insert (no-op batch path) + post-refresh.
@@ -1478,53 +1326,27 @@ class AnalyticsSyncDailyRollupRefreshTest(unittest.TestCase):
         # still fires for the same recovery reason -- the JSONL file's
         # contents do not determine whether the operator needs a
         # rollup refresh.
-        with tempfile.TemporaryDirectory() as td:
-            path = Path(td) / "a.jsonl"
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with path.open("w", encoding="utf-8") as fh:
-                fh.write("not json\n")
-                fh.write("null\n")
-            _, analytics_sync = _reload({
-                "ANALYTICS_LOG_PATH": str(path),
-                "ANALYTICS_DB_URL": "postgresql://h/db",
-            })
+        with _sync_for_lines(["not json", "null"]) as (_, analytics_sync):
             fake = _FakeConnection()
-            result = analytics_sync.sync_jsonl_to_postgres(
-                connect=lambda url: fake,
-                json_adapter=lambda v: v,
-            )
-        self.assertEqual(result.inserted, 0)
-        refresh_sqls = [
-            sql for sql, _ in fake.select_calls
-            if "REFRESH MATERIALIZED VIEW" in sql
-        ]
-        self.assertEqual(len(refresh_sqls), 1)
+            sync_result = _run_sync(analytics_sync, fake)
+        self.assertEqual(sync_result.inserted, 0)
+        self.assertEqual(len(_refresh_sqls(fake)), 1)
 
     def test_refresh_failure_does_not_abort_sync(self) -> None:
         # A REFRESH failure -- the MV not migrated yet on a
         # pre-migration deployment, a transient lock-wait error -- is
         # logged and swallowed. The committed insert is durable
         # regardless, so the sync still returns success.
-        with tempfile.TemporaryDirectory() as td:
-            path = Path(td) / "a.jsonl"
-            _write_jsonl(path, [_sample_record()])
-            _, analytics_sync = _reload({
-                "ANALYTICS_LOG_PATH": str(path),
-                "ANALYTICS_DB_URL": "postgresql://h/db",
-            })
+        with _sync_for_records([_sample_record()]) as (_, analytics_sync):
             fake = _FakeConnection()
             fake.raise_on_refresh = RuntimeError(
                 "materialized view does not exist"
             )
-            with self.assertLogs(
-                "orchestrator.analytics.sync", level="INFO",
-            ) as cm:
-                result = analytics_sync.sync_jsonl_to_postgres(
-                    connect=lambda url: fake,
-                    json_adapter=lambda v: v,
-                )
+            sync_result, log_lines = _sync_capturing_logs(
+                self, analytics_sync, fake,
+            )
         # Sync completed successfully despite the refresh raising.
-        self.assertEqual(result.inserted, 1)
+        self.assertEqual(sync_result.inserted, 1)
         # Only the events-insert commit landed; the post-refresh commit
         # was never reached because execute raised first.
         self.assertEqual(fake.commit_called, 1)
@@ -1532,7 +1354,7 @@ class AnalyticsSyncDailyRollupRefreshTest(unittest.TestCase):
         # so the connection can be cleanly closed.
         self.assertEqual(fake.rollback_called, 1)
         self.assertEqual(fake.close_called, 1)
-        joined = "\n".join(cm.output)
+        joined = "\n".join(log_lines)
         self.assertIn("refresh of analytics_daily_rollup failed", joined)
         # The original "completed in" summary still fires so an
         # operator scraping log lines sees the sync as successful.
@@ -1544,8 +1366,8 @@ class AnalyticsSyncDailyRollupRefreshTest(unittest.TestCase):
         # Mirrors the existing `AnalyticsSyncDisabledTest` for the
         # refresh surface.
         _, analytics_sync = _reload({
-            "ANALYTICS_LOG_PATH": "off",
-            "ANALYTICS_DB_URL": "postgresql://h/db",
+            _LOG_PATH_ENV: _SENTINEL_DISABLED,
+            _DB_URL_ENV: _DB_URL,
         })
         connected: list[str] = []
         analytics_sync.sync_jsonl_to_postgres(
@@ -1582,58 +1404,32 @@ class AnalyticsSyncLiveDdlTest(unittest.TestCase):
     CONFLICT specification`, surfacing the regression before it ships.
     """
 
-    DB_URL_ENV = "ANALYTICS_TEST_DB_URL"
-
     @classmethod
     def setUpClass(cls) -> None:
-        cls.db_url = os.environ.get(cls.DB_URL_ENV, "").strip()
+        cls.db_url = os.environ.get(_TEST_DB_URL_ENV, "").strip()
         if not cls.db_url:
             raise unittest.SkipTest(
-                f"{cls.DB_URL_ENV} not set; live Postgres integration "
+                f"{_TEST_DB_URL_ENV} not set; live Postgres integration "
                 "test skipped. Set it to a libpq URL pointing at the "
                 "compose service (or any disposable Postgres) to run."
             )
         try:
             import psycopg  # noqa: F401
-        except ImportError as e:
-            raise unittest.SkipTest(f"psycopg not available: {e}")
-
-    def _apply_schema(self) -> None:
-        import psycopg
-
-        repo_root = Path(__file__).resolve().parent.parent
-        schema_path = repo_root / "analytics-db" / "init" / "01-schema.sql"
-        with psycopg.connect(self.db_url) as conn:
-            with conn.cursor() as cur:
-                cur.execute(schema_path.read_text(encoding="utf-8"))
-                cur.execute("TRUNCATE analytics_events RESTART IDENTITY")
-            conn.commit()
-
-    def _row_count(self) -> int:
-        import psycopg
-
-        with psycopg.connect(self.db_url) as conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT COUNT(*) FROM analytics_events")
-                row = cur.fetchone()
-        return int(row[0]) if row else 0
+        except ImportError as exc:
+            raise unittest.SkipTest(f"psycopg not available: {exc}")
 
     def test_real_postgres_insert_and_dedup(self) -> None:
         self._apply_schema()
-        with tempfile.TemporaryDirectory() as td:
-            path = Path(td) / "a.jsonl"
-            records = [
-                _sample_record(issue=1, event="stage_enter", stage="ready"),
-                _sample_record(issue=2, event="agent_exit", duration_s=3.0),
-                _sample_record(issue=3, event="stage_evaluation",
-                               stage="validating", duration_s=1.5,
-                               result="ok"),
-            ]
-            _write_jsonl(path, records)
-            _, analytics_sync = _reload({
-                "ANALYTICS_LOG_PATH": str(path),
-                "ANALYTICS_DB_URL": self.db_url,
-            })
+        records = [
+            _sample_record(issue=1, event=_STAGE_ENTER, stage="ready"),
+            _sample_record(issue=2, event=_AGENT_EXIT, duration_s=3.0),
+            _sample_record(issue=3, event="stage_evaluation",
+                           stage="validating", duration_s=1.5,
+                           result="ok"),
+        ]
+        with _sync_for_records(records, db_url=self.db_url) as (
+            _, analytics_sync,
+        ):
             first = analytics_sync.sync_jsonl_to_postgres()
             self.assertEqual(first.inserted, len(records))
             self.assertEqual(first.skipped_duplicate, 0)
@@ -1655,11 +1451,11 @@ class AnalyticsSyncLiveDdlTest(unittest.TestCase):
 
         self._apply_schema()
         with tempfile.TemporaryDirectory() as td:
-            path = Path(td) / "a.jsonl"
+            path = Path(td) / _LOG_FILENAME
             agent_run = _sample_record(
                 issue=42,
-                event="agent_exit",
-                stage="implementing",
+                event=_AGENT_EXIT,
+                stage=_STAGE_IMPLEMENTING,
                 agent_role="developer",
                 backend="codex",
                 review_round=4,
@@ -1678,11 +1474,11 @@ class AnalyticsSyncLiveDdlTest(unittest.TestCase):
             )
             _write_jsonl(path, [agent_run])
             _, analytics_sync = _reload({
-                "ANALYTICS_LOG_PATH": str(path),
-                "ANALYTICS_DB_URL": self.db_url,
+                _LOG_PATH_ENV: str(path),
+                _DB_URL_ENV: self.db_url,
             })
-            result = analytics_sync.sync_jsonl_to_postgres()
-            self.assertEqual(result.inserted, 1)
+            sync_result = analytics_sync.sync_jsonl_to_postgres()
+            self.assertEqual(sync_result.inserted, 1)
 
             with psycopg.connect(self.db_url) as conn:
                 with conn.cursor() as cur:
@@ -1690,7 +1486,7 @@ class AnalyticsSyncLiveDdlTest(unittest.TestCase):
                         "SELECT model, total_tokens, total_cache_tokens, "
                         "review_round_bucket, failed, has_cost, cost_source "
                         "FROM analytics_agent_runs WHERE issue = %s",
-                        (agent_run["issue"],),
+                        (agent_run[_ISSUE_KEY],),
                     )
                     row = cur.fetchone()
         self.assertIsNotNone(row)
@@ -1727,11 +1523,11 @@ class AnalyticsSyncLiveDdlTest(unittest.TestCase):
 
         self._apply_schema()
         with tempfile.TemporaryDirectory() as td:
-            path = Path(td) / "a.jsonl"
+            path = Path(td) / _LOG_FILENAME
             successful_run = _sample_record(
                 issue=7,
-                event="agent_exit",
-                stage="implementing",
+                event=_AGENT_EXIT,
+                stage=_STAGE_IMPLEMENTING,
                 backend="claude",
                 cost_source="reported",
                 duration_s=4.0,
@@ -1742,12 +1538,12 @@ class AnalyticsSyncLiveDdlTest(unittest.TestCase):
                 cached_tokens=5,
                 cache_read_tokens=3,
                 cache_write_tokens=2,
-                cost_usd=0.10,
+                cost_usd=0.1,
             )
             failed_run = _sample_record(
-                issue=successful_run["issue"],
-                event="agent_exit",
-                stage="implementing",
+                issue=successful_run[_ISSUE_KEY],
+                event=_AGENT_EXIT,
+                stage=_STAGE_IMPLEMENTING,
                 backend="claude",
                 cost_source="reported",
                 ts="2026-05-25T13:30:00+00:00",
@@ -1759,16 +1555,16 @@ class AnalyticsSyncLiveDdlTest(unittest.TestCase):
                 cached_tokens=10,
                 cache_read_tokens=4,
                 cache_write_tokens=1,
-                cost_usd=0.20,
+                cost_usd=0.2,
             )
             runs = [successful_run, failed_run]
             _write_jsonl(path, runs)
             _, analytics_sync = _reload({
-                "ANALYTICS_LOG_PATH": str(path),
-                "ANALYTICS_DB_URL": self.db_url,
+                _LOG_PATH_ENV: str(path),
+                _DB_URL_ENV: self.db_url,
             })
-            result = analytics_sync.sync_jsonl_to_postgres()
-            self.assertEqual(result.inserted, len(runs))
+            sync_result = analytics_sync.sync_jsonl_to_postgres()
+            self.assertEqual(sync_result.inserted, len(runs))
 
             with psycopg.connect(self.db_url) as conn:
                 with conn.cursor() as cur:
@@ -1780,7 +1576,7 @@ class AnalyticsSyncLiveDdlTest(unittest.TestCase):
                         "failed_count, timed_out_count, event_count "
                         "FROM analytics_daily_rollup "
                         "WHERE issue = %s",
-                        (successful_run["issue"],),
+                        (successful_run[_ISSUE_KEY],),
                     )
                     row = cur.fetchone()
         self.assertIsNotNone(row)
@@ -1823,6 +1619,47 @@ class AnalyticsSyncLiveDdlTest(unittest.TestCase):
         )
         self.assertEqual(event_count, len(runs))
 
+    def _apply_schema(self) -> None:
+        import psycopg
+
+        repo_root = Path(__file__).resolve().parent.parent
+        schema_path = repo_root / "analytics-db" / "init" / "01-schema.sql"
+        with psycopg.connect(self.db_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(schema_path.read_text(encoding=_ENCODING))
+                cur.execute("TRUNCATE analytics_events RESTART IDENTITY")
+            conn.commit()
+
+    def _row_count(self) -> int:
+        import psycopg
+
+        with psycopg.connect(self.db_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT COUNT(*) FROM analytics_events")
+                row = cur.fetchone()
+        return int(row[0]) if row else 0
+
+
+# Every mapping member of record, defined in `_sync_rows`.
+_MAPPING_MEMBERS = (
+    "_build_insert_sql",
+    "_content_hash",
+    "_prepare_record",
+    "_row_values",
+    "_RowProvenance",
+)
+
+# The subset the ingest driver imports for its own use, so `sync.<name>`
+# resolves to the same object. `_content_hash` / `_PROMOTED_COLUMNS` are
+# reached only through `_sync_rows` (the driver does not use them), so the
+# driver carries no alias for them.
+_SYNC_DRIVEN_MEMBERS = (
+    "_build_insert_sql",
+    "_prepare_record",
+    "_row_values",
+    "_RowProvenance",
+)
+
 
 class SyncRowMappingExtractionTest(unittest.TestCase):
     """The record -> DB-row mapping (the promoted-column schema, the
@@ -1832,28 +1669,8 @@ class SyncRowMappingExtractionTest(unittest.TestCase):
     there, so both resolve to the same object.
     """
 
-    # Every mapping member of record, defined in `_sync_rows`.
-    _MAPPING_MEMBERS = (
-        "_build_insert_sql",
-        "_content_hash",
-        "_prepare_record",
-        "_row_values",
-        "_RowProvenance",
-    )
-
-    # The subset the ingest driver imports for its own use, so `sync.<name>`
-    # resolves to the same object. `_content_hash` / `_PROMOTED_COLUMNS` are
-    # reached only through `_sync_rows` (the driver does not use them), so the
-    # driver carries no alias for them.
-    _SYNC_DRIVEN_MEMBERS = (
-        "_build_insert_sql",
-        "_prepare_record",
-        "_row_values",
-        "_RowProvenance",
-    )
-
     def test_mapping_members_defined_in_sync_rows(self) -> None:
-        for name in self._MAPPING_MEMBERS:
+        for name in _MAPPING_MEMBERS:
             with self.subTest(name=name):
                 self.assertEqual(
                     getattr(_sync_rows, name).__module__,
@@ -1862,7 +1679,7 @@ class SyncRowMappingExtractionTest(unittest.TestCase):
 
     def test_sync_reaches_the_sync_rows_objects(self) -> None:
         from orchestrator.analytics import sync
-        for name in self._SYNC_DRIVEN_MEMBERS:
+        for name in _SYNC_DRIVEN_MEMBERS:
             with self.subTest(name=name):
                 self.assertIs(
                     getattr(sync, name), getattr(_sync_rows, name)

@@ -14,7 +14,8 @@ from unittest.mock import MagicMock, patch
 
 
 DEFAULT_RETENTION_DAYS = 90
-PRUNE_NOW = datetime(2026, 5, 25, 12, 0, 0, tzinfo=timezone.utc)
+_YEAR = 2026
+PRUNE_NOW = datetime(_YEAR, 5, 25, 12, 0, 0, tzinfo=timezone.utc)
 FRESH_RECORD_AGE_DAYS = 1
 RECENT_RECORD_AGE_DAYS = 10
 OLD_RECORD_AGE_DAYS = 100
@@ -30,6 +31,77 @@ CODEX_TRAJECTORY_INPUT_TOKENS = 200
 CODEX_TRAJECTORY_OUTPUT_TOKENS = 80
 TRAJECTORY_REVIEW_ROUND = 2
 TRAJECTORY_RETRY_COUNT = 1
+
+# Content caps the truncation tests shrink so a bounded fixture still
+# crosses them.
+_TRUNCATION_EDGE_CHARS = 5
+_LONG_TEXT_CHARS = 100
+_BUDGET_TOOL_PAIR_COUNT = 5
+_MANY_TURNS_COUNT = 5_000
+_METADATA_ONLY_STEP_COUNT = 10_000
+
+# Repeated domain values asserted across the suite: repo slugs, agent
+# backends, skill names, the stage / event kinds the records carry, and
+# the model the fixture streams bill against.
+_REPO = "owner/repo"
+_REPO_SHORT = "o/r"
+_CLAUDE = "claude"
+_CODEX = "codex"
+_DEVELOP = "develop"
+_REVIEW = "review"
+_STAGE_IMPLEMENTING = "implementing"
+_DEVELOPER = "developer"
+_AGENT_EXIT = "agent_exit"
+_STAGE_ENTER = "stage_enter"
+_AGENT_TRAJECTORY = "agent_trajectory"
+_CLAUDE_MODEL = "claude-sonnet-4-6"
+_ENCODING = "utf-8"
+
+# Config knob names, used as both the `_reload` env keys and the module
+# attributes the tests patch / read back.
+_ANALYTICS_LOG_PATH = "ANALYTICS_LOG_PATH"
+_ANALYTICS_RETENTION_DAYS = "ANALYTICS_RETENTION_DAYS"
+_TRACK_SKILL_TRIGGERS = "TRACK_SKILL_TRIGGERS"
+_TRAJECTORY_LOG_PATH = "TRAJECTORY_LOG_PATH"
+_TRAJECTORY_RETENTION_DAYS = "TRAJECTORY_RETENTION_DAYS"
+_CODEX_HOME = "CODEX_HOME"
+_DEFAULT_RETENTION_STR = str(DEFAULT_RETENTION_DAYS)
+
+# Analytics-record field keys asserted repeatedly across the suite.
+_INPUT_TOKENS = "input_tokens"
+_OUTPUT_TOKENS = "output_tokens"
+_STEPS = "steps"
+_BACKEND = "backend"
+_OUTPUT = "output"
+_RUN_USAGE = "run_usage"
+_USER_INPUT = "user_input"
+_TRUNCATED = "truncated"
+_SKILLS_TRIGGERED = "skills_triggered"
+_SKILLS_TRIGGERED_COUNT = "skills_triggered_count"
+_SKILLS_AVAILABLE = "skills_available"
+# The three skill fields `record_agent_exit` folds in behind the switch;
+# several tests assert all three appear or are dropped together.
+_SKILL_FIELD_KEYS = (
+    _SKILLS_TRIGGERED,
+    _SKILLS_TRIGGERED_COUNT,
+    _SKILLS_AVAILABLE,
+)
+
+
+def _read_text(path: Path) -> str:
+    return path.read_text(encoding=_ENCODING)
+
+
+def _read_lines(path: Path) -> list[str]:
+    return _read_text(path).splitlines()
+
+
+def _write_json_lines(path: Path, records: list[dict]) -> None:
+    """Write one sorted-key JSON object per line, creating parents."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding=_ENCODING) as stream:
+        for record in records:
+            stream.write(f"{json.dumps(record, sort_keys=True)}\n")
 
 
 def _ts_days_ago(days: int, *, now: datetime = PRUNE_NOW) -> str:
@@ -59,12 +131,40 @@ def _reload(env: dict[str, str] | None = None):
         return config, analytics
 
 
+@contextlib.contextmanager
+def _analytics_sink(retention: str | None = None):
+    """Reload the analytics package against a temporary `analytics.jsonl`
+    sink, yielding `(path, analytics)`.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        path = Path(td) / "analytics.jsonl"
+        env = {_ANALYTICS_LOG_PATH: str(path)}
+        if retention is not None:
+            env[_ANALYTICS_RETENTION_DAYS] = retention
+        _, analytics = _reload(env)
+        yield path, analytics
+
+
+@contextlib.contextmanager
+def _trajectory_sink(retention: str | None = None):
+    """Reload the analytics package against a temporary `trajectory.jsonl`
+    sink, yielding `(path, analytics)`.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        path = Path(td) / "trajectory.jsonl"
+        env = {_TRAJECTORY_LOG_PATH: str(path)}
+        if retention is not None:
+            env[_TRAJECTORY_RETENTION_DAYS] = retention
+        _, analytics = _reload(env)
+        yield path, analytics
+
+
 def _read_records(path: Path) -> list[dict]:
     if not path.exists():
         return []
     return [
         json.loads(line)
-        for line in path.read_text(encoding="utf-8").splitlines()
+        for line in _read_lines(path)
         if line.strip()
     ]
 
@@ -90,24 +190,24 @@ def _claude_stdout_with_skills(
     `skills` array is prepended -- the dedicated offered-skills source the
     real claude stream exposes, so the extractor populates `available`.
     """
-    content = [
+    tool_blocks = [
         {
             "type": "tool_use",
             "name": "Skill",
-            "id": f"toolu_{i}",
+            "id": f"toolu_{index}",
             "input": {"skill": name, "args": args_marker},
         }
-        for i, name in enumerate(skills)
+        for index, name in enumerate(skills)
     ]
     assistant = {
         "type": "assistant",
         "message": {
             "id": "msg-skill",
-            "model": "claude-sonnet-4-6",
-            "content": content,
+            "model": _CLAUDE_MODEL,
+            "content": tool_blocks,
             "usage": {
-                "input_tokens": input_tokens,
-                "output_tokens": output_tokens,
+                _INPUT_TOKENS: input_tokens,
+                _OUTPUT_TOKENS: output_tokens,
             },
         },
     }
@@ -140,28 +240,28 @@ class AnalyticsConfigTest(unittest.TestCase):
         )
 
     def test_explicit_path_overrides_default(self) -> None:
-        _, analytics = _reload({"ANALYTICS_LOG_PATH": "/var/log/orch/a.jsonl"})
+        _, analytics = _reload({_ANALYTICS_LOG_PATH: "/var/log/orch/a.jsonl"})
         self.assertEqual(
             analytics.ANALYTICS_LOG_PATH, Path("/var/log/orch/a.jsonl")
         )
 
     def test_empty_value_disables(self) -> None:
         # Explicit empty assignment in .env is the documented disable knob.
-        _, analytics = _reload({"ANALYTICS_LOG_PATH": ""})
+        _, analytics = _reload({_ANALYTICS_LOG_PATH: ""})
         self.assertIsNone(analytics.ANALYTICS_LOG_PATH)
 
     def test_sentinel_values_disable(self) -> None:
-        for value in ("off", "OFF", " off ", "disabled", "none", "None"):
-            with self.subTest(value=value):
-                _, analytics = _reload({"ANALYTICS_LOG_PATH": value})
+        for spelling in ("off", "OFF", " off ", "disabled", "none", "None"):
+            with self.subTest(spelling=spelling):
+                _, analytics = _reload({_ANALYTICS_LOG_PATH: spelling})
                 self.assertIsNone(analytics.ANALYTICS_LOG_PATH)
 
     def test_zero_retention_means_keep_forever(self) -> None:
-        _, analytics = _reload({"ANALYTICS_RETENTION_DAYS": "0"})
+        _, analytics = _reload({_ANALYTICS_RETENTION_DAYS: "0"})
         self.assertEqual(analytics.ANALYTICS_RETENTION_DAYS, 0)
 
     def test_retention_env_override(self) -> None:
-        _, analytics = _reload({"ANALYTICS_RETENTION_DAYS": "30"})
+        _, analytics = _reload({_ANALYTICS_RETENTION_DAYS: "30"})
         self.assertEqual(analytics.ANALYTICS_RETENTION_DAYS, 30)
 
 
@@ -174,16 +274,16 @@ class AnalyticsDisabledModeTest(unittest.TestCase):
     def test_append_creates_no_file_when_disabled(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             sentinel = Path(td) / "must-not-be-created.jsonl"
-            _, analytics = _reload({"ANALYTICS_LOG_PATH": ""})
+            _, analytics = _reload({_ANALYTICS_LOG_PATH: ""})
             analytics.append_record(
-                analytics.build_record(repo="o/r", issue=1, event="x")
+                analytics.build_record(repo=_REPO_SHORT, issue=1, event="x")
             )
             self.assertFalse(sentinel.exists())
             # Directory should also stay empty.
             self.assertEqual(list(Path(td).iterdir()), [])
 
     def test_prune_returns_zero_when_disabled(self) -> None:
-        _, analytics = _reload({"ANALYTICS_LOG_PATH": "off"})
+        _, analytics = _reload({_ANALYTICS_LOG_PATH: "off"})
         self.assertEqual(analytics.prune_old_records(), 0)
 
     def test_disabled_sink_does_not_create_log_dir(self) -> None:
@@ -192,10 +292,10 @@ class AnalyticsDisabledModeTest(unittest.TestCase):
             log_dir = Path(td) / "logs"
             _, analytics = _reload({
                 "LOG_DIR": str(log_dir),
-                "ANALYTICS_LOG_PATH": "off",
+                _ANALYTICS_LOG_PATH: "off",
             })
             analytics.append_record(
-                analytics.build_record(repo="o/r", issue=1, event="x")
+                analytics.build_record(repo=_REPO_SHORT, issue=1, event="x")
             )
             self.assertFalse(log_dir.exists())
 
@@ -208,52 +308,53 @@ class AnalyticsAppendTest(unittest.TestCase):
     def test_record_has_required_base_fields(self) -> None:
         _, analytics = _reload()
         rec = analytics.build_record(
-            repo="o/r", issue=42, event="stage_enter", stage="implementing"
+            repo=_REPO_SHORT, issue=42, event=_STAGE_ENTER,
+            stage=_STAGE_IMPLEMENTING,
         )
         self.assertIn("ts", rec)
-        self.assertEqual(rec["repo"], "o/r")
+        self.assertEqual(rec["repo"], _REPO_SHORT)
         self.assertEqual(rec["issue"], 42)
-        self.assertEqual(rec["event"], "stage_enter")
-        self.assertEqual(rec["stage"], "implementing")
+        self.assertEqual(rec["event"], _STAGE_ENTER)
+        self.assertEqual(rec["stage"], _STAGE_IMPLEMENTING)
         parsed = datetime.fromisoformat(rec["ts"])
         self.assertIsNotNone(parsed.tzinfo)
 
     def test_stage_omitted_when_none(self) -> None:
         _, analytics = _reload()
-        rec = analytics.build_record(repo="o/r", issue=1, event="pr_opened")
+        rec = analytics.build_record(
+            repo=_REPO_SHORT, issue=1, event="pr_opened",
+        )
         self.assertNotIn("stage", rec)
 
     def test_none_valued_extras_are_dropped(self) -> None:
         _, analytics = _reload()
         rec = analytics.build_record(
-            repo="o/r", issue=1, event="agent_spawn",
+            repo=_REPO_SHORT, issue=1, event="agent_spawn",
             session_id=None, retry_count=2,
         )
         self.assertNotIn("session_id", rec)
         self.assertEqual(rec["retry_count"], 2)
 
     def test_append_writes_one_line_per_record(self) -> None:
-        with tempfile.TemporaryDirectory() as td:
-            path = Path(td) / "analytics.jsonl"
-            _, analytics = _reload({"ANALYTICS_LOG_PATH": str(path)})
+        with _analytics_sink() as (path, analytics):
             analytics.append_record(
                 analytics.build_record(
-                    repo="o/r", issue=1, event="stage_enter",
-                    stage="implementing",
+                    repo=_REPO_SHORT, issue=1, event=_STAGE_ENTER,
+                    stage=_STAGE_IMPLEMENTING,
                 )
             )
             analytics.append_record(
                 analytics.build_record(
-                    repo="o/r", issue=2, event="pr_opened", pr_number=5,
+                    repo=_REPO_SHORT, issue=2, event="pr_opened", pr_number=5,
                 )
             )
             self.assertTrue(path.exists())
-            lines = path.read_text(encoding="utf-8").splitlines()
+            lines = _read_lines(path)
             self.assertEqual(len(lines), 2)
             rec0 = json.loads(lines[0])
             self.assertEqual(rec0["issue"], 1)
-            self.assertEqual(rec0["event"], "stage_enter")
-            self.assertEqual(rec0["stage"], "implementing")
+            self.assertEqual(rec0["event"], _STAGE_ENTER)
+            self.assertEqual(rec0["stage"], _STAGE_IMPLEMENTING)
             rec1 = json.loads(lines[1])
             self.assertEqual(rec1["pr_number"], 5)
             self.assertNotIn("stage", rec1)
@@ -261,22 +362,22 @@ class AnalyticsAppendTest(unittest.TestCase):
     def test_creates_missing_parent_dirs(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "a" / "b" / "c" / "analytics.jsonl"
-            _, analytics = _reload({"ANALYTICS_LOG_PATH": str(path)})
+            _, analytics = _reload({_ANALYTICS_LOG_PATH: str(path)})
             analytics.append_record(
-                analytics.build_record(repo="o/r", issue=1, event="x")
+                analytics.build_record(repo=_REPO_SHORT, issue=1, event="x")
             )
             self.assertTrue(path.exists())
 
     def test_append_is_append_only(self) -> None:
         # Repeated appends must accumulate, never overwrite prior records.
-        with tempfile.TemporaryDirectory() as td:
-            path = Path(td) / "analytics.jsonl"
-            _, analytics = _reload({"ANALYTICS_LOG_PATH": str(path)})
-            for n in range(5):
+        with _analytics_sink() as (path, analytics):
+            for issue_num in range(5):
                 analytics.append_record(
-                    analytics.build_record(repo="o/r", issue=n, event="x")
+                    analytics.build_record(
+                        repo=_REPO_SHORT, issue=issue_num, event="x",
+                    )
                 )
-            lines = path.read_text(encoding="utf-8").splitlines()
+            lines = _read_lines(path)
             self.assertEqual(len(lines), 5)
             issues = [json.loads(line)["issue"] for line in lines]
             self.assertEqual(issues, list(range(5)))
@@ -289,33 +390,23 @@ class AnalyticsPruneTest(unittest.TestCase):
     malformed lines so cleanup is operator-driven.
     """
 
-    @staticmethod
-    def _write_lines(path: Path, records: list[dict]) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("w", encoding="utf-8") as fh:
-            for rec in records:
-                fh.write(json.dumps(rec, sort_keys=True) + "\n")
-
     def test_removes_old_records_keeps_recent(self) -> None:
         now = PRUNE_NOW
         old_ts = _ts_days_ago(OLD_RECORD_AGE_DAYS, now=now)
         new_ts = _ts_days_ago(RECENT_RECORD_AGE_DAYS, now=now)
-        with tempfile.TemporaryDirectory() as td:
-            path = Path(td) / "analytics.jsonl"
-            _, analytics = _reload({
-                "ANALYTICS_LOG_PATH": str(path),
-                "ANALYTICS_RETENTION_DAYS": str(DEFAULT_RETENTION_DAYS),
-            })
-            self._write_lines(path, [
-                {"ts": old_ts, "repo": "o/r", "issue": 1, "event": "x"},
-                {"ts": new_ts, "repo": "o/r", "issue": 2, "event": "y"},
-                {"ts": old_ts, "repo": "o/r", "issue": 3, "event": "z"},
+        with _analytics_sink(retention=_DEFAULT_RETENTION_STR) as (
+            path, analytics,
+        ):
+            _write_json_lines(path, [
+                {"ts": old_ts, "repo": _REPO_SHORT, "issue": 1, "event": "x"},
+                {"ts": new_ts, "repo": _REPO_SHORT, "issue": 2, "event": "y"},
+                {"ts": old_ts, "repo": _REPO_SHORT, "issue": 3, "event": "z"},
             ])
             removed = analytics.prune_old_records(now=now)
             self.assertEqual(removed, 2)
             remaining = [
                 json.loads(line)
-                for line in path.read_text(encoding="utf-8").splitlines()
+                for line in _read_lines(path)
             ]
             self.assertEqual(len(remaining), 1)
             self.assertEqual(remaining[0]["issue"], 2)
@@ -323,58 +414,43 @@ class AnalyticsPruneTest(unittest.TestCase):
     def test_zero_retention_is_no_op(self) -> None:
         now = PRUNE_NOW
         ancient = _ts_days_ago(ANCIENT_RECORD_AGE_DAYS, now=now)
-        with tempfile.TemporaryDirectory() as td:
-            path = Path(td) / "analytics.jsonl"
-            _, analytics = _reload({
-                "ANALYTICS_LOG_PATH": str(path),
-                "ANALYTICS_RETENTION_DAYS": "0",
-            })
-            self._write_lines(path, [
-                {"ts": ancient, "repo": "o/r", "issue": 1, "event": "x"},
+        with _analytics_sink(retention="0") as (path, analytics):
+            _write_json_lines(path, [
+                {"ts": ancient, "repo": _REPO_SHORT, "issue": 1, "event": "x"},
             ])
-            removed = analytics.prune_old_records(now=now)
-            self.assertEqual(removed, 0)
+            self.assertEqual(analytics.prune_old_records(now=now), 0)
             # File contents unchanged.
-            lines = path.read_text(encoding="utf-8").splitlines()
+            lines = _read_lines(path)
             self.assertEqual(len(lines), 1)
 
     def test_negative_retention_is_no_op(self) -> None:
         # Treated identically to the documented `0 = keep forever` knob.
         now = PRUNE_NOW
         old_ts = _ts_days_ago(OLD_RECORD_AGE_DAYS, now=now)
-        with tempfile.TemporaryDirectory() as td:
-            path = Path(td) / "analytics.jsonl"
-            _, analytics = _reload({
-                "ANALYTICS_LOG_PATH": str(path),
-                "ANALYTICS_RETENTION_DAYS": "-5",
-            })
-            self._write_lines(path, [
-                {"ts": old_ts, "repo": "o/r", "issue": 1, "event": "x"},
+        with _analytics_sink(retention="-5") as (path, analytics):
+            _write_json_lines(path, [
+                {"ts": old_ts, "repo": _REPO_SHORT, "issue": 1, "event": "x"},
             ])
             self.assertEqual(analytics.prune_old_records(now=now), 0)
 
     def test_missing_file_returns_zero(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "absent.jsonl"
-            _, analytics = _reload({"ANALYTICS_LOG_PATH": str(path)})
+            _, analytics = _reload({_ANALYTICS_LOG_PATH: str(path)})
             self.assertEqual(analytics.prune_old_records(), 0)
             self.assertFalse(path.exists())
 
     def test_no_records_old_enough_does_not_rewrite(self) -> None:
         now = PRUNE_NOW
         new_ts = _ts_days_ago(FRESH_RECORD_AGE_DAYS, now=now)
-        with tempfile.TemporaryDirectory() as td:
-            path = Path(td) / "analytics.jsonl"
-            _, analytics = _reload({
-                "ANALYTICS_LOG_PATH": str(path),
-                "ANALYTICS_RETENTION_DAYS": str(DEFAULT_RETENTION_DAYS),
-            })
-            self._write_lines(path, [
-                {"ts": new_ts, "repo": "o/r", "issue": 1, "event": "x"},
+        with _analytics_sink(retention=_DEFAULT_RETENTION_STR) as (
+            path, analytics,
+        ):
+            _write_json_lines(path, [
+                {"ts": new_ts, "repo": _REPO_SHORT, "issue": 1, "event": "x"},
             ])
             mtime_before = path.stat().st_mtime_ns
-            removed = analytics.prune_old_records(now=now)
-            self.assertEqual(removed, 0)
+            self.assertEqual(analytics.prune_old_records(now=now), 0)
             self.assertEqual(path.stat().st_mtime_ns, mtime_before)
 
     def test_malformed_lines_preserved(self) -> None:
@@ -383,25 +459,23 @@ class AnalyticsPruneTest(unittest.TestCase):
         # the helper silently drop data it cannot interpret.
         now = PRUNE_NOW
         old_ts = _ts_days_ago(VERY_OLD_RECORD_AGE_DAYS, now=now)
-        with tempfile.TemporaryDirectory() as td:
-            path = Path(td) / "analytics.jsonl"
-            _, analytics = _reload({
-                "ANALYTICS_LOG_PATH": str(path),
-                "ANALYTICS_RETENTION_DAYS": str(DEFAULT_RETENTION_DAYS),
-            })
+        with _analytics_sink(retention=_DEFAULT_RETENTION_STR) as (
+            path, analytics,
+        ):
             path.parent.mkdir(parents=True, exist_ok=True)
-            with path.open("w", encoding="utf-8") as fh:
+            with path.open("w", encoding=_ENCODING) as fh:
                 fh.write("this is not json\n")
-                fh.write(json.dumps(
-                    {"ts": old_ts, "repo": "o/r", "issue": 1, "event": "x"}
-                ) + "\n")
+                fh.write(json.dumps({
+                    "ts": old_ts, "repo": _REPO_SHORT,
+                    "issue": 1, "event": "x",
+                }) + "\n")
                 fh.write('{"ts": "not-a-date", "event": "y"}\n')
                 fh.write('{"event": "no-ts-field"}\n')
             removed = analytics.prune_old_records(now=now)
             # Only the parseable old record is removed; the three other
             # malformed-or-missing-ts lines survive.
             self.assertEqual(removed, 1)
-            kept = path.read_text(encoding="utf-8").splitlines()
+            kept = _read_lines(path)
             self.assertEqual(len(kept), 3)
             self.assertIn("this is not json", kept[0])
 
@@ -413,25 +487,24 @@ class AnalyticsPruneTest(unittest.TestCase):
         # cleaned up so no `.prune.*.tmp` orphan is left behind.
         now = PRUNE_NOW
         old_ts = _ts_days_ago(VERY_OLD_RECORD_AGE_DAYS, now=now)
-        with tempfile.TemporaryDirectory() as td:
-            path = Path(td) / "analytics.jsonl"
-            _, analytics = _reload({
-                "ANALYTICS_LOG_PATH": str(path),
-                "ANALYTICS_RETENTION_DAYS": str(DEFAULT_RETENTION_DAYS),
-            })
-            self._write_lines(path, [
-                {"ts": old_ts, "repo": "o/r", "issue": 1, "event": "x"},
+        with _analytics_sink(retention=_DEFAULT_RETENTION_STR) as (
+            path, analytics,
+        ):
+            _write_json_lines(path, [
+                {"ts": old_ts, "repo": _REPO_SHORT, "issue": 1, "event": "x"},
             ])
-            before = path.read_text(encoding="utf-8")
+            before = _read_text(path)
             with patch.object(
                 analytics.os, "replace",
                 side_effect=OSError("no space left on device"),
             ):
                 removed = analytics.prune_old_records(now=now)
             self.assertEqual(removed, 0)
-            self.assertEqual(path.read_text(encoding="utf-8"), before)
+            self.assertEqual(_read_text(path), before)
             leftovers = [
-                p.name for p in Path(td).iterdir() if ".prune." in p.name
+                entry.name
+                for entry in path.parent.iterdir()
+                if ".prune." in entry.name
             ]
             self.assertEqual(leftovers, [])
 
@@ -443,17 +516,15 @@ class AnalyticsPruneTest(unittest.TestCase):
         old_naive = (now - timedelta(days=OLD_RECORD_AGE_DAYS)).replace(
             tzinfo=None
         ).isoformat(timespec="seconds")
-        with tempfile.TemporaryDirectory() as td:
-            path = Path(td) / "analytics.jsonl"
-            _, analytics = _reload({
-                "ANALYTICS_LOG_PATH": str(path),
-                "ANALYTICS_RETENTION_DAYS": str(DEFAULT_RETENTION_DAYS),
-            })
-            self._write_lines(path, [
-                {"ts": old_naive, "repo": "o/r", "issue": 1, "event": "x"},
-            ])
+        with _analytics_sink(retention=_DEFAULT_RETENTION_STR) as (
+            path, analytics,
+        ):
+            _write_json_lines(path, [{
+                "ts": old_naive, "repo": _REPO_SHORT,
+                "issue": 1, "event": "x",
+            }])
             self.assertEqual(analytics.prune_old_records(now=now), 1)
-            self.assertEqual(path.read_text(encoding="utf-8"), "")
+            self.assertEqual(_read_text(path), "")
 
 
 class PruneWithRetentionLoggingTest(unittest.TestCase):
@@ -472,7 +543,7 @@ class PruneWithRetentionLoggingTest(unittest.TestCase):
             analytics, "prune_old_records", return_value=0,
         ) as prune:
             analytics.prune_with_retention_logging()
-        prune.assert_called_once_with()
+            prune.assert_called_once_with()
 
     def test_exception_is_swallowed(self) -> None:
         # A runaway error inside `prune_old_records` must not propagate
@@ -516,18 +587,18 @@ class PruneWithRetentionLoggingTest(unittest.TestCase):
             # must NOT drop it.
             path.write_text(
                 json.dumps({
-                    "ts": old_ts, "repo": "o/r", "issue": 1,
-                    "event": "stage_enter",
+                    "ts": old_ts, "repo": _REPO_SHORT, "issue": 1,
+                    "event": _STAGE_ENTER,
                 }) + "\n"
                 + json.dumps({
-                    "ts": new_ts, "repo": "o/r", "issue": 2,
-                    "event": "stage_enter",
+                    "ts": new_ts, "repo": _REPO_SHORT, "issue": 2,
+                    "event": _STAGE_ENTER,
                 }) + "\n",
-                encoding="utf-8",
+                encoding=_ENCODING,
             )
             _, analytics = _reload({
-                "ANALYTICS_LOG_PATH": str(path),
-                "ANALYTICS_RETENTION_DAYS": str(DEFAULT_RETENTION_DAYS),
+                _ANALYTICS_LOG_PATH: str(path),
+                _ANALYTICS_RETENTION_DAYS: _DEFAULT_RETENTION_STR,
             })
 
             after_read = threading.Event()
@@ -557,13 +628,13 @@ class PruneWithRetentionLoggingTest(unittest.TestCase):
                 # write would land on the soon-unlinked inode).
                 after_read.wait(timeout=5.0)
                 analytics.append_record({
-                    "ts": new_ts, "repo": "o/r", "issue": 99,
-                    "event": "stage_enter",
+                    "ts": new_ts, "repo": _REPO_SHORT, "issue": 99,
+                    "event": _STAGE_ENTER,
                 })
                 appender_done.set()
 
-            t = threading.Thread(target=appender)
-            t.start()
+            appender_thread = threading.Thread(target=appender)
+            appender_thread.start()
             try:
                 with patch.object(analytics.os, "replace", gated_replace):
                     removed = analytics.prune_old_records(now=now)
@@ -571,12 +642,12 @@ class PruneWithRetentionLoggingTest(unittest.TestCase):
                 # Make sure the appender is unblocked even if the
                 # prune raised; the wait above is bounded.
                 after_read.set()
-                t.join(timeout=5.0)
+                appender_thread.join(timeout=5.0)
 
             self.assertEqual(removed, 1)
             remaining = [
                 json.loads(line)
-                for line in path.read_text(encoding="utf-8").splitlines()
+                for line in _read_lines(path)
             ]
             issues = sorted(record["issue"] for record in remaining)
             # The old record (issue=1) is gone. Both the kept record
@@ -600,19 +671,19 @@ class PruneWithRetentionLoggingTest(unittest.TestCase):
             path = Path(td) / "analytics.jsonl"
             path.write_text(
                 json.dumps({
-                    "ts": old_ts, "repo": "o/r", "issue": 1,
-                    "event": "stage_enter", "stage": "implementing",
+                    "ts": old_ts, "repo": _REPO_SHORT, "issue": 1,
+                    "event": _STAGE_ENTER, "stage": _STAGE_IMPLEMENTING,
                 }) + "\n"
                 + json.dumps({
-                    "ts": new_ts, "repo": "o/r", "issue": 2,
+                    "ts": new_ts, "repo": _REPO_SHORT, "issue": 2,
                     "event": "stage_evaluation", "stage": "validating",
                     "duration_s": 0.001, "result": "ok",
                 }) + "\n",
-                encoding="utf-8",
+                encoding=_ENCODING,
             )
             _, analytics = _reload({
-                "ANALYTICS_LOG_PATH": str(path),
-                "ANALYTICS_RETENTION_DAYS": str(DEFAULT_RETENTION_DAYS),
+                _ANALYTICS_LOG_PATH: str(path),
+                _ANALYTICS_RETENTION_DAYS: _DEFAULT_RETENTION_STR,
             })
             mutators = (
                 "write_pinned_state", "comment", "set_workflow_label",
@@ -622,29 +693,22 @@ class PruneWithRetentionLoggingTest(unittest.TestCase):
             # Patch every GitHub-mutating method on the class so the
             # prune cannot side-effect through any client instance that
             # some future refactor accidentally routes it through.
-            patchers = [
-                patch.object(
-                    GitHubClient,
-                    name,
-                    MagicMock(
-                        side_effect=AssertionError(
-                            f"prune must not call GitHubClient.{name}"
+            with contextlib.ExitStack() as guards:
+                for name in mutators:
+                    guards.enter_context(patch.object(
+                        GitHubClient,
+                        name,
+                        MagicMock(
+                            side_effect=AssertionError(
+                                f"prune must not call GitHubClient.{name}"
+                            ),
                         ),
-                    ),
-                )
-                for name in mutators
-            ]
-            for p in patchers:
-                p.start()
-            try:
+                    ))
                 removed = analytics.prune_old_records(now=now)
-            finally:
-                for p in patchers:
-                    p.stop()
             self.assertEqual(removed, 1)
             remaining = [
                 json.loads(line)
-                for line in path.read_text(encoding="utf-8").splitlines()
+                for line in _read_lines(path)
             ]
             self.assertEqual(len(remaining), 1)
             self.assertEqual(remaining[0]["issue"], 2)
@@ -662,18 +726,18 @@ class SkillTriggerConfigTest(unittest.TestCase):
         # proves low-noise live. Flipping this assertion is the flip.
         _, analytics = _reload()
         self.assertFalse(analytics.TRACK_SKILL_TRIGGERS)
-        self.assertIn("TRACK_SKILL_TRIGGERS", analytics.__all__)
+        self.assertIn(_TRACK_SKILL_TRIGGERS, analytics.__all__)
 
     def test_truthy_spellings_enable(self) -> None:
-        for value in ("1", "true", "on", "yes", "On", " YES "):
-            with self.subTest(value=value):
-                _, analytics = _reload({"TRACK_SKILL_TRIGGERS": value})
+        for spelling in ("1", "true", "on", "yes", "On", " YES "):
+            with self.subTest(spelling=spelling):
+                _, analytics = _reload({_TRACK_SKILL_TRIGGERS: spelling})
                 self.assertTrue(analytics.TRACK_SKILL_TRIGGERS)
 
     def test_falsey_and_unknown_values_stay_off(self) -> None:
-        for value in ("0", "false", "off", "no", "", "maybe"):
-            with self.subTest(value=value):
-                _, analytics = _reload({"TRACK_SKILL_TRIGGERS": value})
+        for spelling in ("0", "false", "off", "no", "", "maybe"):
+            with self.subTest(spelling=spelling):
+                _, analytics = _reload({_TRACK_SKILL_TRIGGERS: spelling})
                 self.assertFalse(analytics.TRACK_SKILL_TRIGGERS)
 
 
@@ -683,33 +747,6 @@ class RecordAgentExitSkillTest(unittest.TestCase):
     args or raw stdout, and keeps emitting the baseline usage/cost record
     even when the skill parse raises (its own fail-open guard)."""
 
-    def _emit(
-        self, analytics, path, *, stdout, backend="claude", track=True,
-    ) -> list[dict]:
-        with patch.object(analytics, "ANALYTICS_LOG_PATH", path), \
-                patch.object(analytics, "TRACK_SKILL_TRIGGERS", track):
-            analytics.record_agent_exit(
-                repo="owner/repo",
-                issue=AGENT_EXIT_ISSUE_NUMBER,
-                stage="implementing",
-                agent_role="developer",
-                backend=backend,
-                agent_spec="claude",
-                resume_session_id=None,
-                result=analytics.AgentResult(
-                    session_id="sess",
-                    last_message="",
-                    exit_code=0,
-                    timed_out=False,
-                    stdout=stdout,
-                    stderr="",
-                ),
-                duration_s=0.0,
-                review_round=0,
-                retry_count=1,
-            )
-        return _read_records(path)
-
     def test_switch_off_drops_all_skill_fields(self) -> None:
         # Default-off: a skill-bearing stream still records usage but none
         # of the three skill keys appear -- shape-compatible with today.
@@ -717,16 +754,14 @@ class RecordAgentExitSkillTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             records = self._emit(
                 analytics, Path(td) / "a.jsonl",
-                stdout=_claude_stdout_with_skills(skills=("develop",)),
+                stdout=_claude_stdout_with_skills(skills=(_DEVELOP,)),
                 track=False,
             )
         self.assertEqual(len(records), 1)
         rec = records[0]
-        self.assertEqual(rec["event"], "agent_exit")
-        self.assertEqual(rec["input_tokens"], SKILL_STREAM_INPUT_TOKENS)
-        for key in (
-            "skills_triggered", "skills_triggered_count", "skills_available",
-        ):
+        self.assertEqual(rec["event"], _AGENT_EXIT)
+        self.assertEqual(rec[_INPUT_TOKENS], SKILL_STREAM_INPUT_TOKENS)
+        for key in _SKILL_FIELD_KEYS:
             self.assertNotIn(key, rec)
 
     def test_switch_on_records_triggered_fields(self) -> None:
@@ -738,16 +773,16 @@ class RecordAgentExitSkillTest(unittest.TestCase):
             records = self._emit(
                 analytics, Path(td) / "a.jsonl",
                 stdout=_claude_stdout_with_skills(
-                    skills=("develop", "develop", "review"),
+                    skills=(_DEVELOP, _DEVELOP, _REVIEW),
                 ),
                 track=True,
             )
         self.assertEqual(len(records), 1)
         rec = records[0]
-        self.assertEqual(rec["skills_triggered"], ["develop", "review"])
-        self.assertEqual(rec["skills_triggered_count"], 3)
-        self.assertNotIn("skills_available", rec)
-        self.assertEqual(rec["input_tokens"], SKILL_STREAM_INPUT_TOKENS)
+        self.assertEqual(rec[_SKILLS_TRIGGERED], [_DEVELOP, _REVIEW])
+        self.assertEqual(rec[_SKILLS_TRIGGERED_COUNT], 3)
+        self.assertNotIn(_SKILLS_AVAILABLE, rec)
+        self.assertEqual(rec[_INPUT_TOKENS], SKILL_STREAM_INPUT_TOKENS)
 
     def test_switch_on_no_triggers_matches_off_shape(self) -> None:
         # Switch on but the stream triggered nothing: all three skill keys
@@ -756,7 +791,7 @@ class RecordAgentExitSkillTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             off = self._emit(
                 analytics, Path(td) / "off.jsonl",
-                stdout=_claude_stdout_with_skills(skills=("develop",)),
+                stdout=_claude_stdout_with_skills(skills=(_DEVELOP,)),
                 track=False,
             )
             on_none = self._emit(
@@ -764,9 +799,7 @@ class RecordAgentExitSkillTest(unittest.TestCase):
                 stdout=_claude_stdout_with_skills(skills=()),
                 track=True,
             )
-        for key in (
-            "skills_triggered", "skills_triggered_count", "skills_available",
-        ):
+        for key in _SKILL_FIELD_KEYS:
             self.assertNotIn(key, on_none[0])
         self.assertEqual(set(off[0]), set(on_none[0]))
 
@@ -777,14 +810,14 @@ class RecordAgentExitSkillTest(unittest.TestCase):
         _, analytics = _reload()
         marker = "ghp_LEAKED_SKILL_ARG_PAYLOAD_DO_NOT_STORE"
         stdout = _claude_stdout_with_skills(
-            skills=("develop",), args_marker=marker,
+            skills=(_DEVELOP,), args_marker=marker,
         )
         with tempfile.TemporaryDirectory() as td:
             records = self._emit(
                 analytics, Path(td) / "a.jsonl", stdout=stdout, track=True,
             )
         rec = records[0]
-        self.assertEqual(rec["skills_triggered"], ["develop"])
+        self.assertEqual(rec[_SKILLS_TRIGGERED], [_DEVELOP])
         blob = json.dumps(rec)
         self.assertNotIn(marker, blob)
         self.assertNotIn(stdout, blob)
@@ -800,15 +833,15 @@ class RecordAgentExitSkillTest(unittest.TestCase):
             records = self._emit(
                 analytics, Path(td) / "a.jsonl",
                 stdout=_claude_stdout_with_skills(
-                    skills=("develop",),
-                    offered=("develop", "review"),
+                    skills=(_DEVELOP,),
+                    offered=(_DEVELOP, _REVIEW),
                 ),
                 track=True,
             )
         rec = records[0]
-        self.assertEqual(rec["skills_triggered"], ["develop"])
-        self.assertEqual(rec["skills_triggered_count"], 1)
-        self.assertEqual(rec["skills_available"], ["develop", "review"])
+        self.assertEqual(rec[_SKILLS_TRIGGERED], [_DEVELOP])
+        self.assertEqual(rec[_SKILLS_TRIGGERED_COUNT], 1)
+        self.assertEqual(rec[_SKILLS_AVAILABLE], [_DEVELOP, _REVIEW])
 
     def test_available_independent_of_triggered(self) -> None:
         # Offered but nothing triggered: `skills_available` is written while
@@ -819,14 +852,14 @@ class RecordAgentExitSkillTest(unittest.TestCase):
             records = self._emit(
                 analytics, Path(td) / "a.jsonl",
                 stdout=_claude_stdout_with_skills(
-                    skills=(), offered=("develop", "review"),
+                    skills=(), offered=(_DEVELOP, _REVIEW),
                 ),
                 track=True,
             )
         rec = records[0]
-        self.assertEqual(rec["skills_available"], ["develop", "review"])
-        self.assertNotIn("skills_triggered", rec)
-        self.assertNotIn("skills_triggered_count", rec)
+        self.assertEqual(rec[_SKILLS_AVAILABLE], [_DEVELOP, _REVIEW])
+        self.assertNotIn(_SKILLS_TRIGGERED, rec)
+        self.assertNotIn(_SKILLS_TRIGGERED_COUNT, rec)
 
     def test_parse_failure_keeps_baseline_record(self) -> None:
         # A skill-parser bug must NOT drop the usage/cost record: the inner
@@ -839,59 +872,18 @@ class RecordAgentExitSkillTest(unittest.TestCase):
             ), self.assertLogs(analytics.log, level="ERROR"):
                 records = self._emit(
                     analytics, Path(td) / "a.jsonl",
-                    stdout=_claude_stdout_with_skills(skills=("develop",)),
+                    stdout=_claude_stdout_with_skills(skills=(_DEVELOP,)),
                     track=True,
                 )
         self.assertEqual(len(records), 1)
         rec = records[0]
         # Baseline usage fields survived the skill-parse failure...
-        self.assertEqual(rec["event"], "agent_exit")
-        self.assertEqual(rec["input_tokens"], SKILL_STREAM_INPUT_TOKENS)
-        self.assertEqual(rec["output_tokens"], SKILL_STREAM_OUTPUT_TOKENS)
+        self.assertEqual(rec["event"], _AGENT_EXIT)
+        self.assertEqual(rec[_INPUT_TOKENS], SKILL_STREAM_INPUT_TOKENS)
+        self.assertEqual(rec[_OUTPUT_TOKENS], SKILL_STREAM_OUTPUT_TOKENS)
         # ...and the skill fields were left off.
-        for key in (
-            "skills_triggered", "skills_triggered_count", "skills_available",
-        ):
+        for key in _SKILL_FIELD_KEYS:
             self.assertNotIn(key, rec)
-
-    def _record(
-        self, analytics, *, stdout, track=True, parse=None,
-    ):
-        """Call `record_agent_exit` with the sink disabled and return its
-        value -- the de-duplicated triggered list the caller emits events
-        from. `parse` optionally stubs the skill extractor.
-        """
-        with contextlib.ExitStack() as stack:
-            stack.enter_context(
-                patch.object(analytics, "ANALYTICS_LOG_PATH", None)
-            )
-            stack.enter_context(
-                patch.object(analytics, "TRACK_SKILL_TRIGGERS", track)
-            )
-            if parse is not None:
-                stack.enter_context(
-                    patch.object(analytics.usage, "parse_agent_skills", parse)
-                )
-            return analytics.record_agent_exit(
-                repo="owner/repo",
-                issue=AGENT_EXIT_ISSUE_NUMBER,
-                stage="implementing",
-                agent_role="developer",
-                backend="claude",
-                agent_spec="claude",
-                resume_session_id=None,
-                result=analytics.AgentResult(
-                    session_id="sess",
-                    last_message="",
-                    exit_code=0,
-                    timed_out=False,
-                    stdout=stdout,
-                    stderr="",
-                ),
-                duration_s=0.0,
-                review_round=0,
-                retry_count=1,
-            )
 
     def test_returns_triggered_list_when_switch_on(self) -> None:
         # The return value is the de-duplicated first-seen list the audit
@@ -900,17 +892,17 @@ class RecordAgentExitSkillTest(unittest.TestCase):
         triggered = self._record(
             analytics,
             stdout=_claude_stdout_with_skills(
-                skills=("develop", "develop", "review"),
+                skills=(_DEVELOP, _DEVELOP, _REVIEW),
             ),
             track=True,
         )
-        self.assertEqual(triggered, ["develop", "review"])
+        self.assertEqual(triggered, [_DEVELOP, _REVIEW])
 
     def test_returns_none_when_switch_off(self) -> None:
         _, analytics = _reload()
         triggered = self._record(
             analytics,
-            stdout=_claude_stdout_with_skills(skills=("develop",)),
+            stdout=_claude_stdout_with_skills(skills=(_DEVELOP,)),
             track=False,
         )
         self.assertIsNone(triggered)
@@ -930,11 +922,77 @@ class RecordAgentExitSkillTest(unittest.TestCase):
         with self.assertLogs(analytics.log, level="ERROR"):
             triggered = self._record(
                 analytics,
-                stdout=_claude_stdout_with_skills(skills=("develop",)),
+                stdout=_claude_stdout_with_skills(skills=(_DEVELOP,)),
                 track=True,
                 parse=MagicMock(side_effect=RuntimeError("boom")),
             )
         self.assertIsNone(triggered)
+
+    def _emit(
+        self, analytics, path, *, stdout, backend=_CLAUDE, track=True,
+    ) -> list[dict]:
+        with patch.object(analytics, _ANALYTICS_LOG_PATH, path), \
+                patch.object(analytics, _TRACK_SKILL_TRIGGERS, track):
+            analytics.record_agent_exit(
+                repo=_REPO,
+                issue=AGENT_EXIT_ISSUE_NUMBER,
+                stage=_STAGE_IMPLEMENTING,
+                agent_role=_DEVELOPER,
+                backend=backend,
+                agent_spec=_CLAUDE,
+                resume_session_id=None,
+                result=analytics.AgentResult(
+                    session_id="sess",
+                    last_message="",
+                    exit_code=0,
+                    timed_out=False,
+                    stdout=stdout,
+                    stderr="",
+                ),
+                duration_s=0.0,
+                review_round=0,
+                retry_count=1,
+            )
+        return _read_records(path)
+
+    def _record(
+        self, analytics, *, stdout, track=True, parse=None,
+    ):
+        """Call `record_agent_exit` with the sink disabled and return its
+        value -- the de-duplicated triggered list the caller emits events
+        from. `parse` optionally stubs the skill extractor.
+        """
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(
+                patch.object(analytics, _ANALYTICS_LOG_PATH, None)
+            )
+            stack.enter_context(
+                patch.object(analytics, _TRACK_SKILL_TRIGGERS, track)
+            )
+            if parse is not None:
+                stack.enter_context(
+                    patch.object(analytics.usage, "parse_agent_skills", parse)
+                )
+            return analytics.record_agent_exit(
+                repo=_REPO,
+                issue=AGENT_EXIT_ISSUE_NUMBER,
+                stage=_STAGE_IMPLEMENTING,
+                agent_role=_DEVELOPER,
+                backend=_CLAUDE,
+                agent_spec=_CLAUDE,
+                resume_session_id=None,
+                result=analytics.AgentResult(
+                    session_id="sess",
+                    last_message="",
+                    exit_code=0,
+                    timed_out=False,
+                    stdout=stdout,
+                    stderr="",
+                ),
+                duration_s=0.0,
+                review_round=0,
+                retry_count=1,
+            )
 
 
 class TrajectoryConfigTest(unittest.TestCase):
@@ -950,17 +1008,17 @@ class TrajectoryConfigTest(unittest.TestCase):
         self.assertIsNone(analytics.TRAJECTORY_LOG_PATH)
 
     def test_empty_value_disables(self) -> None:
-        _, analytics = _reload({"TRAJECTORY_LOG_PATH": ""})
+        _, analytics = _reload({_TRAJECTORY_LOG_PATH: ""})
         self.assertIsNone(analytics.TRAJECTORY_LOG_PATH)
 
     def test_sentinel_values_disable(self) -> None:
-        for value in ("off", "OFF", " off ", "disabled", "none", "None"):
-            with self.subTest(value=value):
-                _, analytics = _reload({"TRAJECTORY_LOG_PATH": value})
+        for spelling in ("off", "OFF", " off ", "disabled", "none", "None"):
+            with self.subTest(spelling=spelling):
+                _, analytics = _reload({_TRAJECTORY_LOG_PATH: spelling})
                 self.assertIsNone(analytics.TRAJECTORY_LOG_PATH)
 
     def test_explicit_path_enables(self) -> None:
-        _, analytics = _reload({"TRAJECTORY_LOG_PATH": "/var/log/orch/t.jsonl"})
+        _, analytics = _reload({_TRAJECTORY_LOG_PATH: "/var/log/orch/t.jsonl"})
         self.assertEqual(
             analytics.TRAJECTORY_LOG_PATH, Path("/var/log/orch/t.jsonl")
         )
@@ -972,17 +1030,17 @@ class TrajectoryConfigTest(unittest.TestCase):
         )
 
     def test_zero_retention_means_keep_forever(self) -> None:
-        _, analytics = _reload({"TRAJECTORY_RETENTION_DAYS": "0"})
+        _, analytics = _reload({_TRAJECTORY_RETENTION_DAYS: "0"})
         self.assertEqual(analytics.TRAJECTORY_RETENTION_DAYS, 0)
 
     def test_retention_env_override(self) -> None:
-        _, analytics = _reload({"TRAJECTORY_RETENTION_DAYS": "7"})
+        _, analytics = _reload({_TRAJECTORY_RETENTION_DAYS: "7"})
         self.assertEqual(analytics.TRAJECTORY_RETENTION_DAYS, 7)
 
     def test_knobs_exported(self) -> None:
         _, analytics = _reload()
-        self.assertIn("TRAJECTORY_LOG_PATH", analytics.__all__)
-        self.assertIn("TRAJECTORY_RETENTION_DAYS", analytics.__all__)
+        self.assertIn(_TRAJECTORY_LOG_PATH, analytics.__all__)
+        self.assertIn(_TRAJECTORY_RETENTION_DAYS, analytics.__all__)
         self.assertIn("append_trajectory_record", analytics.__all__)
         self.assertIn("prune_trajectory_records", analytics.__all__)
 
@@ -1002,13 +1060,13 @@ class TrajectoryDisabledModeTest(unittest.TestCase):
     def test_append_creates_no_file_when_disabled(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             sentinel = Path(td) / "must-not-be-created.jsonl"
-            _, analytics = _reload({"TRAJECTORY_LOG_PATH": "off"})
+            _, analytics = _reload({_TRAJECTORY_LOG_PATH: "off"})
             analytics.append_trajectory_record({"ts": "x", "event": "y"})
             self.assertFalse(sentinel.exists())
             self.assertEqual(list(Path(td).iterdir()), [])
 
     def test_prune_returns_zero_when_disabled(self) -> None:
-        _, analytics = _reload({"TRAJECTORY_LOG_PATH": "disabled"})
+        _, analytics = _reload({_TRAJECTORY_LOG_PATH: "disabled"})
         self.assertEqual(analytics.prune_trajectory_records(), 0)
 
     def test_prune_returns_zero_when_unset(self) -> None:
@@ -1023,12 +1081,10 @@ class TrajectoryAppendTest(unittest.TestCase):
     """
 
     def test_append_writes_one_line_per_record(self) -> None:
-        with tempfile.TemporaryDirectory() as td:
-            path = Path(td) / "trajectory.jsonl"
-            _, analytics = _reload({"TRAJECTORY_LOG_PATH": str(path)})
+        with _trajectory_sink() as (path, analytics):
             analytics.append_trajectory_record({"session_id": "a", "n": 1})
             analytics.append_trajectory_record({"session_id": "b", "n": 2})
-            lines = path.read_text(encoding="utf-8").splitlines()
+            lines = _read_lines(path)
             self.assertEqual(len(lines), 2)
             self.assertEqual(json.loads(lines[0])["session_id"], "a")
             self.assertEqual(json.loads(lines[1])["n"], 2)
@@ -1036,18 +1092,16 @@ class TrajectoryAppendTest(unittest.TestCase):
     def test_creates_missing_parent_dirs(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "a" / "b" / "c" / "trajectory.jsonl"
-            _, analytics = _reload({"TRAJECTORY_LOG_PATH": str(path)})
+            _, analytics = _reload({_TRAJECTORY_LOG_PATH: str(path)})
             analytics.append_trajectory_record({"event": "x"})
             self.assertTrue(path.exists())
 
     def test_append_is_append_only(self) -> None:
-        with tempfile.TemporaryDirectory() as td:
-            path = Path(td) / "trajectory.jsonl"
-            _, analytics = _reload({"TRAJECTORY_LOG_PATH": str(path)})
-            for n in range(5):
-                analytics.append_trajectory_record({"n": n})
-            lines = path.read_text(encoding="utf-8").splitlines()
-            self.assertEqual([json.loads(line)["n"] for line in lines], list(range(5)))
+        with _trajectory_sink() as (path, analytics):
+            for index in range(5):
+                analytics.append_trajectory_record({"n": index})
+            counters = [json.loads(line)["n"] for line in _read_lines(path)]
+            self.assertEqual(counters, list(range(5)))
 
     def test_oserror_is_downgraded_to_warning(self) -> None:
         # A path whose parent is a regular file makes `mkdir(parents=True)`
@@ -1056,14 +1110,16 @@ class TrajectoryAppendTest(unittest.TestCase):
         # never authoritative state, so a misconfigured path cannot raise.
         with tempfile.TemporaryDirectory() as td:
             blocker = Path(td) / "blocker"
-            blocker.write_text("i am a file, not a directory", encoding="utf-8")
+            blocker.write_text(
+                "i am a file, not a directory", encoding=_ENCODING,
+            )
             path = blocker / "sub" / "trajectory.jsonl"
-            _, analytics = _reload({"TRAJECTORY_LOG_PATH": str(path)})
+            _, analytics = _reload({_TRAJECTORY_LOG_PATH: str(path)})
             with self.assertLogs(analytics.log, level="WARNING") as cm:
                 analytics.append_trajectory_record({"event": "x"})
             self.assertFalse(path.exists())
             self.assertTrue(
-                any("could not write" in m for m in cm.output)
+                any("could not write" in message for message in cm.output)
             )
 
 
@@ -1073,79 +1129,58 @@ class TrajectoryPruneTest(unittest.TestCase):
     on an absent file, and preserves malformed / unparseable lines.
     """
 
-    @staticmethod
-    def _write_lines(path: Path, records: list[dict]) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("w", encoding="utf-8") as fh:
-            for rec in records:
-                fh.write(json.dumps(rec, sort_keys=True) + "\n")
-
     def test_removes_old_records_keeps_recent(self) -> None:
         now = PRUNE_NOW
         old_ts = _ts_days_ago(OLD_RECORD_AGE_DAYS, now=now)
         new_ts = _ts_days_ago(RECENT_RECORD_AGE_DAYS, now=now)
-        with tempfile.TemporaryDirectory() as td:
-            path = Path(td) / "trajectory.jsonl"
-            _, analytics = _reload({
-                "TRAJECTORY_LOG_PATH": str(path),
-                "TRAJECTORY_RETENTION_DAYS": str(DEFAULT_RETENTION_DAYS),
-            })
-            self._write_lines(path, [
+        with _trajectory_sink(retention=_DEFAULT_RETENTION_STR) as (
+            path, analytics,
+        ):
+            _write_json_lines(path, [
                 {"ts": old_ts, "session_id": "1"},
                 {"ts": new_ts, "session_id": "2"},
                 {"ts": old_ts, "session_id": "3"},
             ])
             self.assertEqual(analytics.prune_trajectory_records(now=now), 2)
-            remaining = [
-                json.loads(line)
-                for line in path.read_text(encoding="utf-8").splitlines()
-            ]
-            self.assertEqual([record["session_id"] for record in remaining], ["2"])
+            self.assertEqual(
+                [
+                    json.loads(line)["session_id"]
+                    for line in _read_lines(path)
+                ],
+                ["2"],
+            )
 
     def test_zero_retention_is_no_op(self) -> None:
         now = PRUNE_NOW
         ancient = _ts_days_ago(ANCIENT_RECORD_AGE_DAYS, now=now)
-        with tempfile.TemporaryDirectory() as td:
-            path = Path(td) / "trajectory.jsonl"
-            _, analytics = _reload({
-                "TRAJECTORY_LOG_PATH": str(path),
-                "TRAJECTORY_RETENTION_DAYS": "0",
-            })
-            self._write_lines(path, [{"ts": ancient, "session_id": "1"}])
+        with _trajectory_sink(retention="0") as (path, analytics):
+            _write_json_lines(path, [{"ts": ancient, "session_id": "1"}])
             self.assertEqual(analytics.prune_trajectory_records(now=now), 0)
             self.assertEqual(
-                len(path.read_text(encoding="utf-8").splitlines()), 1
+                len(_read_lines(path)), 1
             )
 
     def test_negative_retention_is_no_op(self) -> None:
         now = PRUNE_NOW
         old_ts = _ts_days_ago(OLD_RECORD_AGE_DAYS, now=now)
-        with tempfile.TemporaryDirectory() as td:
-            path = Path(td) / "trajectory.jsonl"
-            _, analytics = _reload({
-                "TRAJECTORY_LOG_PATH": str(path),
-                "TRAJECTORY_RETENTION_DAYS": "-5",
-            })
-            self._write_lines(path, [{"ts": old_ts, "session_id": "1"}])
+        with _trajectory_sink(retention="-5") as (path, analytics):
+            _write_json_lines(path, [{"ts": old_ts, "session_id": "1"}])
             self.assertEqual(analytics.prune_trajectory_records(now=now), 0)
 
     def test_missing_file_returns_zero(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "absent.jsonl"
-            _, analytics = _reload({"TRAJECTORY_LOG_PATH": str(path)})
+            _, analytics = _reload({_TRAJECTORY_LOG_PATH: str(path)})
             self.assertEqual(analytics.prune_trajectory_records(), 0)
             self.assertFalse(path.exists())
 
     def test_no_records_old_enough_does_not_rewrite(self) -> None:
         now = PRUNE_NOW
         new_ts = _ts_days_ago(FRESH_RECORD_AGE_DAYS, now=now)
-        with tempfile.TemporaryDirectory() as td:
-            path = Path(td) / "trajectory.jsonl"
-            _, analytics = _reload({
-                "TRAJECTORY_LOG_PATH": str(path),
-                "TRAJECTORY_RETENTION_DAYS": str(DEFAULT_RETENTION_DAYS),
-            })
-            self._write_lines(path, [{"ts": new_ts, "session_id": "1"}])
+        with _trajectory_sink(retention=_DEFAULT_RETENTION_STR) as (
+            path, analytics,
+        ):
+            _write_json_lines(path, [{"ts": new_ts, "session_id": "1"}])
             mtime_before = path.stat().st_mtime_ns
             self.assertEqual(analytics.prune_trajectory_records(now=now), 0)
             self.assertEqual(path.stat().st_mtime_ns, mtime_before)
@@ -1153,20 +1188,17 @@ class TrajectoryPruneTest(unittest.TestCase):
     def test_malformed_lines_preserved(self) -> None:
         now = PRUNE_NOW
         old_ts = _ts_days_ago(VERY_OLD_RECORD_AGE_DAYS, now=now)
-        with tempfile.TemporaryDirectory() as td:
-            path = Path(td) / "trajectory.jsonl"
-            _, analytics = _reload({
-                "TRAJECTORY_LOG_PATH": str(path),
-                "TRAJECTORY_RETENTION_DAYS": str(DEFAULT_RETENTION_DAYS),
-            })
+        with _trajectory_sink(retention=_DEFAULT_RETENTION_STR) as (
+            path, analytics,
+        ):
             path.parent.mkdir(parents=True, exist_ok=True)
-            with path.open("w", encoding="utf-8") as fh:
+            with path.open("w", encoding=_ENCODING) as fh:
                 fh.write("this is not json\n")
-                fh.write(json.dumps({"ts": old_ts, "session_id": "1"}) + "\n")
+                fh.write(f"{json.dumps({'ts': old_ts, 'session_id': '1'})}\n")
                 fh.write('{"ts": "not-a-date", "session_id": "2"}\n')
                 fh.write('{"session_id": "no-ts-field"}\n')
             self.assertEqual(analytics.prune_trajectory_records(now=now), 1)
-            kept = path.read_text(encoding="utf-8").splitlines()
+            kept = _read_lines(path)
             self.assertEqual(len(kept), 3)
             self.assertIn("this is not json", kept[0])
 
@@ -1175,15 +1207,12 @@ class TrajectoryPruneTest(unittest.TestCase):
         old_naive = (now - timedelta(days=OLD_RECORD_AGE_DAYS)).replace(
             tzinfo=None
         ).isoformat(timespec="seconds")
-        with tempfile.TemporaryDirectory() as td:
-            path = Path(td) / "trajectory.jsonl"
-            _, analytics = _reload({
-                "TRAJECTORY_LOG_PATH": str(path),
-                "TRAJECTORY_RETENTION_DAYS": str(DEFAULT_RETENTION_DAYS),
-            })
-            self._write_lines(path, [{"ts": old_naive, "session_id": "1"}])
+        with _trajectory_sink(retention=_DEFAULT_RETENTION_STR) as (
+            path, analytics,
+        ):
+            _write_json_lines(path, [{"ts": old_naive, "session_id": "1"}])
             self.assertEqual(analytics.prune_trajectory_records(now=now), 1)
-            self.assertEqual(path.read_text(encoding="utf-8"), "")
+            self.assertEqual(_read_text(path), "")
 
     def test_probe_oserror_becomes_warning(self) -> None:
         # `Path.exists()` re-raises OSErrors that don't mean "absent"
@@ -1196,13 +1225,15 @@ class TrajectoryPruneTest(unittest.TestCase):
             # underlying stat() raise OSError [Errno 36] File name too long.
             path = Path(td) / ("x" * 5000)
             _, analytics = _reload({
-                "TRAJECTORY_LOG_PATH": str(path),
-                "TRAJECTORY_RETENTION_DAYS": str(DEFAULT_RETENTION_DAYS),
+                _TRAJECTORY_LOG_PATH: str(path),
+                _TRAJECTORY_RETENTION_DAYS: _DEFAULT_RETENTION_STR,
             })
             with self.assertLogs(analytics.log, level="WARNING") as cm:
                 removed = analytics.prune_trajectory_records()
             self.assertEqual(removed, 0)
-            self.assertTrue(any("prune" in m for m in cm.output))
+            self.assertTrue(
+                any("prune" in message for message in cm.output)
+            )
 
 
 class TrajectorySinkIndependenceTest(unittest.TestCase):
@@ -1221,8 +1252,8 @@ class TrajectorySinkIndependenceTest(unittest.TestCase):
             a_path = Path(td) / "analytics.jsonl"
             t_path = Path(td) / "trajectory.jsonl"
             _, analytics = _reload({
-                "ANALYTICS_LOG_PATH": str(a_path),
-                "TRAJECTORY_LOG_PATH": str(t_path),
+                _ANALYTICS_LOG_PATH: str(a_path),
+                _TRAJECTORY_LOG_PATH: str(t_path),
             })
             analytics.append_trajectory_record({"session_id": "s"})
             self.assertTrue(t_path.exists())
@@ -1236,26 +1267,20 @@ class TrajectorySinkIndependenceTest(unittest.TestCase):
             a_path = Path(td) / "analytics.jsonl"
             t_path = Path(td) / "trajectory.jsonl"
             _, analytics = _reload({
-                "ANALYTICS_LOG_PATH": str(a_path),
-                "ANALYTICS_RETENTION_DAYS": str(DEFAULT_RETENTION_DAYS),
-                "TRAJECTORY_LOG_PATH": str(t_path),
-                "TRAJECTORY_RETENTION_DAYS": str(DEFAULT_RETENTION_DAYS),
+                _ANALYTICS_LOG_PATH: str(a_path),
+                _ANALYTICS_RETENTION_DAYS: _DEFAULT_RETENTION_STR,
+                _TRAJECTORY_LOG_PATH: str(t_path),
+                _TRAJECTORY_RETENTION_DAYS: _DEFAULT_RETENTION_STR,
             })
             # An equally-old record in BOTH files; pruning trajectory must
             # drop only the trajectory record and never rewrite analytics.
-            a_path.write_text(
-                json.dumps({"ts": old_ts, "event": "x"}) + "\n",
-                encoding="utf-8",
-            )
-            t_path.write_text(
-                json.dumps({"ts": old_ts, "session_id": "1"}) + "\n",
-                encoding="utf-8",
-            )
-            a_before = a_path.read_text(encoding="utf-8")
+            _write_json_lines(a_path, [{"ts": old_ts, "event": "x"}])
+            _write_json_lines(t_path, [{"ts": old_ts, "session_id": "1"}])
+            a_before = _read_text(a_path)
             self.assertEqual(analytics.prune_trajectory_records(now=now), 1)
-            self.assertEqual(t_path.read_text(encoding="utf-8"), "")
+            self.assertEqual(_read_text(t_path), "")
             # Analytics file is byte-for-byte unchanged.
-            self.assertEqual(a_path.read_text(encoding="utf-8"), a_before)
+            self.assertEqual(_read_text(a_path), a_before)
 
     def test_analytics_prune_ignores_trajectory(self) -> None:
         # Symmetric guard: the analytics prune must not rewrite the
@@ -1266,23 +1291,17 @@ class TrajectorySinkIndependenceTest(unittest.TestCase):
             a_path = Path(td) / "analytics.jsonl"
             t_path = Path(td) / "trajectory.jsonl"
             _, analytics = _reload({
-                "ANALYTICS_LOG_PATH": str(a_path),
-                "ANALYTICS_RETENTION_DAYS": str(DEFAULT_RETENTION_DAYS),
-                "TRAJECTORY_LOG_PATH": str(t_path),
-                "TRAJECTORY_RETENTION_DAYS": str(DEFAULT_RETENTION_DAYS),
+                _ANALYTICS_LOG_PATH: str(a_path),
+                _ANALYTICS_RETENTION_DAYS: _DEFAULT_RETENTION_STR,
+                _TRAJECTORY_LOG_PATH: str(t_path),
+                _TRAJECTORY_RETENTION_DAYS: _DEFAULT_RETENTION_STR,
             })
-            a_path.write_text(
-                json.dumps({"ts": old_ts, "event": "x"}) + "\n",
-                encoding="utf-8",
-            )
-            t_path.write_text(
-                json.dumps({"ts": old_ts, "session_id": "1"}) + "\n",
-                encoding="utf-8",
-            )
-            t_before = t_path.read_text(encoding="utf-8")
+            _write_json_lines(a_path, [{"ts": old_ts, "event": "x"}])
+            _write_json_lines(t_path, [{"ts": old_ts, "session_id": "1"}])
+            t_before = _read_text(t_path)
             self.assertEqual(analytics.prune_old_records(now=now), 1)
-            self.assertEqual(a_path.read_text(encoding="utf-8"), "")
-            self.assertEqual(t_path.read_text(encoding="utf-8"), t_before)
+            self.assertEqual(_read_text(a_path), "")
+            self.assertEqual(_read_text(t_path), t_before)
 
 
 def _claude_trajectory_stdout(
@@ -1304,7 +1323,7 @@ def _claude_trajectory_stdout(
             "type": "assistant",
             "message": {
                 "id": "m1",
-                "model": "claude-sonnet-4-6",
+                "model": _CLAUDE_MODEL,
                 "content": [{
                     "type": "tool_use",
                     "name": tool_name,
@@ -1312,8 +1331,8 @@ def _claude_trajectory_stdout(
                     "input": tool_input or {"command": "ls"},
                 }],
                 "usage": {
-                    "input_tokens": input_tokens,
-                    "output_tokens": output_tokens,
+                    _INPUT_TOKENS: input_tokens,
+                    _OUTPUT_TOKENS: output_tokens,
                 },
             },
         },
@@ -1332,30 +1351,30 @@ def _claude_trajectory_stdout(
     return "\n".join(json.dumps(frame) for frame in frames)
 
 
-def _claude_multistep_stdout(*, n_steps: int, content: str) -> str:
+def _claude_multistep_stdout(*, n_steps: int, result_text: str) -> str:
     """A claude stream with `n_steps` tool_use / tool_result pairs (so
-    `2 * n_steps` trajectory steps), each result carrying `content`. Used to
-    drive the total-record-budget truncation."""
+    `2 * n_steps` trajectory steps), each result carrying `result_text`. Used
+    to drive the total-record-budget truncation."""
     frames: list[dict] = [
         {"type": "system", "subtype": "init", "tools": ["Bash"]},
     ]
-    for i in range(n_steps):
+    for index in range(n_steps):
         frames.append({
             "type": "assistant",
             "message": {
-                "id": f"m{i}", "model": "claude-sonnet-4-6",
+                "id": f"m{index}", "model": _CLAUDE_MODEL,
                 "content": [{
-                    "type": "tool_use", "name": "Bash", "id": f"tu{i}",
+                    "type": "tool_use", "name": "Bash", "id": f"tu{index}",
                     "input": {"command": "x"},
                 }],
-                "usage": {"input_tokens": 1, "output_tokens": 1},
+                "usage": {_INPUT_TOKENS: 1, _OUTPUT_TOKENS: 1},
             },
         })
         frames.append({
             "type": "user",
             "message": {"content": [{
-                "type": "tool_result", "tool_use_id": f"tu{i}",
-                "content": content,
+                "type": "tool_result", "tool_use_id": f"tu{index}",
+                "content": result_text,
             }]},
         })
     frames.append({"type": "result", "num_turns": n_steps})
@@ -1386,7 +1405,7 @@ def _codex_trajectory_stdout(
             "id": "a1", "type": "agent_message", "text": final,
         }})
     frames.append({"type": "turn_complete", "usage": {
-        "input_tokens": input_tokens, "output_tokens": output_tokens,
+        _INPUT_TOKENS: input_tokens, _OUTPUT_TOKENS: output_tokens,
     }})
     return "\n".join(json.dumps(frame) for frame in frames)
 
@@ -1396,137 +1415,6 @@ class RecordAgentExitTrajectoryTest(unittest.TestCase):
     `TRAJECTORY_LOG_PATH` is enabled, redacts every free-text field, applies
     head/tail + total-size truncation caps, and never lets a trajectory
     failure drop the baseline `agent_exit` usage record."""
-
-    TRUNCATION_EDGE_CHARS = 5
-    LONG_TEXT_CHARS = 100
-    BUDGET_TOOL_PAIR_COUNT = 5
-    MANY_TURNS_COUNT = 5_000
-    METADATA_ONLY_STEP_COUNT = 10_000
-
-    def _emit(
-        self,
-        analytics,
-        *,
-        stdout,
-        prompt=None,
-        traj_path=None,
-        analytics_path=None,
-        backend="claude",
-        track=False,
-    ):
-        with patch.object(analytics, "ANALYTICS_LOG_PATH", analytics_path), \
-                patch.object(analytics, "TRAJECTORY_LOG_PATH", traj_path), \
-                patch.object(analytics, "TRACK_SKILL_TRIGGERS", track):
-            return analytics.record_agent_exit(
-                repo="owner/repo",
-                issue=AGENT_EXIT_ISSUE_NUMBER,
-                stage="implementing",
-                agent_role="developer",
-                backend=backend,
-                agent_spec=backend,
-                resume_session_id=None,
-                result=analytics.AgentResult(
-                    session_id="sess-traj",
-                    last_message="",
-                    exit_code=0,
-                    timed_out=False,
-                    stdout=stdout,
-                    stderr="",
-                ),
-                duration_s=0.0,
-                review_round=TRAJECTORY_REVIEW_ROUND,
-                retry_count=TRAJECTORY_RETRY_COUNT,
-                prompt=prompt,
-            )
-
-    def _assert_baseline_exit_record(self, path: Path) -> None:
-        records = _read_records(path)
-        self.assertEqual(len(records), 1)
-        record = records[0]
-        self.assertEqual(record["event"], "agent_exit")
-        self.assertEqual(
-            record["input_tokens"],
-            CLAUDE_TRAJECTORY_INPUT_TOKENS,
-        )
-        self.assertNotIn("user_input", record)
-        self.assertNotIn("run_usage", record)
-
-    def _read_single_trajectory(self, path: Path) -> dict:
-        records = _read_records(path)
-        self.assertEqual(len(records), 1)
-        self.assertEqual(records[0]["event"], "agent_trajectory")
-        return records[0]
-
-    def _assert_claude_trajectory_identity(self, record: dict) -> None:
-        expected = {
-            "event": "agent_trajectory",
-            "repo": "owner/repo",
-            "issue": AGENT_EXIT_ISSUE_NUMBER,
-            "stage": "implementing",
-            "agent_role": "developer",
-            "backend": "claude",
-            "session_id": "sess-traj",
-            "review_round": TRAJECTORY_REVIEW_ROUND,
-            "retry_count": TRAJECTORY_RETRY_COUNT,
-            "user_input": "implement X",
-            "tools": ["Read", "Bash"],
-            "output": "implemented",
-        }
-        self.assertEqual(
-            {key: record[key] for key in expected},
-            expected,
-        )
-
-    def _assert_claude_trajectory_steps(self, record: dict) -> None:
-        steps = record["steps"]
-        tool_call = steps[0]
-        self.assertEqual(
-            {
-                "kinds": [step["kind"] for step in steps],
-                "tool_name": tool_call["name"],
-                "tool_result": steps[1]["content"],
-                "tool_turn": tool_call["turn"],
-            },
-            {
-                "kinds": ["tool_call", "tool_result"],
-                "tool_name": "Bash",
-                "tool_result": "hi",
-                "tool_turn": 0,
-            },
-        )
-        self.assertIn("echo hi", tool_call["content"])
-        # Tool results become the next turn's input; only the billed call
-        # carries the current turn index.
-        self.assertNotIn("turn", steps[1])
-
-    def _assert_claude_trajectory_usage(self, record: dict) -> None:
-        run_usage = record["run_usage"]
-        expected_run = {
-            "input_tokens": CLAUDE_TRAJECTORY_INPUT_TOKENS,
-            "output_tokens": CLAUDE_TRAJECTORY_OUTPUT_TOKENS,
-            "models": ["claude-sonnet-4-6"],
-            "turns": 1,
-            "cost_source": "estimated",
-        }
-        self.assertNotIn("backend", run_usage)
-        self.assertEqual(
-            {key: run_usage[key] for key in expected_run},
-            expected_run,
-        )
-
-        turns = record["turns"]
-        expected_turn = {
-            "turn": 0,
-            "model": "claude-sonnet-4-6",
-            "input_tokens": CLAUDE_TRAJECTORY_INPUT_TOKENS,
-            "output_tokens": CLAUDE_TRAJECTORY_OUTPUT_TOKENS,
-            "cost_source": "estimated",
-        }
-        self.assertEqual(len(turns), 1)
-        self.assertEqual(
-            {key: turns[0][key] for key in expected_turn},
-            expected_turn,
-        )
 
     def test_sink_off_writes_no_trajectory_or_input(self) -> None:
         # Default off: a prompt is passed but, with the trajectory sink
@@ -1544,13 +1432,13 @@ class RecordAgentExitTrajectoryTest(unittest.TestCase):
             )
             # Only the analytics file exists -- no trajectory file anywhere.
             self.assertEqual(
-                sorted(p.name for p in Path(td).iterdir()),
+                sorted(entry.name for entry in Path(td).iterdir()),
                 ["analytics.jsonl"],
             )
             recs = _read_records(a_path)
             self.assertEqual(len(recs), 1)
-            self.assertEqual(recs[0]["event"], "agent_exit")
-            self.assertNotIn("user_input", recs[0])
+            self.assertEqual(recs[0]["event"], _AGENT_EXIT)
+            self.assertNotIn(_USER_INPUT, recs[0])
 
     def test_sink_on_writes_redacted_trajectory(self) -> None:
         # Sink on: a single `agent_trajectory` record carries the redacted
@@ -1577,7 +1465,7 @@ class RecordAgentExitTrajectoryTest(unittest.TestCase):
             self._assert_claude_trajectory_identity(record)
             self._assert_claude_trajectory_steps(record)
             self._assert_claude_trajectory_usage(record)
-            self.assertNotIn("truncated", record)
+            self.assertNotIn(_TRUNCATED, record)
 
     def test_codex_trajectory_record(self) -> None:
         # The codex backend dispatches through the same path: command +
@@ -1593,23 +1481,23 @@ class RecordAgentExitTrajectoryTest(unittest.TestCase):
                 prompt="codex prompt",
                 traj_path=t_path,
                 analytics_path=Path(td) / "a.jsonl",
-                backend="codex",
+                backend=_CODEX,
             )
             rec = _read_records(t_path)[0]
-            self.assertEqual(rec["event"], "agent_trajectory")
-            self.assertEqual(rec["backend"], "codex")
-            self.assertEqual(rec["user_input"], "codex prompt")
-            self.assertEqual(rec["output"], "codex done")
+            self.assertEqual(rec["event"], _AGENT_TRAJECTORY)
+            self.assertEqual(rec[_BACKEND], _CODEX)
+            self.assertEqual(rec[_USER_INPUT], "codex prompt")
+            self.assertEqual(rec[_OUTPUT], "codex done")
             self.assertEqual(
-                [step["kind"] for step in rec["steps"]],
+                [step["kind"] for step in rec[_STEPS]],
                 ["tool_call", "tool_result", "assistant_message"],
             )
-            self.assertEqual(rec["steps"][0]["content"], "ls -la")
-            self.assertEqual(rec["steps"][1]["content"], "command output")
-            self.assertEqual(rec["steps"][2]["content"], "codex done")
+            self.assertEqual(rec[_STEPS][0]["content"], "ls -la")
+            self.assertEqual(rec[_STEPS][1]["content"], "command output")
+            self.assertEqual(rec[_STEPS][2]["content"], "codex done")
             # The text turn carries no tool name / id.
-            self.assertIsNone(rec["steps"][2]["name"])
-            self.assertIsNone(rec["steps"][2]["tool_id"])
+            self.assertIsNone(rec[_STEPS][2]["name"])
+            self.assertIsNone(rec[_STEPS][2]["tool_id"])
             # codex exposes no offered-tools frame, so the trajectory record
             # backfills the best-effort baseline out-of-band.
             from orchestrator import skill_catalog
@@ -1618,13 +1506,13 @@ class RecordAgentExitTrajectoryTest(unittest.TestCase):
             )
             # run_usage is codex's only usage surface: the denormalized
             # run-level totals, present even though per-turn detail is not.
-            run_usage = rec["run_usage"]
-            self.assertNotIn("backend", run_usage)
+            run_usage = rec[_RUN_USAGE]
+            self.assertNotIn(_BACKEND, run_usage)
             self.assertEqual(
-                run_usage["input_tokens"], CODEX_TRAJECTORY_INPUT_TOKENS,
+                run_usage[_INPUT_TOKENS], CODEX_TRAJECTORY_INPUT_TOKENS,
             )
             self.assertEqual(
-                run_usage["output_tokens"], CODEX_TRAJECTORY_OUTPUT_TOKENS,
+                run_usage[_OUTPUT_TOKENS], CODEX_TRAJECTORY_OUTPUT_TOKENS,
             )
             # No priced model in the stream -> unknown-price, no cost.
             self.assertEqual(run_usage["cost_source"], "unknown-price")
@@ -1632,7 +1520,7 @@ class RecordAgentExitTrajectoryTest(unittest.TestCase):
             # codex usage frames are cumulative, not per-turn: the per-turn
             # array is dropped and no step carries a `turn` index.
             self.assertNotIn("turns", rec)
-            self.assertTrue(all("turn" not in step for step in rec["steps"]))
+            self.assertTrue(all("turn" not in step for step in rec[_STEPS]))
 
     def test_text_turns_redacted_capped_and_recorded(self) -> None:
         # New timeline items -- assistant / user text turns -- are stored as
@@ -1646,18 +1534,18 @@ class RecordAgentExitTrajectoryTest(unittest.TestCase):
                 patch.object(
                     analytics,
                     "_TRAJECTORY_FIELD_HEAD",
-                    self.TRUNCATION_EDGE_CHARS,
+                    _TRUNCATION_EDGE_CHARS,
                 ), \
                 patch.object(
                     analytics,
                     "_TRAJECTORY_FIELD_TAIL",
-                    self.TRUNCATION_EDGE_CHARS,
+                    _TRUNCATION_EDGE_CHARS,
                 ):
             t_path = Path(td) / "trajectory.jsonl"
             frames = [
                 {"type": "system", "subtype": "init", "tools": ["Bash"]},
                 {"type": "assistant", "message": {"id": "m1", "content": [
-                    {"type": "text", "text": "B" * self.LONG_TEXT_CHARS},
+                    {"type": "text", "text": "B" * _LONG_TEXT_CHARS},
                     {"type": "tool_use", "name": "Bash", "id": "tu1",
                      "input": {"command": "ls"}}]}},
                 {"type": "user", "message": {"content": [
@@ -1676,20 +1564,20 @@ class RecordAgentExitTrajectoryTest(unittest.TestCase):
             )
             rec = _read_records(t_path)[0]
             self.assertEqual(
-                [step["kind"] for step in rec["steps"]],
+                [step["kind"] for step in rec[_STEPS]],
                 ["assistant_message", "tool_call", "tool_result",
                  "user_message"],
             )
-            assistant_step = rec["steps"][0]
+            assistant_step = rec[_STEPS][0]
             # Long assistant text head/tail truncated; no tool metadata.
             self.assertLess(
-                len(assistant_step["content"]), self.LONG_TEXT_CHARS,
+                len(assistant_step["content"]), _LONG_TEXT_CHARS,
             )
             self.assertIn("chars elided", assistant_step["content"])
             self.assertIsNone(assistant_step["name"])
             self.assertIsNone(assistant_step["tool_id"])
             # Secret masked in the user text turn and nowhere survives.
-            user_step = rec["steps"][3]
+            user_step = rec[_STEPS][3]
             self.assertEqual(user_step["kind"], "user_message")
             self.assertIn("***", user_step["content"])
             self.assertNotIn(secret, json.dumps(rec))
@@ -1719,10 +1607,10 @@ class RecordAgentExitTrajectoryTest(unittest.TestCase):
             blob = json.dumps(rec)
             self.assertNotIn(secret, blob)
             # The masking marker landed in each field that carried it.
-            self.assertIn("***", rec["user_input"])
-            self.assertIn("***", rec["output"])
-            self.assertIn("***", rec["steps"][0]["content"])
-            self.assertIn("***", rec["steps"][1]["content"])
+            self.assertIn("***", rec[_USER_INPUT])
+            self.assertIn("***", rec[_OUTPUT])
+            self.assertIn("***", rec[_STEPS][0]["content"])
+            self.assertIn("***", rec[_STEPS][1]["content"])
 
     def test_multiline_tool_secret_is_redacted(self) -> None:
         # Regression: dict / list tool payloads are redacted leaf-by-leaf
@@ -1755,8 +1643,8 @@ class RecordAgentExitTrajectoryTest(unittest.TestCase):
             self.assertNotIn("with-newline-marker-0123456789", blob)
             self.assertNotIn("topsecretvalue", blob)
             # Both the dict input and the list content carry the mask.
-            self.assertIn("***", rec["steps"][0]["content"])
-            self.assertIn("***", rec["steps"][1]["content"])
+            self.assertIn("***", rec[_STEPS][0]["content"])
+            self.assertIn("***", rec[_STEPS][1]["content"])
 
     def test_per_step_content_head_tail_truncated(self) -> None:
         # A long field is redacted then truncated to head + tail chars with
@@ -1767,18 +1655,18 @@ class RecordAgentExitTrajectoryTest(unittest.TestCase):
                 patch.object(
                     analytics,
                     "_TRAJECTORY_FIELD_HEAD",
-                    self.TRUNCATION_EDGE_CHARS,
+                    _TRUNCATION_EDGE_CHARS,
                 ), \
                 patch.object(
                     analytics,
                     "_TRAJECTORY_FIELD_TAIL",
-                    self.TRUNCATION_EDGE_CHARS,
+                    _TRUNCATION_EDGE_CHARS,
                 ):
             t_path = Path(td) / "trajectory.jsonl"
             self._emit(
                 analytics,
                 stdout=_claude_trajectory_stdout(
-                    tool_result="A" * self.LONG_TEXT_CHARS,
+                    tool_result="A" * _LONG_TEXT_CHARS,
                     final_output="done",
                 ),
                 prompt="p",
@@ -1787,14 +1675,14 @@ class RecordAgentExitTrajectoryTest(unittest.TestCase):
             )
             rec = _read_records(t_path)[0]
             result_step = next(
-                step for step in rec["steps"] if step["kind"] == "tool_result"
+                step for step in rec[_STEPS] if step["kind"] == "tool_result"
             )
-            content = result_step["content"]
-            self.assertLess(len(content), self.LONG_TEXT_CHARS)
-            edge = "A" * self.TRUNCATION_EDGE_CHARS
-            self.assertTrue(content.startswith(edge))
-            self.assertTrue(content.endswith(edge))
-            self.assertIn("chars elided", content)
+            body = result_step["content"]
+            self.assertLess(len(body), _LONG_TEXT_CHARS)
+            edge = "A" * _TRUNCATION_EDGE_CHARS
+            self.assertTrue(body.startswith(edge))
+            self.assertTrue(body.endswith(edge))
+            self.assertIn("chars elided", body)
 
     def test_total_record_budget_drops_excess_steps(self) -> None:
         # When the cumulative redacted content crosses the record budget the
@@ -1807,28 +1695,28 @@ class RecordAgentExitTrajectoryTest(unittest.TestCase):
             self._emit(
                 analytics,
                 stdout=_claude_multistep_stdout(
-                    n_steps=self.BUDGET_TOOL_PAIR_COUNT,
-                    content="0123456789" * 20,
+                    n_steps=_BUDGET_TOOL_PAIR_COUNT,
+                    result_text="0123456789" * 20,
                 ),
                 traj_path=t_path,
                 analytics_path=Path(td) / "a.jsonl",
             )
             rec = _read_records(t_path)[0]
-            self.assertTrue(rec["truncated"])
+            self.assertTrue(rec[_TRUNCATED])
             # 5 pairs => 10 steps emitted; the budget dropped the tail but
             # kept a prefix.
-            self.assertGreater(len(rec["steps"]), 0)
+            self.assertGreater(len(rec[_STEPS]), 0)
             self.assertLess(
-                len(rec["steps"]), self.BUDGET_TOOL_PAIR_COUNT * 2,
+                len(rec[_STEPS]), _BUDGET_TOOL_PAIR_COUNT * 2,
             )
             # The 5 small per-turn entries fit under the budget (they are drawn
             # down before the steps), so all are kept while the step tail is
             # dropped; a turns array that itself overflows is truncated too
             # (see test_turns_array_respects_total_budget).
             self.assertEqual(
-                len(rec["turns"]), self.BUDGET_TOOL_PAIR_COUNT,
+                len(rec["turns"]), _BUDGET_TOOL_PAIR_COUNT,
             )
-            self.assertIn("run_usage", rec)
+            self.assertIn(_RUN_USAGE, rec)
 
     def test_turns_array_respects_total_budget(self) -> None:
         # Regression: the per-turn `turns[]` array is charged AND truncated
@@ -1838,15 +1726,15 @@ class RecordAgentExitTrajectoryTest(unittest.TestCase):
         # size -- the reviewer reproduced ~914 KB with zero steps kept.
         _, analytics = _reload()
         many = analytics.usage.AgentTrajectory(
-            backend="claude",
+            backend=_CLAUDE,
             turns=tuple(
                 analytics.usage.TurnUsage(
-                    turn=i,
-                    model="claude-sonnet-4-6",
+                    turn=index,
+                    model=_CLAUDE_MODEL,
                     input_tokens=1,
                     output_tokens=1,
                 )
-                for i in range(self.MANY_TURNS_COUNT)
+                for index in range(_MANY_TURNS_COUNT)
             ),
         )
         with tempfile.TemporaryDirectory() as td:
@@ -1861,10 +1749,10 @@ class RecordAgentExitTrajectoryTest(unittest.TestCase):
                     traj_path=t_path,
                     analytics_path=Path(td) / "a.jsonl",
                 )
-            raw = t_path.read_text(encoding="utf-8")
+            raw = _read_text(t_path)
             rec = json.loads(raw)
-            self.assertTrue(rec["truncated"])
-            self.assertLess(len(rec["turns"]), self.MANY_TURNS_COUNT)
+            self.assertTrue(rec[_TRUNCATED])
+            self.assertLess(len(rec["turns"]), _MANY_TURNS_COUNT)
             # The on-disk line is bounded near the budget, not the ~914 KB an
             # uncapped turns array produced.
             self.assertLess(len(raw), analytics._TRAJECTORY_RECORD_BUDGET * 2)
@@ -1877,15 +1765,15 @@ class RecordAgentExitTrajectoryTest(unittest.TestCase):
         # flag, because the old content-length-only check never advanced.
         _, analytics = _reload()
         many = analytics.usage.AgentTrajectory(
-            backend="claude",
+            backend=_CLAUDE,
             steps=tuple(
                 analytics.usage.TrajectoryStep(
                     kind="tool_call",
                     name="command_execution",
-                    tool_id=f"id{i}",
+                    tool_id=f"id{index}",
                     content=None,
                 )
-                for i in range(self.METADATA_ONLY_STEP_COUNT)
+                for index in range(_METADATA_ONLY_STEP_COUNT)
             ),
         )
         with tempfile.TemporaryDirectory() as td:
@@ -1900,11 +1788,11 @@ class RecordAgentExitTrajectoryTest(unittest.TestCase):
                     traj_path=t_path,
                     analytics_path=Path(td) / "a.jsonl",
                 )
-            raw = t_path.read_text(encoding="utf-8")
+            raw = _read_text(t_path)
             rec = json.loads(raw)
-            self.assertTrue(rec["truncated"])
+            self.assertTrue(rec[_TRUNCATED])
             self.assertLess(
-                len(rec["steps"]), self.METADATA_ONLY_STEP_COUNT,
+                len(rec[_STEPS]), _METADATA_ONLY_STEP_COUNT,
             )
             # The on-disk line is bounded near the budget, not the ~749 KB an
             # uncapped run produced -- one step of overshoot plus the envelope.
@@ -1925,20 +1813,20 @@ class RecordAgentExitTrajectoryTest(unittest.TestCase):
             ), self.assertLogs(analytics.log, level="ERROR"):
                 returned = self._emit(
                     analytics,
-                    stdout=_claude_stdout_with_skills(skills=("develop",)),
+                    stdout=_claude_stdout_with_skills(skills=(_DEVELOP,)),
                     prompt="p",
                     traj_path=t_path,
                     analytics_path=a_path,
                     track=True,
                 )
             # Skill return value (and thus audit emission) is unaffected.
-            self.assertEqual(returned, ["develop"])
+            self.assertEqual(returned, [_DEVELOP])
             # Baseline record survived...
             base = _read_records(a_path)
             self.assertEqual(len(base), 1)
-            self.assertEqual(base[0]["event"], "agent_exit")
+            self.assertEqual(base[0]["event"], _AGENT_EXIT)
             self.assertEqual(
-                base[0]["input_tokens"], SKILL_STREAM_INPUT_TOKENS,
+                base[0][_INPUT_TOKENS], SKILL_STREAM_INPUT_TOKENS,
             )
             # ...and the broken trajectory wrote nothing.
             self.assertFalse(t_path.exists())
@@ -1963,7 +1851,7 @@ class RecordAgentExitTrajectoryTest(unittest.TestCase):
                 )
             base = _read_records(a_path)
             self.assertEqual(len(base), 1)
-            self.assertEqual(base[0]["event"], "agent_exit")
+            self.assertEqual(base[0]["event"], _AGENT_EXIT)
 
     def test_absent_prompt_drops_user_input(self) -> None:
         # No prompt passed -> `user_input` is dropped (not stored as null),
@@ -1979,14 +1867,139 @@ class RecordAgentExitTrajectoryTest(unittest.TestCase):
                 analytics_path=Path(td) / "a.jsonl",
             )
             rec = _read_records(t_path)[0]
-            self.assertNotIn("user_input", rec)
-            self.assertEqual(rec["output"], "x")
+            self.assertNotIn(_USER_INPUT, rec)
+            self.assertEqual(rec[_OUTPUT], "x")
+
+    def _emit(
+        self,
+        analytics,
+        *,
+        stdout,
+        prompt=None,
+        traj_path=None,
+        analytics_path=None,
+        backend=_CLAUDE,
+        track=False,
+    ):
+        with patch.object(analytics, _ANALYTICS_LOG_PATH, analytics_path), \
+                patch.object(analytics, _TRAJECTORY_LOG_PATH, traj_path), \
+                patch.object(analytics, _TRACK_SKILL_TRIGGERS, track):
+            return analytics.record_agent_exit(
+                repo=_REPO,
+                issue=AGENT_EXIT_ISSUE_NUMBER,
+                stage=_STAGE_IMPLEMENTING,
+                agent_role=_DEVELOPER,
+                backend=backend,
+                agent_spec=backend,
+                resume_session_id=None,
+                result=analytics.AgentResult(
+                    session_id="sess-traj",
+                    last_message="",
+                    exit_code=0,
+                    timed_out=False,
+                    stdout=stdout,
+                    stderr="",
+                ),
+                duration_s=0.0,
+                review_round=TRAJECTORY_REVIEW_ROUND,
+                retry_count=TRAJECTORY_RETRY_COUNT,
+                prompt=prompt,
+            )
+
+    def _assert_baseline_exit_record(self, path: Path) -> None:
+        records = _read_records(path)
+        self.assertEqual(len(records), 1)
+        record = records[0]
+        self.assertEqual(record["event"], _AGENT_EXIT)
+        self.assertEqual(
+            record[_INPUT_TOKENS],
+            CLAUDE_TRAJECTORY_INPUT_TOKENS,
+        )
+        self.assertNotIn(_USER_INPUT, record)
+        self.assertNotIn(_RUN_USAGE, record)
+
+    def _read_single_trajectory(self, path: Path) -> dict:
+        records = _read_records(path)
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["event"], _AGENT_TRAJECTORY)
+        return records[0]
+
+    def _assert_claude_trajectory_identity(self, record: dict) -> None:
+        expected = {
+            "event": _AGENT_TRAJECTORY,
+            "repo": _REPO,
+            "issue": AGENT_EXIT_ISSUE_NUMBER,
+            "stage": _STAGE_IMPLEMENTING,
+            "agent_role": _DEVELOPER,
+            _BACKEND: _CLAUDE,
+            "session_id": "sess-traj",
+            "review_round": TRAJECTORY_REVIEW_ROUND,
+            "retry_count": TRAJECTORY_RETRY_COUNT,
+            _USER_INPUT: "implement X",
+            "tools": ["Read", "Bash"],
+            _OUTPUT: "implemented",
+        }
+        self.assertEqual(
+            {key: record[key] for key in expected},
+            expected,
+        )
+
+    def _assert_claude_trajectory_steps(self, record: dict) -> None:
+        steps = record[_STEPS]
+        tool_call = steps[0]
+        self.assertEqual(
+            {
+                "kinds": [step["kind"] for step in steps],
+                "tool_name": tool_call["name"],
+                "tool_result": steps[1]["content"],
+                "tool_turn": tool_call["turn"],
+            },
+            {
+                "kinds": ["tool_call", "tool_result"],
+                "tool_name": "Bash",
+                "tool_result": "hi",
+                "tool_turn": 0,
+            },
+        )
+        self.assertIn("echo hi", tool_call["content"])
+        # Tool results become the next turn's input; only the billed call
+        # carries the current turn index.
+        self.assertNotIn("turn", steps[1])
+
+    def _assert_claude_trajectory_usage(self, record: dict) -> None:
+        run_usage = record[_RUN_USAGE]
+        expected_run = {
+            _INPUT_TOKENS: CLAUDE_TRAJECTORY_INPUT_TOKENS,
+            _OUTPUT_TOKENS: CLAUDE_TRAJECTORY_OUTPUT_TOKENS,
+            "models": [_CLAUDE_MODEL],
+            "turns": 1,
+            "cost_source": "estimated",
+        }
+        self.assertNotIn(_BACKEND, run_usage)
+        self.assertEqual(
+            {key: run_usage[key] for key in expected_run},
+            expected_run,
+        )
+
+        turns = record["turns"]
+        expected_turn = {
+            "turn": 0,
+            "model": _CLAUDE_MODEL,
+            _INPUT_TOKENS: CLAUDE_TRAJECTORY_INPUT_TOKENS,
+            _OUTPUT_TOKENS: CLAUDE_TRAJECTORY_OUTPUT_TOKENS,
+            "cost_source": "estimated",
+        }
+        self.assertEqual(len(turns), 1)
+        self.assertEqual(
+            {key: turns[0][key] for key in expected_turn},
+            expected_turn,
+        )
 
 
 def _mk_skill(root: Path, name: str) -> None:
-    d = root / name
-    d.mkdir(parents=True, exist_ok=True)
-    (d / "SKILL.md").write_text("# skill\n", encoding="utf-8")
+    skill_dir = root / name
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    (skill_dir / "SKILL.md").write_text("# skill\n", encoding=_ENCODING)
 
 
 class RecordAgentExitCodexSkillDiscoveryTest(unittest.TestCase):
@@ -1997,16 +2010,94 @@ class RecordAgentExitCodexSkillDiscoveryTest(unittest.TestCase):
     record (behind `TRAJECTORY_LOG_PATH`). Claude is untouched (its offered
     set rides the stream), and a run with no worktree stays empty."""
 
+    def test_agent_exit_records_discovered_skills(self) -> None:
+        _, analytics = _reload()
+        with tempfile.TemporaryDirectory() as td:
+            cwd = Path(td) / "wt"
+            _mk_skill(cwd / ".agents/skills", _DEVELOP)
+            _mk_skill(cwd / ".agents/skills", _REVIEW)
+            with patch.dict(os.environ, {_CODEX_HOME: str(Path(td) / "none")}):
+                base, _ = self._emit(
+                    analytics, backend=_CODEX, cwd=cwd, td=td, track=True,
+                )
+        rec = base[0]
+        self.assertEqual(rec["event"], _AGENT_EXIT)
+        # No SKILL.md read in the stream -> nothing triggered, but the offered
+        # set is filled from the filesystem scan.
+        self.assertEqual(rec[_SKILLS_AVAILABLE], [_DEVELOP, _REVIEW])
+        self.assertNotIn(_SKILLS_TRIGGERED, rec)
+
+    def test_trajectory_records_discovered_skills(self) -> None:
+        _, analytics = _reload()
+        with tempfile.TemporaryDirectory() as td:
+            cwd = Path(td) / "wt"
+            _mk_skill(cwd / ".claude/skills", _REVIEW)
+            with patch.dict(os.environ, {_CODEX_HOME: str(Path(td) / "none")}):
+                _, traj = self._emit(
+                    analytics, backend=_CODEX, cwd=cwd, td=td, traj=True,
+                )
+        rec = traj[0]
+        self.assertEqual(rec["event"], _AGENT_TRAJECTORY)
+        self.assertEqual(rec[_BACKEND], _CODEX)
+        self.assertEqual(rec[_SKILLS_AVAILABLE], [_REVIEW])
+        # The offered-tools baseline is backfilled onto the same record.
+        from orchestrator import skill_catalog
+        self.assertEqual(rec["tools"], list(skill_catalog.discover_codex_tools()))
+
+    def test_no_worktree_leaves_codex_available_empty(self) -> None:
+        # No worktree -> no skill discovery; the offered-tools baseline needs
+        # no worktree, so the trajectory record still carries `tools`.
+        _, analytics = _reload()
+        with tempfile.TemporaryDirectory() as td:
+            with patch.dict(os.environ, {_CODEX_HOME: str(Path(td) / "none")}):
+                base, traj = self._emit(
+                    analytics, backend=_CODEX, cwd=None, td=td,
+                    track=True, traj=True,
+                )
+        self.assertNotIn(_SKILLS_AVAILABLE, base[0])
+        self.assertNotIn(_SKILLS_AVAILABLE, traj[0])
+        from orchestrator import skill_catalog
+        self.assertEqual(traj[0]["tools"], list(skill_catalog.discover_codex_tools()))
+
+    def test_claude_offered_set_not_from_discovery(self) -> None:
+        # Discovery is codex-only: a claude run in a worktree full of skill
+        # dirs still takes its offered set from the stream (here: none), never
+        # from the filesystem, so a stray scan can't invent a claude field.
+        _, analytics = _reload()
+        with tempfile.TemporaryDirectory() as td:
+            cwd = Path(td) / "wt"
+            _mk_skill(cwd / ".agents/skills", _DEVELOP)
+            a_path = Path(td) / "a.jsonl"
+            with patch.dict(os.environ, {_CODEX_HOME: str(Path(td) / "none")}), \
+                    patch.object(analytics, _ANALYTICS_LOG_PATH, a_path), \
+                    patch.object(analytics, _TRAJECTORY_LOG_PATH, None), \
+                    patch.object(analytics, _TRACK_SKILL_TRIGGERS, True):
+                analytics.record_agent_exit(
+                    repo=_REPO,
+                    issue=AGENT_EXIT_ISSUE_NUMBER,
+                    stage=_STAGE_IMPLEMENTING,
+                    agent_role=_DEVELOPER, backend=_CLAUDE,
+                    agent_spec=_CLAUDE, resume_session_id=None,
+                    result=analytics.AgentResult(
+                        session_id="s", last_message="", exit_code=0,
+                        timed_out=False,
+                        stdout=_claude_stdout_with_skills(skills=()),
+                        stderr="",
+                    ),
+                    duration_s=0.0, review_round=0, retry_count=0, cwd=cwd,
+                )
+            self.assertNotIn(_SKILLS_AVAILABLE, _read_records(a_path)[0])
+
     def _emit(
         self, analytics, *, backend, cwd, td, track=False, traj=False,
     ) -> tuple[list[dict], list[dict]]:
         a_path = Path(td) / "a.jsonl"
         t_path = Path(td) / "t.jsonl" if traj else None
-        with patch.object(analytics, "ANALYTICS_LOG_PATH", a_path), \
-                patch.object(analytics, "TRAJECTORY_LOG_PATH", t_path), \
-                patch.object(analytics, "TRACK_SKILL_TRIGGERS", track):
+        with patch.object(analytics, _ANALYTICS_LOG_PATH, a_path), \
+                patch.object(analytics, _TRAJECTORY_LOG_PATH, t_path), \
+                patch.object(analytics, _TRACK_SKILL_TRIGGERS, track):
             analytics.record_agent_exit(
-                repo="owner/repo",
+                repo=_REPO,
                 issue=AGENT_EXIT_ISSUE_NUMBER,
                 stage="validating",
                 agent_role="reviewer",
@@ -2030,84 +2121,6 @@ class RecordAgentExitCodexSkillDiscoveryTest(unittest.TestCase):
         traj_recs = _read_records(t_path) if t_path else []
         return _read_records(a_path), traj_recs
 
-    def test_agent_exit_records_discovered_skills(self) -> None:
-        _, analytics = _reload()
-        with tempfile.TemporaryDirectory() as td:
-            cwd = Path(td) / "wt"
-            _mk_skill(cwd / ".agents/skills", "develop")
-            _mk_skill(cwd / ".agents/skills", "review")
-            with patch.dict(os.environ, {"CODEX_HOME": str(Path(td) / "none")}):
-                base, _ = self._emit(
-                    analytics, backend="codex", cwd=cwd, td=td, track=True,
-                )
-        rec = base[0]
-        self.assertEqual(rec["event"], "agent_exit")
-        # No SKILL.md read in the stream -> nothing triggered, but the offered
-        # set is filled from the filesystem scan.
-        self.assertEqual(rec["skills_available"], ["develop", "review"])
-        self.assertNotIn("skills_triggered", rec)
-
-    def test_trajectory_records_discovered_skills(self) -> None:
-        _, analytics = _reload()
-        with tempfile.TemporaryDirectory() as td:
-            cwd = Path(td) / "wt"
-            _mk_skill(cwd / ".claude/skills", "review")
-            with patch.dict(os.environ, {"CODEX_HOME": str(Path(td) / "none")}):
-                _, traj = self._emit(
-                    analytics, backend="codex", cwd=cwd, td=td, traj=True,
-                )
-        rec = traj[0]
-        self.assertEqual(rec["event"], "agent_trajectory")
-        self.assertEqual(rec["backend"], "codex")
-        self.assertEqual(rec["skills_available"], ["review"])
-        # The offered-tools baseline is backfilled onto the same record.
-        from orchestrator import skill_catalog
-        self.assertEqual(rec["tools"], list(skill_catalog.discover_codex_tools()))
-
-    def test_no_worktree_leaves_codex_available_empty(self) -> None:
-        # No worktree -> no skill discovery; the offered-tools baseline needs
-        # no worktree, so the trajectory record still carries `tools`.
-        _, analytics = _reload()
-        with tempfile.TemporaryDirectory() as td:
-            with patch.dict(os.environ, {"CODEX_HOME": str(Path(td) / "none")}):
-                base, traj = self._emit(
-                    analytics, backend="codex", cwd=None, td=td,
-                    track=True, traj=True,
-                )
-        self.assertNotIn("skills_available", base[0])
-        self.assertNotIn("skills_available", traj[0])
-        from orchestrator import skill_catalog
-        self.assertEqual(traj[0]["tools"], list(skill_catalog.discover_codex_tools()))
-
-    def test_claude_offered_set_not_from_discovery(self) -> None:
-        # Discovery is codex-only: a claude run in a worktree full of skill
-        # dirs still takes its offered set from the stream (here: none), never
-        # from the filesystem, so a stray scan can't invent a claude field.
-        _, analytics = _reload()
-        with tempfile.TemporaryDirectory() as td:
-            cwd = Path(td) / "wt"
-            _mk_skill(cwd / ".agents/skills", "develop")
-            a_path = Path(td) / "a.jsonl"
-            with patch.dict(os.environ, {"CODEX_HOME": str(Path(td) / "none")}), \
-                    patch.object(analytics, "ANALYTICS_LOG_PATH", a_path), \
-                    patch.object(analytics, "TRAJECTORY_LOG_PATH", None), \
-                    patch.object(analytics, "TRACK_SKILL_TRIGGERS", True):
-                analytics.record_agent_exit(
-                    repo="owner/repo",
-                    issue=AGENT_EXIT_ISSUE_NUMBER,
-                    stage="implementing",
-                    agent_role="developer", backend="claude",
-                    agent_spec="claude", resume_session_id=None,
-                    result=analytics.AgentResult(
-                        session_id="s", last_message="", exit_code=0,
-                        timed_out=False,
-                        stdout=_claude_stdout_with_skills(skills=()),
-                        stderr="",
-                    ),
-                    duration_s=0.0, review_round=0, retry_count=0, cwd=cwd,
-                )
-            self.assertNotIn("skills_available", _read_records(a_path)[0])
-
 
 class RecordingFacadeTest(unittest.TestCase):
     """The event-recording implementation lives in
@@ -2120,7 +2133,7 @@ class RecordingFacadeTest(unittest.TestCase):
     dispatching to the instance its own callers patched.
     """
 
-    def test_recorders_are_defined_in_the_recording_module(self) -> None:
+    def test_recorders_defined_in_recording_module(self) -> None:
         _, analytics = _reload()
         for name in (
             "append_record",
@@ -2137,9 +2150,7 @@ class RecordingFacadeTest(unittest.TestCase):
                 )
                 self.assertIs(member, getattr(analytics._recording, name))
 
-    def test_trajectory_recorders_are_defined_in_the_trajectories_module(
-        self,
-    ) -> None:
+    def test_trajectory_recorder_defined_in_submodule(self) -> None:
         _, analytics = _reload()
         for name in ("append_trajectory_record",):
             with self.subTest(name=name):
@@ -2149,9 +2160,7 @@ class RecordingFacadeTest(unittest.TestCase):
                 )
                 self.assertIs(member, getattr(analytics._trajectories, name))
 
-    def test_prune_entry_points_are_defined_in_the_retention_module(
-        self,
-    ) -> None:
+    def test_prune_entry_points_in_retention_module(self) -> None:
         _, analytics = _reload()
         for name in (
             "prune_old_records",
@@ -2165,19 +2174,19 @@ class RecordingFacadeTest(unittest.TestCase):
                 )
                 self.assertIs(member, getattr(analytics._retention, name))
 
-    def test_internal_append_routes_through_the_facade(self) -> None:
+    def test_internal_append_routes_via_facade(self) -> None:
         # A recorder's internal `append_record` is late-bound through the
         # facade, so patching `analytics.append_record` intercepts it.
         _, analytics = _reload()
         captured: list[dict] = []
         with patch.object(analytics, "append_record", captured.append):
             analytics.record_stage_enter(
-                repo="o/r", issue=1, stage="implementing",
+                repo=_REPO_SHORT, issue=1, stage=_STAGE_IMPLEMENTING,
             )
         self.assertEqual(len(captured), 1)
-        self.assertEqual(captured[0]["event"], "stage_enter")
+        self.assertEqual(captured[0]["event"], _STAGE_ENTER)
 
-    def test_reload_does_not_hijack_a_stale_facade_reference(self) -> None:
+    def test_reload_keeps_stale_facade_reference(self) -> None:
         # A holder that imported the package before a `_reload` keeps its own
         # instance: its recorders read the knobs patched on THAT instance, not
         # the freshly reloaded one that now sits in `sys.modules`.
@@ -2190,8 +2199,10 @@ class RecordingFacadeTest(unittest.TestCase):
         self.assertIsNot(fresh, stale)
         captured_fresh: list[dict] = []
         with patch.object(fresh, "append_record", captured_fresh.append):
-            fresh.record_stage_enter(repo="o/r", issue=2, stage="fixing")
-        stale.record_stage_enter(repo="o/r", issue=1, stage="implementing")
+            fresh.record_stage_enter(repo=_REPO_SHORT, issue=2, stage="fixing")
+        stale.record_stage_enter(
+            repo=_REPO_SHORT, issue=1, stage=_STAGE_IMPLEMENTING,
+        )
         self.assertEqual([rec["issue"] for rec in captured_fresh], [2])
         self.assertEqual([rec["issue"] for rec in captured_stale], [1])
 
