@@ -22,6 +22,13 @@ import unittest
 from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
+from tests.main_helpers import (
+    _build_clients,
+    _ClientFactory,
+    _raise_on_slug,
+    _TickRecorder,
+)
+
 
 @contextmanager
 def _reload_main(env: dict[str, str]):
@@ -62,27 +69,13 @@ class PollingLoopFanOutTest(unittest.TestCase):
                 f"beta/two|{td}|develop"
             ),
         }) as main_mod:
-            tick_calls: list[tuple[str, str]] = []
-            calls_lock = threading.Lock()
+            # Recording the (spec.slug, gh.slug) pairing surfaces a regression
+            # that crossed wires (spec for alpha paired with beta's gh).
+            clients = _ClientFactory()
+            recorder = _TickRecorder()
 
-            def fake_tick(gh, spec, *, scheduler=None):
-                # Record the spec slug + whichever client main.py paired it
-                # with, so a regression that crossed wires (spec for alpha
-                # paired with beta's gh) would surface here. Calls happen
-                # on worker threads so the list needs a lock.
-                with calls_lock:
-                    tick_calls.append((spec.slug, gh.slug))
-
-            clients_by_slug: dict[str, MagicMock] = {}
-
-            def fake_client(*, repo_spec):
-                client = MagicMock()
-                client.slug = repo_spec.slug
-                clients_by_slug[repo_spec.slug] = client
-                return client
-
-            with patch.object(main_mod, "GitHubClient", side_effect=fake_client), \
-                 patch.object(main_mod.workflow, "tick", side_effect=fake_tick):
+            with patch.object(main_mod, "GitHubClient", side_effect=clients), \
+                 patch.object(main_mod.workflow, "tick", side_effect=recorder):
                 rc = main_mod.main(["--once"])
 
             self.assertEqual(rc, 0)
@@ -90,12 +83,12 @@ class PollingLoopFanOutTest(unittest.TestCase):
             # invariant is that every (spec, paired client) tuple appears
             # exactly once and the pairing is correct.
             self.assertEqual(
-                set(tick_calls),
+                set(recorder.calls),
                 {("alpha/one", "alpha/one"), ("beta/two", "beta/two")},
             )
-            self.assertEqual(len(tick_calls), 2)
+            self.assertEqual(len(recorder.calls), 2)
             for slug in ("alpha/one", "beta/two"):
-                clients_by_slug[slug].ensure_workflow_labels.assert_called_once()
+                clients.by_slug[slug].ensure_workflow_labels.assert_called_once()
 
     def test_repo_tick_error_does_not_block_others(self) -> None:
         # The whole point of catching per-repo failures: one repo wedged in
@@ -110,22 +103,15 @@ class PollingLoopFanOutTest(unittest.TestCase):
                 f"gamma/three|{td}|main"
             ),
         }) as main_mod:
-            ticked: list[str] = []
-            ticked_lock = threading.Lock()
+            clients = _ClientFactory()
+            recorder = _TickRecorder(
+                on_tick=lambda gh, spec: _raise_on_slug(
+                    spec, "alpha/one", "simulated alpha failure",
+                ),
+            )
 
-            def fake_tick(gh, spec, *, scheduler=None):
-                with ticked_lock:
-                    ticked.append(spec.slug)
-                if spec.slug == "alpha/one":
-                    raise RuntimeError("simulated alpha failure")
-
-            def fake_client(*, repo_spec):
-                client = MagicMock()
-                client.slug = repo_spec.slug
-                return client
-
-            with patch.object(main_mod, "GitHubClient", side_effect=fake_client), \
-                 patch.object(main_mod.workflow, "tick", side_effect=fake_tick):
+            with patch.object(main_mod, "GitHubClient", side_effect=clients), \
+                 patch.object(main_mod.workflow, "tick", side_effect=recorder):
                 rc = main_mod.main(["--once"])
 
             # Returned 0 (loop swallowed the per-repo exception) and every
@@ -133,9 +119,9 @@ class PollingLoopFanOutTest(unittest.TestCase):
             # parallel fan-out, so assert on the set.
             self.assertEqual(rc, 0)
             self.assertEqual(
-                set(ticked), {"alpha/one", "beta/two", "gamma/three"},
+                set(recorder.slugs), {"alpha/one", "beta/two", "gamma/three"},
             )
-            self.assertEqual(len(ticked), 3)
+            self.assertEqual(len(recorder.slugs), 3)
 
     def test_legacy_single_repo_still_works(self) -> None:
         # No REPOS set: main.py must still run a single tick using the
@@ -147,28 +133,19 @@ class PollingLoopFanOutTest(unittest.TestCase):
             "TARGET_REPO_ROOT": "/tmp",
             "BASE_BRANCH": "trunk",
         }) as main_mod:
-            tick_calls: list[str] = []
-            tick_threads: list[int] = []
+            clients = _ClientFactory()
+            recorder = _TickRecorder()
 
-            def fake_tick(gh, spec, *, scheduler=None):
-                tick_calls.append(spec.slug)
-                tick_threads.append(threading.get_ident())
-
-            def fake_client(*, repo_spec):
-                client = MagicMock()
-                client.slug = repo_spec.slug
-                return client
-
-            with patch.object(main_mod, "GitHubClient", side_effect=fake_client), \
-                 patch.object(main_mod.workflow, "tick", side_effect=fake_tick):
+            with patch.object(main_mod, "GitHubClient", side_effect=clients), \
+                 patch.object(main_mod.workflow, "tick", side_effect=recorder):
                 rc = main_mod.main(["--once"])
 
             self.assertEqual(rc, 0)
-            self.assertEqual(tick_calls, ["owner/legacy"])
+            self.assertEqual(recorder.slugs, ["owner/legacy"])
             # No executor: the tick runs on the same thread `main` was
             # called from. A regression that always spawned a worker
             # thread (even for one repo) would show a different tid here.
-            self.assertEqual(tick_threads, [threading.get_ident()])
+            self.assertEqual(recorder.threads, [threading.get_ident()])
 
     def test_repos_run_concurrently(self) -> None:
         # The whole point of fan-out: configured repos must overlap. A
@@ -185,21 +162,19 @@ class PollingLoopFanOutTest(unittest.TestCase):
             barrier = threading.Barrier(3, timeout=5.0)
             completed: list[str] = []
             completed_lock = threading.Lock()
+            clients = _ClientFactory()
 
             def fake_tick(gh, spec, *, scheduler=None):
                 # If ticks ran sequentially, the first arrival would wait
                 # forever for the second / third and the barrier would
                 # time out (BrokenBarrierError surfaces as test failure).
+                # Recording only AFTER the barrier is what makes a
+                # sequential regression leave `completed` short.
                 barrier.wait()
                 with completed_lock:
                     completed.append(spec.slug)
 
-            def fake_client(*, repo_spec):
-                client = MagicMock()
-                client.slug = repo_spec.slug
-                return client
-
-            with patch.object(main_mod, "GitHubClient", side_effect=fake_client), \
+            with patch.object(main_mod, "GitHubClient", side_effect=clients), \
                  patch.object(main_mod.workflow, "tick", side_effect=fake_tick):
                 rc = main_mod.main(["--once"])
 
@@ -220,21 +195,15 @@ class PollingLoopFanOutTest(unittest.TestCase):
                 f"beta/two|{td}|develop"
             ),
         }) as main_mod:
-            clients_by_slug: dict[str, MagicMock] = {}
+            clients = _ClientFactory()
 
-            def fake_client(*, repo_spec):
-                client = MagicMock()
-                client.slug = repo_spec.slug
-                clients_by_slug[repo_spec.slug] = client
-                return client
-
-            with patch.object(main_mod, "GitHubClient", side_effect=fake_client), \
+            with patch.object(main_mod, "GitHubClient", side_effect=clients), \
                  patch.object(main_mod.workflow, "tick"):
                 rc = main_mod.main(["--once"])
 
             self.assertEqual(rc, 0)
-            self.assertEqual(set(clients_by_slug), {"alpha/one", "beta/two"})
-            for client in clients_by_slug.values():
+            self.assertEqual(set(clients.by_slug), {"alpha/one", "beta/two"})
+            for client in clients.by_slug.values():
                 client.ensure_workflow_labels.assert_called_once()
 
 
@@ -266,30 +235,21 @@ class SchedulerWiringTest(unittest.TestCase):
             "MAX_PARALLEL_ISSUES_GLOBAL": "4",
             "MAX_PARALLEL_ISSUES_PER_REPO": "3",
         }) as main_mod:
-            received: list[object] = []
-            received_lock = threading.Lock()
+            clients = _ClientFactory()
+            recorder = _TickRecorder()
 
-            def fake_tick(gh, spec, *, scheduler=None):
-                with received_lock:
-                    received.append(scheduler)
-
-            def fake_client(*, repo_spec):
-                client = MagicMock()
-                client.slug = repo_spec.slug
-                return client
-
-            with patch.object(main_mod, "GitHubClient", side_effect=fake_client), \
-                 patch.object(main_mod.workflow, "tick", side_effect=fake_tick):
+            with patch.object(main_mod, "GitHubClient", side_effect=clients), \
+                 patch.object(main_mod.workflow, "tick", side_effect=recorder):
                 rc = main_mod.main(["--once"])
 
             self.assertEqual(rc, 0)
-            self.assertEqual(len(received), 2)
-            self.assertIsNotNone(received[0])
+            self.assertEqual(len(recorder.schedulers), 2)
+            self.assertIsNotNone(recorder.schedulers[0])
             # Same instance for every spec -- a per-repo scheduler would
             # let every repo independently saturate the global cap.
-            self.assertIs(received[0], received[1])
+            self.assertIs(recorder.schedulers[0], recorder.schedulers[1])
             # Caps derived from the env vars.
-            sched = received[0]
+            sched = recorder.schedulers[0]
             self.assertEqual(sched.global_cap, 4)
             self.assertEqual(sched.per_repo_cap, 3)
 
@@ -305,24 +265,17 @@ class SchedulerWiringTest(unittest.TestCase):
             "TARGET_REPO_ROOT": "/tmp",
             "BASE_BRANCH": "trunk",
         }) as main_mod:
-            received: list[object] = []
+            clients = _ClientFactory()
+            recorder = _TickRecorder()
 
-            def fake_tick(gh, spec, *, scheduler=None):
-                received.append(scheduler)
-
-            def fake_client(*, repo_spec):
-                client = MagicMock()
-                client.slug = repo_spec.slug
-                return client
-
-            with patch.object(main_mod, "GitHubClient", side_effect=fake_client), \
-                 patch.object(main_mod.workflow, "tick", side_effect=fake_tick):
+            with patch.object(main_mod, "GitHubClient", side_effect=clients), \
+                 patch.object(main_mod.workflow, "tick", side_effect=recorder):
                 rc = main_mod.main(["--once"])
 
             self.assertEqual(rc, 0)
-            self.assertEqual(len(received), 1)
-            self.assertIsNotNone(received[0])
-            self.assertIsInstance(received[0], main_mod.IssueScheduler)
+            self.assertEqual(len(recorder.schedulers), 1)
+            self.assertIsNotNone(recorder.schedulers[0])
+            self.assertIsInstance(recorder.schedulers[0], main_mod.IssueScheduler)
 
     def test_main_shuts_down_scheduler_on_normal_exit(self) -> None:
         # The scheduler must be shut down before main() returns so any
@@ -335,16 +288,8 @@ class SchedulerWiringTest(unittest.TestCase):
             "TARGET_REPO_ROOT": "/tmp",
             "BASE_BRANCH": "trunk",
         }) as main_mod:
-            captured: list[object] = []
-
-            def fake_tick(gh, spec, *, scheduler=None):
-                captured.append(scheduler)
-
-            def fake_client(*, repo_spec):
-                client = MagicMock()
-                client.slug = repo_spec.slug
-                return client
-
+            clients = _ClientFactory()
+            recorder = _TickRecorder()
             real_scheduler_init = main_mod.IssueScheduler.__init__
             built: list[object] = []
 
@@ -353,14 +298,14 @@ class SchedulerWiringTest(unittest.TestCase):
                 built.append(self)
 
             with patch.object(main_mod.IssueScheduler, "__init__", tracking_init), \
-                 patch.object(main_mod, "GitHubClient", side_effect=fake_client), \
-                 patch.object(main_mod.workflow, "tick", side_effect=fake_tick):
+                 patch.object(main_mod, "GitHubClient", side_effect=clients), \
+                 patch.object(main_mod.workflow, "tick", side_effect=recorder):
                 rc = main_mod.main(["--once"])
 
             self.assertEqual(rc, 0)
             self.assertEqual(len(built), 1)
             sched = built[0]
-            self.assertIs(captured[0], sched)
+            self.assertIs(recorder.schedulers[0], sched)
             # After main() returns, a follow-up submit must be rejected
             # because the scheduler has been closed.
             self.assertFalse(
@@ -377,6 +322,12 @@ class SchedulerWiringTest(unittest.TestCase):
             "TARGET_REPO_ROOT": "/tmp",
             "BASE_BRANCH": "trunk",
         }) as main_mod:
+            clients = _ClientFactory()
+            recorder = _TickRecorder(
+                on_tick=lambda gh, spec: main_mod._shutdown(
+                    signal.SIGINT, None,
+                ),
+            )
             built: list[object] = []
             real_scheduler_init = main_mod.IssueScheduler.__init__
 
@@ -384,17 +335,9 @@ class SchedulerWiringTest(unittest.TestCase):
                 real_scheduler_init(self, *args, **kwargs)
                 built.append(self)
 
-            def fake_tick(gh, spec, *, scheduler=None):
-                main_mod._shutdown(signal.SIGINT, None)
-
-            def fake_client(*, repo_spec):
-                client = MagicMock()
-                client.slug = repo_spec.slug
-                return client
-
             with patch.object(main_mod.IssueScheduler, "__init__", tracking_init), \
-                 patch.object(main_mod, "GitHubClient", side_effect=fake_client), \
-                 patch.object(main_mod.workflow, "tick", side_effect=fake_tick):
+                 patch.object(main_mod, "GitHubClient", side_effect=clients), \
+                 patch.object(main_mod.workflow, "tick", side_effect=recorder):
                 rc = main_mod.main(["--once"])
 
             self.assertEqual(rc, 128 + signal.SIGINT)
@@ -421,6 +364,7 @@ class SchedulerWiringTest(unittest.TestCase):
             "TARGET_REPO_ROOT": "/tmp",
             "BASE_BRANCH": "trunk",
         }) as main_mod:
+            clients = _ClientFactory()
             submit_results: list[bool] = []
 
             def fake_tick(gh, spec, *, scheduler=None):
@@ -443,13 +387,8 @@ class SchedulerWiringTest(unittest.TestCase):
                     )
                 )
 
-            def fake_client(*, repo_spec):
-                client = MagicMock()
-                client.slug = repo_spec.slug
-                return client
-
             with patch.object(
-                main_mod, "GitHubClient", side_effect=fake_client,
+                main_mod, "GitHubClient", side_effect=clients,
             ), patch.object(
                 main_mod.workflow, "tick", side_effect=fake_tick,
             ):
@@ -481,6 +420,7 @@ class SchedulerWiringTest(unittest.TestCase):
             signal_fired = threading.Event()
             beta_submit_after_signal: list[bool] = []
             beta_lock = threading.Lock()
+            clients = _ClientFactory()
 
             def fake_tick(gh, spec, *, scheduler=None):
                 # Wait until both repos are iterating concurrently so a
@@ -505,13 +445,8 @@ class SchedulerWiringTest(unittest.TestCase):
                 with beta_lock:
                     beta_submit_after_signal.append(result)
 
-            def fake_client(*, repo_spec):
-                client = MagicMock()
-                client.slug = repo_spec.slug
-                return client
-
             with patch.object(
-                main_mod, "GitHubClient", side_effect=fake_client,
+                main_mod, "GitHubClient", side_effect=clients,
             ), patch.object(
                 main_mod.workflow, "tick", side_effect=fake_tick,
             ):
@@ -544,6 +479,7 @@ class SchedulerWiringTest(unittest.TestCase):
             counter_lock = threading.Lock()
             admitted = threading.Semaphore(0)
             release = threading.Event()
+            clients = _ClientFactory()
 
             def _worker() -> None:
                 nonlocal in_flight, max_in_flight
@@ -573,15 +509,10 @@ class SchedulerWiringTest(unittest.TestCase):
                 time.sleep(0.1)
                 release.set()
 
-            def fake_client(*, repo_spec):
-                client = MagicMock()
-                client.slug = repo_spec.slug
-                return client
-
             releaser = threading.Thread(target=release_when_two_admitted)
             releaser.start()
             try:
-                with patch.object(main_mod, "GitHubClient", side_effect=fake_client), \
+                with patch.object(main_mod, "GitHubClient", side_effect=clients), \
                      patch.object(main_mod.workflow, "tick", side_effect=fake_tick):
                     rc = main_mod.main(["--once"])
             finally:
@@ -618,6 +549,7 @@ class SignalHandlingTest(unittest.TestCase):
             ),
         }) as main_mod:
             shutdown_done = threading.Event()
+            clients = _ClientFactory()
 
             def fake_tick(gh, spec, *, scheduler=None):
                 # The first arrival simulates the user pressing Ctrl+C
@@ -627,12 +559,7 @@ class SignalHandlingTest(unittest.TestCase):
                     shutdown_done.set()
                     main_mod._shutdown(signal.SIGINT, None)
 
-            def fake_client(*, repo_spec):
-                client = MagicMock()
-                client.slug = repo_spec.slug
-                return client
-
-            with patch.object(main_mod, "GitHubClient", side_effect=fake_client), \
+            with patch.object(main_mod, "GitHubClient", side_effect=clients), \
                  patch.object(main_mod.workflow, "tick", side_effect=fake_tick):
                 rc = main_mod.main(["--once"])
 
@@ -650,27 +577,20 @@ class SignalHandlingTest(unittest.TestCase):
             "TARGET_REPO_ROOT": "/tmp",
             "BASE_BRANCH": "trunk",
         }) as main_mod:
-            ticked: list[str] = []
-
-            def fake_tick(gh, spec, *, scheduler=None):
-                ticked.append(spec.slug)
-
-            def fake_client(*, repo_spec):
-                client = MagicMock()
-                client.slug = repo_spec.slug
-                return client
+            clients = _ClientFactory()
+            recorder = _TickRecorder()
 
             # Pre-set the shutdown flag so the `--once` tick observes
             # `running=False` immediately when `_run_tick` is entered.
             main_mod.running = False
             main_mod.received_signal = signal.SIGINT
 
-            with patch.object(main_mod, "GitHubClient", side_effect=fake_client), \
-                 patch.object(main_mod.workflow, "tick", side_effect=fake_tick):
+            with patch.object(main_mod, "GitHubClient", side_effect=clients), \
+                 patch.object(main_mod.workflow, "tick", side_effect=recorder):
                 rc = main_mod.main(["--once"])
 
             # No tick ran AND the exit code carried the signal forward.
-            self.assertEqual(ticked, [])
+            self.assertEqual(recorder.slugs, [])
             self.assertEqual(rc, 128 + signal.SIGINT)
 
     def test_sigterm_yields_signal_exit_code(self) -> None:
@@ -679,16 +599,15 @@ class SignalHandlingTest(unittest.TestCase):
             "TARGET_REPO_ROOT": "/tmp",
             "BASE_BRANCH": "trunk",
         }) as main_mod:
-            def fake_tick(gh, spec, *, scheduler=None):
-                main_mod._shutdown(signal.SIGTERM, None)
+            clients = _ClientFactory()
+            recorder = _TickRecorder(
+                on_tick=lambda gh, spec: main_mod._shutdown(
+                    signal.SIGTERM, None,
+                ),
+            )
 
-            def fake_client(*, repo_spec):
-                client = MagicMock()
-                client.slug = repo_spec.slug
-                return client
-
-            with patch.object(main_mod, "GitHubClient", side_effect=fake_client), \
-                 patch.object(main_mod.workflow, "tick", side_effect=fake_tick):
+            with patch.object(main_mod, "GitHubClient", side_effect=clients), \
+                 patch.object(main_mod.workflow, "tick", side_effect=recorder):
                 rc = main_mod.main(["--once"])
 
             self.assertEqual(rc, 128 + signal.SIGTERM)
@@ -711,16 +630,10 @@ class AnalyticsRetentionLoopWiringTest(unittest.TestCase):
             "TARGET_REPO_ROOT": "/tmp",
             "BASE_BRANCH": "trunk",
         }) as main_mod:
-            def fake_tick(gh, spec, *, scheduler=None):
-                pass
+            clients = _ClientFactory()
 
-            def fake_client(*, repo_spec):
-                client = MagicMock()
-                client.slug = repo_spec.slug
-                return client
-
-            with patch.object(main_mod, "GitHubClient", side_effect=fake_client), \
-                 patch.object(main_mod.workflow, "tick", side_effect=fake_tick), \
+            with patch.object(main_mod, "GitHubClient", side_effect=clients), \
+                 patch.object(main_mod.workflow, "tick"), \
                  patch.object(
                      main_mod.analytics, "prune_with_retention_logging",
                  ) as prune:
@@ -740,16 +653,10 @@ class AnalyticsRetentionLoopWiringTest(unittest.TestCase):
                 f"beta/two|{td}|develop"
             ),
         }) as main_mod:
-            def fake_tick(gh, spec, *, scheduler=None):
-                pass
+            clients = _ClientFactory()
 
-            def fake_client(*, repo_spec):
-                client = MagicMock()
-                client.slug = repo_spec.slug
-                return client
-
-            with patch.object(main_mod, "GitHubClient", side_effect=fake_client), \
-                 patch.object(main_mod.workflow, "tick", side_effect=fake_tick), \
+            with patch.object(main_mod, "GitHubClient", side_effect=clients), \
+                 patch.object(main_mod.workflow, "tick"), \
                  patch.object(
                      main_mod.analytics, "prune_with_retention_logging",
                  ) as prune:
@@ -774,26 +681,6 @@ class AsyncPollingDispatchTest(unittest.TestCase):
     same key.
     """
 
-    def _build_clients(self, main_mod, slugs):
-        # Mirror `main`'s startup: build one MagicMock GitHubClient per
-        # slug and pair it with the matching RepoSpec. The tests below
-        # never call `ensure_workflow_labels`, so the mock surface is
-        # intentionally minimal.
-        from pathlib import Path
-
-        from orchestrator.config import RepoSpec
-        clients = []
-        for slug in slugs:
-            spec = RepoSpec(
-                slug=slug,
-                target_root=Path("/tmp"),
-                base_branch="main",
-            )
-            gh = MagicMock()
-            gh.slug = slug
-            clients.append((spec, gh))
-        return clients
-
     def test_long_handler_does_not_block_next_poll(
         self,
     ) -> None:
@@ -813,8 +700,7 @@ class AsyncPollingDispatchTest(unittest.TestCase):
                 global_cap=4, per_repo_cap=4,
             )
             self.addCleanup(sched.shutdown)
-            clients = self._build_clients(
-                main_mod, ["alpha/one", "beta/two"],
+            clients = _build_clients(["alpha/one", "beta/two"],
             )
 
             alpha_started = threading.Event()
@@ -892,7 +778,7 @@ class AsyncPollingDispatchTest(unittest.TestCase):
                 global_cap=4, per_repo_cap=4,
             )
             self.addCleanup(sched.shutdown)
-            clients = self._build_clients(main_mod, ["owner/repo"])
+            clients = _build_clients(["owner/repo"])
 
             started = threading.Event()
             release = threading.Event()
@@ -946,7 +832,7 @@ class AsyncPollingDispatchTest(unittest.TestCase):
                 global_cap=4, per_repo_cap=4,
             )
             self.addCleanup(sched.shutdown)
-            clients = self._build_clients(main_mod, ["owner/repo"])
+            clients = _build_clients(["owner/repo"])
 
             done_events: list[threading.Event] = []
             run_count = {"n": 0}
@@ -1007,7 +893,7 @@ class AsyncPollingDispatchTest(unittest.TestCase):
                 global_cap=4, per_repo_cap=4,
             )
             self.addCleanup(sched.shutdown)
-            clients = self._build_clients(main_mod, ["owner/legacy"])
+            clients = _build_clients(["owner/legacy"])
 
             with patch.object(
                 main_mod.workflow, "tick",
@@ -1031,8 +917,7 @@ class AsyncPollingDispatchTest(unittest.TestCase):
                 global_cap=4, per_repo_cap=4,
             )
             self.addCleanup(sched.shutdown)
-            clients = self._build_clients(
-                main_mod, ["alpha/one", "beta/two"],
+            clients = _build_clients(["alpha/one", "beta/two"],
             )
 
             with patch.object(
@@ -1070,8 +955,7 @@ class AsyncPollingDispatchTest(unittest.TestCase):
                 global_cap=4, per_repo_cap=4,
             )
             self.addCleanup(sched.shutdown)
-            clients = self._build_clients(
-                main_mod, ["alpha/one", "beta/two"],
+            clients = _build_clients(["alpha/one", "beta/two"],
             )
             for _spec, gh in clients:
                 gh.list_pollable_issues.return_value = iter([])
@@ -1188,13 +1072,12 @@ class ShutdownWatchdogTest(unittest.TestCase):
 
     def test_signal_exit_terminates_in_flight_agents(self) -> None:
         with _reload_main(self._LEGACY) as main_mod:
-            def fake_tick(gh, spec, *, scheduler=None):
-                main_mod._shutdown(signal.SIGTERM, None)
-
-            def fake_client(*, repo_spec):
-                client = MagicMock()
-                client.slug = repo_spec.slug
-                return client
+            clients = _ClientFactory()
+            recorder = _TickRecorder(
+                on_tick=lambda gh, spec: main_mod._shutdown(
+                    signal.SIGTERM, None,
+                ),
+            )
 
             with (
                 patch.object(main_mod, "_arm_shutdown_watchdog"),
@@ -1202,10 +1085,10 @@ class ShutdownWatchdogTest(unittest.TestCase):
                     main_mod.agents, "terminate_all_running",
                 ) as term,
                 patch.object(
-                    main_mod, "GitHubClient", side_effect=fake_client,
+                    main_mod, "GitHubClient", side_effect=clients,
                 ),
                 patch.object(
-                    main_mod.workflow, "tick", side_effect=fake_tick,
+                    main_mod.workflow, "tick", side_effect=recorder,
                 ),
             ):
                 rc = main_mod.main(["--once"])
@@ -1219,24 +1102,16 @@ class ShutdownWatchdogTest(unittest.TestCase):
         # -- only a signal stop, which is under the systemd deadline, kills
         # agents up front.
         with _reload_main(self._LEGACY) as main_mod:
-            def fake_tick(gh, spec, *, scheduler=None):
-                pass
-
-            def fake_client(*, repo_spec):
-                client = MagicMock()
-                client.slug = repo_spec.slug
-                return client
+            clients = _ClientFactory()
 
             with (
                 patch.object(
                     main_mod.agents, "terminate_all_running",
                 ) as term,
                 patch.object(
-                    main_mod, "GitHubClient", side_effect=fake_client,
+                    main_mod, "GitHubClient", side_effect=clients,
                 ),
-                patch.object(
-                    main_mod.workflow, "tick", side_effect=fake_tick,
-                ),
+                patch.object(main_mod.workflow, "tick"),
             ):
                 rc = main_mod.main(["--once"])
 

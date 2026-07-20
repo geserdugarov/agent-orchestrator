@@ -10,55 +10,50 @@ from pathlib import Path
 from unittest.mock import patch
 
 
+def _load_config(env: dict[str, str] | None = None):
+    """Reload `orchestrator.config` with `env` layered over a minimal base
+    (dotenv skipped, token file absent) so module-level parsing sees the test
+    values. The dotted `import orchestrator.config as config` after popping the
+    cached module is required: `from orchestrator import config` would rebind
+    the stale package attribute and skip the reload.
+    """
+    full_env = {
+        "ORCHESTRATOR_SKIP_DOTENV": "1",
+        "ORCHESTRATOR_TOKEN_FILE": "/tmp/agent-orchestrator-token-missing",
+    }
+    if env:
+        full_env.update(env)
+    with patch.dict(os.environ, full_env, clear=True):
+        sys.modules.pop("orchestrator.config", None)
+        import orchestrator.config as config
+
+        return config
+
+
 class HitlHandleConfigTest(unittest.TestCase):
-    def _load_config(self, hitl_handle: str):
-        env = {
-            "HITL_HANDLE": hitl_handle,
-            "ORCHESTRATOR_SKIP_DOTENV": "1",
-            "ORCHESTRATOR_TOKEN_FILE": "/tmp/agent-orchestrator-token-missing",
-        }
-        with patch.dict(os.environ, env, clear=True):
-            sys.modules.pop("orchestrator.config", None)
-            import orchestrator.config as config
-
-            return config
-
     def test_formats_comma_handles_as_mentions(self) -> None:
-        config = self._load_config("alice,bob")
+        config = _load_config({"HITL_HANDLE": "alice,bob"})
 
         self.assertEqual(config.HITL_HANDLES, ("alice", "bob"))
         self.assertEqual(config.HITL_HANDLE, "alice,bob")
         self.assertEqual(config.HITL_MENTIONS, "@alice @bob")
 
     def test_strips_spaces_at_signs_and_duplicates(self) -> None:
-        config = self._load_config(" @alice, bob, ,alice,@carol ")
+        config = _load_config({"HITL_HANDLE": " @alice, bob, ,alice,@carol "})
 
         self.assertEqual(config.HITL_HANDLES, ("alice", "bob", "carol"))
         self.assertEqual(config.HITL_MENTIONS, "@alice @bob @carol")
 
     def test_empty_config_keeps_existing_default(self) -> None:
-        config = self._load_config("")
+        config = _load_config({"HITL_HANDLE": ""})
 
         self.assertEqual(config.HITL_HANDLES, ("geserdugarov",))
         self.assertEqual(config.HITL_MENTIONS, "@geserdugarov")
 
 
 class AgentGitIdentityConfigTest(unittest.TestCase):
-    def _load_config(self, env: dict[str, str] | None = None):
-        full_env = {
-            "ORCHESTRATOR_SKIP_DOTENV": "1",
-            "ORCHESTRATOR_TOKEN_FILE": "/tmp/agent-orchestrator-token-missing",
-        }
-        if env:
-            full_env.update(env)
-        with patch.dict(os.environ, full_env, clear=True):
-            sys.modules.pop("orchestrator.config", None)
-            import orchestrator.config as config
-
-            return config
-
     def test_defaults_to_orchestrator_identity(self) -> None:
-        config = self._load_config()
+        config = _load_config()
 
         self.assertEqual(config.AGENT_GIT_NAME, "agent-orchestrator")
         self.assertEqual(
@@ -67,7 +62,7 @@ class AgentGitIdentityConfigTest(unittest.TestCase):
         )
 
     def test_env_overrides_take_effect(self) -> None:
-        config = self._load_config({
+        config = _load_config({
             "AGENT_GIT_NAME": "Custom Bot",
             "AGENT_GIT_EMAIL": "bot@example.com",
         })
@@ -80,26 +75,13 @@ class AgentBackendConfigTest(unittest.TestCase):
     """`DEV_AGENT` / `REVIEW_AGENT` are validated at import time so a typo
     aborts the process before the polling loop spins up."""
 
-    def _load_config(self, env: dict[str, str] | None = None):
-        full_env = {
-            "ORCHESTRATOR_SKIP_DOTENV": "1",
-            "ORCHESTRATOR_TOKEN_FILE": "/tmp/agent-orchestrator-token-missing",
-        }
-        if env:
-            full_env.update(env)
-        with patch.dict(os.environ, full_env, clear=True):
-            sys.modules.pop("orchestrator.config", None)
-            import orchestrator.config as config
-
-            return config
-
     def test_defaults_split_claude_dev_codex_review(self) -> None:
-        config = self._load_config()
+        config = _load_config()
         self.assertEqual(config.DEV_AGENT, "claude")
         self.assertEqual(config.REVIEW_AGENT, "codex")
 
     def test_env_overrides_invert_split(self) -> None:
-        config = self._load_config({
+        config = _load_config({
             "DEV_AGENT": "codex",
             "REVIEW_AGENT": "claude",
         })
@@ -107,7 +89,7 @@ class AgentBackendConfigTest(unittest.TestCase):
         self.assertEqual(config.REVIEW_AGENT, "claude")
 
     def test_case_and_whitespace_tolerated(self) -> None:
-        config = self._load_config({
+        config = _load_config({
             "DEV_AGENT": "  CODEX ",
             "REVIEW_AGENT": "Claude",
         })
@@ -116,33 +98,33 @@ class AgentBackendConfigTest(unittest.TestCase):
 
     def test_invalid_dev_agent_aborts_at_import(self) -> None:
         with self.assertRaises(SystemExit) as cm:
-            self._load_config({"DEV_AGENT": "gemini"})
+            _load_config({"DEV_AGENT": "gemini"})
         self.assertIn("DEV_AGENT", str(cm.exception))
         self.assertIn("gemini", str(cm.exception))
 
     def test_invalid_review_agent_aborts_at_import(self) -> None:
         with self.assertRaises(SystemExit) as cm:
-            self._load_config({"REVIEW_AGENT": "qwen"})
+            _load_config({"REVIEW_AGENT": "qwen"})
         self.assertIn("REVIEW_AGENT", str(cm.exception))
 
     def test_default_decompose_agent_is_claude(self) -> None:
-        config = self._load_config()
+        config = _load_config()
         self.assertEqual(config.DECOMPOSE_AGENT, "claude")
 
     def test_decompose_agent_env_override(self) -> None:
-        config = self._load_config({"DECOMPOSE_AGENT": "codex"})
+        config = _load_config({"DECOMPOSE_AGENT": "codex"})
         self.assertEqual(config.DECOMPOSE_AGENT, "codex")
 
     def test_invalid_decompose_agent_aborts_at_import(self) -> None:
         with self.assertRaises(SystemExit) as cm:
-            self._load_config({"DECOMPOSE_AGENT": "gemini"})
+            _load_config({"DECOMPOSE_AGENT": "gemini"})
         self.assertIn("DECOMPOSE_AGENT", str(cm.exception))
 
     def test_decomposer_validated_when_feature_off(self) -> None:
         # Toggling DECOMPOSE back on later must not surface a fresh
         # "that env var was always invalid" failure.
         with self.assertRaises(SystemExit) as cm:
-            self._load_config({
+            _load_config({
                 "DECOMPOSE": "off",
                 "DECOMPOSE_AGENT": "gemini",
             })
@@ -156,21 +138,8 @@ class AgentSpecConfigTest(unittest.TestCase):
     names keep working unchanged.
     """
 
-    def _load_config(self, env: dict[str, str] | None = None):
-        full_env = {
-            "ORCHESTRATOR_SKIP_DOTENV": "1",
-            "ORCHESTRATOR_TOKEN_FILE": "/tmp/agent-orchestrator-token-missing",
-        }
-        if env:
-            full_env.update(env)
-        with patch.dict(os.environ, full_env, clear=True):
-            sys.modules.pop("orchestrator.config", None)
-            import orchestrator.config as config
-
-            return config
-
     def test_bare_backend_has_no_extra_args(self) -> None:
-        config = self._load_config()
+        config = _load_config()
         self.assertEqual(config.DEV_AGENT, "claude")
         self.assertEqual(config.DEV_AGENT_ARGS, ())
         self.assertEqual(config.REVIEW_AGENT, "codex")
@@ -183,7 +152,7 @@ class AgentSpecConfigTest(unittest.TestCase):
         # `-c key="value"` token whole even though it contains both
         # quotes and an `=`; if the parser splits on whitespace naively
         # the value half would be dropped.
-        config = self._load_config({
+        config = _load_config({
             "DEV_AGENT": "codex -m gpt-5.5 -c 'model_reasoning_effort=\"xhigh\"'",
         })
         self.assertEqual(config.DEV_AGENT, "codex")
@@ -193,7 +162,7 @@ class AgentSpecConfigTest(unittest.TestCase):
         )
 
     def test_parses_claude_spec_with_flags(self) -> None:
-        config = self._load_config({
+        config = _load_config({
             "REVIEW_AGENT": "claude --model claude-opus-4-7 --effort high",
         })
         self.assertEqual(config.REVIEW_AGENT, "claude")
@@ -205,7 +174,7 @@ class AgentSpecConfigTest(unittest.TestCase):
     def test_per_role_args_are_independent(self) -> None:
         # Two roles sharing a backend keep distinct args so a deployment
         # can run e.g. `codex -m gpt-5.5` for dev and `codex` for review.
-        config = self._load_config({
+        config = _load_config({
             "DEV_AGENT": "codex -m gpt-5.5",
             "REVIEW_AGENT": "codex",
             "DECOMPOSE_AGENT": "claude --model claude-opus-4-7",
@@ -221,20 +190,20 @@ class AgentSpecConfigTest(unittest.TestCase):
         # The bare-form parser tolerates ` CODEX `; the spec form should
         # behave identically so legacy values like `DEV_AGENT=Codex` keep
         # parsing the same way after the shell-spec rollout.
-        config = self._load_config({"DEV_AGENT": "  CODEX -m foo"})
+        config = _load_config({"DEV_AGENT": "  CODEX -m foo"})
         self.assertEqual(config.DEV_AGENT, "codex")
         self.assertEqual(config.DEV_AGENT_ARGS, ("-m", "foo"))
 
     def test_empty_spec_aborts_at_import(self) -> None:
         with self.assertRaises(SystemExit) as cm:
-            self._load_config({"DEV_AGENT": "   "})
+            _load_config({"DEV_AGENT": "   "})
         msg = str(cm.exception)
         self.assertIn("DEV_AGENT", msg)
         self.assertIn("empty", msg)
 
     def test_unknown_first_token_aborts_at_import(self) -> None:
         with self.assertRaises(SystemExit) as cm:
-            self._load_config({"DEV_AGENT": "gemini --model g-1"})
+            _load_config({"DEV_AGENT": "gemini --model g-1"})
         msg = str(cm.exception)
         self.assertIn("DEV_AGENT", msg)
         self.assertIn("gemini", msg)
@@ -244,7 +213,7 @@ class AgentSpecConfigTest(unittest.TestCase):
         # importer must surface that as a SystemExit so the orchestrator
         # never starts with an unparseable spec.
         with self.assertRaises(SystemExit) as cm:
-            self._load_config({"DEV_AGENT": "codex -c 'unterminated"})
+            _load_config({"DEV_AGENT": "codex -c 'unterminated"})
         self.assertIn("DEV_AGENT", str(cm.exception))
 
 
@@ -394,42 +363,29 @@ class DecomposeKillSwitchConfigTest(unittest.TestCase):
     doesn't silently flip the user's intent.
     """
 
-    def _load_config(self, env: dict[str, str] | None = None):
-        full_env = {
-            "ORCHESTRATOR_SKIP_DOTENV": "1",
-            "ORCHESTRATOR_TOKEN_FILE": "/tmp/agent-orchestrator-token-missing",
-        }
-        if env:
-            full_env.update(env)
-        with patch.dict(os.environ, full_env, clear=True):
-            sys.modules.pop("orchestrator.config", None)
-            import orchestrator.config as config
-
-            return config
-
     def test_default_is_on(self) -> None:
-        config = self._load_config()
+        config = _load_config()
         self.assertTrue(config.DECOMPOSE)
 
     def test_explicit_off(self) -> None:
-        config = self._load_config({"DECOMPOSE": "off"})
+        config = _load_config({"DECOMPOSE": "off"})
         self.assertFalse(config.DECOMPOSE)
 
     def test_truthy_spellings_keep_on(self) -> None:
         for value in ("on", "ON", " on ", "1", "true", "True", "yes"):
             with self.subTest(value=value):
-                config = self._load_config({"DECOMPOSE": value})
+                config = _load_config({"DECOMPOSE": value})
                 self.assertTrue(config.DECOMPOSE)
 
     def test_falsy_spellings_disable(self) -> None:
         for value in ("0", "false", "no", "off"):
             with self.subTest(value=value):
-                config = self._load_config({"DECOMPOSE": value})
+                config = _load_config({"DECOMPOSE": value})
                 self.assertFalse(config.DECOMPOSE)
 
     def test_typo_defaults_to_off(self) -> None:
         # Strict parser: any unrecognized value disables decomposition.
-        config = self._load_config({"DECOMPOSE": "enabled"})
+        config = _load_config({"DECOMPOSE": "enabled"})
         self.assertFalse(config.DECOMPOSE)
 
 
@@ -440,92 +396,53 @@ class ExposeTrackedReposConfigTest(unittest.TestCase):
     it on, explicit off / typos disable it.
     """
 
-    def _load_config(self, env: dict[str, str] | None = None):
-        full_env = {
-            "ORCHESTRATOR_SKIP_DOTENV": "1",
-            "ORCHESTRATOR_TOKEN_FILE": "/tmp/agent-orchestrator-token-missing",
-        }
-        if env:
-            full_env.update(env)
-        with patch.dict(os.environ, full_env, clear=True):
-            sys.modules.pop("orchestrator.config", None)
-            import orchestrator.config as config
-
-            return config
-
     def test_default_is_on(self) -> None:
-        config = self._load_config()
+        config = _load_config()
         self.assertTrue(config.EXPOSE_TRACKED_REPOS)
 
     def test_explicit_off(self) -> None:
-        config = self._load_config({"EXPOSE_TRACKED_REPOS": "off"})
+        config = _load_config({"EXPOSE_TRACKED_REPOS": "off"})
         self.assertFalse(config.EXPOSE_TRACKED_REPOS)
 
     def test_truthy_spellings_keep_on(self) -> None:
         for value in ("on", "ON", " on ", "1", "true", "True", "yes"):
             with self.subTest(value=value):
-                config = self._load_config({"EXPOSE_TRACKED_REPOS": value})
+                config = _load_config({"EXPOSE_TRACKED_REPOS": value})
                 self.assertTrue(config.EXPOSE_TRACKED_REPOS)
 
     def test_falsy_spellings_disable(self) -> None:
         for value in ("0", "false", "no", "off"):
             with self.subTest(value=value):
-                config = self._load_config({"EXPOSE_TRACKED_REPOS": value})
+                config = _load_config({"EXPOSE_TRACKED_REPOS": value})
                 self.assertFalse(config.EXPOSE_TRACKED_REPOS)
 
     def test_typo_defaults_to_off(self) -> None:
         # Strict parser: any unrecognized value disables the disclosure.
-        config = self._load_config({"EXPOSE_TRACKED_REPOS": "enabled"})
+        config = _load_config({"EXPOSE_TRACKED_REPOS": "enabled"})
         self.assertFalse(config.EXPOSE_TRACKED_REPOS)
 
 
 class InReviewDebounceConfigTest(unittest.TestCase):
-    def _load_config(self, env: dict[str, str] | None = None):
-        full_env = {
-            "ORCHESTRATOR_SKIP_DOTENV": "1",
-            "ORCHESTRATOR_TOKEN_FILE": "/tmp/agent-orchestrator-token-missing",
-        }
-        if env:
-            full_env.update(env)
-        with patch.dict(os.environ, full_env, clear=True):
-            sys.modules.pop("orchestrator.config", None)
-            import orchestrator.config as config
-
-            return config
-
     def test_default_is_ten_minutes(self) -> None:
-        config = self._load_config()
+        config = _load_config()
         self.assertEqual(config.IN_REVIEW_DEBOUNCE_SECONDS, 600)
 
     def test_env_override(self) -> None:
-        config = self._load_config({"IN_REVIEW_DEBOUNCE_SECONDS": "120"})
+        config = _load_config({"IN_REVIEW_DEBOUNCE_SECONDS": "120"})
         self.assertEqual(config.IN_REVIEW_DEBOUNCE_SECONDS, 120)
 
 
 class MaxRetriesPerDayConfigTest(unittest.TestCase):
-    def _load_config(self, env: dict[str, str] | None = None):
-        full_env = {
-            "ORCHESTRATOR_SKIP_DOTENV": "1",
-            "ORCHESTRATOR_TOKEN_FILE": "/tmp/agent-orchestrator-token-missing",
-        }
-        if env:
-            full_env.update(env)
-        with patch.dict(os.environ, full_env, clear=True):
-            sys.modules.pop("orchestrator.config", None)
-            import orchestrator.config as config
-
-            return config
-
     def test_default_is_three(self) -> None:
-        config = self._load_config()
+        config = _load_config()
         self.assertEqual(config.MAX_RETRIES_PER_DAY, 3)
 
     def test_env_override(self) -> None:
-        config = self._load_config({"MAX_RETRIES_PER_DAY": "7"})
+        config = _load_config({"MAX_RETRIES_PER_DAY": "7"})
         self.assertEqual(config.MAX_RETRIES_PER_DAY, 7)
 
     def test_zero_means_unbounded(self) -> None:
-        config = self._load_config({"MAX_RETRIES_PER_DAY": "0"})
+        config = _load_config({"MAX_RETRIES_PER_DAY": "0"})
         self.assertEqual(config.MAX_RETRIES_PER_DAY, 0)
 
 
@@ -534,29 +451,16 @@ class AllowedIssueAuthorsConfigTest(unittest.TestCase):
     the filter so existing single-user setups keep working; a populated list
     guards against random users on public repos triggering agent runs."""
 
-    def _load_config(self, env: dict[str, str] | None = None):
-        full_env = {
-            "ORCHESTRATOR_SKIP_DOTENV": "1",
-            "ORCHESTRATOR_TOKEN_FILE": "/tmp/agent-orchestrator-token-missing",
-        }
-        if env:
-            full_env.update(env)
-        with patch.dict(os.environ, full_env, clear=True):
-            sys.modules.pop("orchestrator.config", None)
-            import orchestrator.config as config
-
-            return config
-
     def test_default_is_empty_tuple(self) -> None:
-        config = self._load_config()
+        config = _load_config()
         self.assertEqual(config.ALLOWED_ISSUE_AUTHORS, ())
 
     def test_parses_comma_separated(self) -> None:
-        config = self._load_config({"ALLOWED_ISSUE_AUTHORS": "alice,bob"})
+        config = _load_config({"ALLOWED_ISSUE_AUTHORS": "alice,bob"})
         self.assertEqual(config.ALLOWED_ISSUE_AUTHORS, ("alice", "bob"))
 
     def test_strips_spaces_at_signs_and_duplicates(self) -> None:
-        config = self._load_config(
+        config = _load_config(
             {"ALLOWED_ISSUE_AUTHORS": " @alice, bob, ,alice,@carol "}
         )
         self.assertEqual(
@@ -569,25 +473,12 @@ class MaxConflictRoundsConfigTest(unittest.TestCase):
     integer, defaults to 3, env override wins.
     """
 
-    def _load_config(self, env: dict[str, str] | None = None):
-        full_env = {
-            "ORCHESTRATOR_SKIP_DOTENV": "1",
-            "ORCHESTRATOR_TOKEN_FILE": "/tmp/agent-orchestrator-token-missing",
-        }
-        if env:
-            full_env.update(env)
-        with patch.dict(os.environ, full_env, clear=True):
-            sys.modules.pop("orchestrator.config", None)
-            import orchestrator.config as config
-
-            return config
-
     def test_default_is_three(self) -> None:
-        config = self._load_config()
+        config = _load_config()
         self.assertEqual(config.MAX_CONFLICT_ROUNDS, 3)
 
     def test_env_override(self) -> None:
-        config = self._load_config({"MAX_CONFLICT_ROUNDS": "7"})
+        config = _load_config({"MAX_CONFLICT_ROUNDS": "7"})
         self.assertEqual(config.MAX_CONFLICT_ROUNDS, 7)
 
 
@@ -595,21 +486,8 @@ class MultiRepoConfigTest(unittest.TestCase):
     """`REPOS` parses N entries; when unset the legacy single-repo trio
     (`REPO` / `TARGET_REPO_ROOT` / `BASE_BRANCH`) keeps working."""
 
-    def _load_config(self, env: dict[str, str] | None = None):
-        full_env = {
-            "ORCHESTRATOR_SKIP_DOTENV": "1",
-            "ORCHESTRATOR_TOKEN_FILE": "/tmp/agent-orchestrator-token-missing",
-        }
-        if env:
-            full_env.update(env)
-        with patch.dict(os.environ, full_env, clear=True):
-            sys.modules.pop("orchestrator.config", None)
-            import orchestrator.config as config
-
-            return config
-
     def test_legacy_single_repo_fallback(self) -> None:
-        config = self._load_config({
+        config = _load_config({
             "REPO": "owner/legacy",
             "TARGET_REPO_ROOT": "/tmp",
             "BASE_BRANCH": "trunk",
@@ -627,7 +505,7 @@ class MultiRepoConfigTest(unittest.TestCase):
     def test_remote_name_env_override_for_single_repo(self) -> None:
         # Multi-remote local clones (e.g. public `origin` + private fork
         # `private`) need to drive the non-default remote.
-        config = self._load_config({
+        config = _load_config({
             "REPO": "owner/legacy",
             "TARGET_REPO_ROOT": "/tmp",
             "BASE_BRANCH": "main",
@@ -642,7 +520,7 @@ class MultiRepoConfigTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             other = Path(td) / "other"
             other.mkdir()
-            config = self._load_config({
+            config = _load_config({
                 "REPOS": (
                     "# multi-repo example\n"
                     f"alpha/one|{td}|main\n"
@@ -669,7 +547,7 @@ class MultiRepoConfigTest(unittest.TestCase):
         # Multi-remote target clones (e.g. public `origin` + private fork
         # `private`) need to drive the non-default remote.
         with tempfile.TemporaryDirectory() as td:
-            config = self._load_config({
+            config = _load_config({
                 "REPOS": (
                     f"alpha/one|{td}|main|origin\n"
                     f"beta/two|{td}|main|private"
@@ -686,7 +564,7 @@ class MultiRepoConfigTest(unittest.TestCase):
         # trailing '|' to get the default. Surface the mistake at startup.
         with tempfile.TemporaryDirectory() as td:
             with self.assertRaises(SystemExit) as cm:
-                self._load_config({"REPOS": f"alpha/one|{td}|main|"})
+                _load_config({"REPOS": f"alpha/one|{td}|main|"})
             self.assertIn("remote_name", str(cm.exception))
 
     def test_too_many_pipe_segments_aborts_at_import(self) -> None:
@@ -695,14 +573,14 @@ class MultiRepoConfigTest(unittest.TestCase):
         # `owner/repo|/path|main|origin|3|extra` from being misinterpreted.
         with tempfile.TemporaryDirectory() as td:
             with self.assertRaises(SystemExit) as cm:
-                self._load_config(
+                _load_config(
                     {"REPOS": f"alpha/one|{td}|main|origin|3|extra"}
                 )
             self.assertIn("malformed", str(cm.exception))
 
     def test_repos_overrides_legacy_trio(self) -> None:
         with tempfile.TemporaryDirectory() as td:
-            config = self._load_config({
+            config = _load_config({
                 "REPO": "ignored/legacy",
                 "TARGET_REPO_ROOT": "/nonexistent",
                 "BASE_BRANCH": "ignored",
@@ -718,7 +596,7 @@ class MultiRepoConfigTest(unittest.TestCase):
     def test_duplicate_slug_aborts_at_import(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             with self.assertRaises(SystemExit) as cm:
-                self._load_config({
+                _load_config({
                     "REPOS": (
                         f"alpha/one|{td}|main\n"
                         f"alpha/one|{td}|develop"
@@ -731,7 +609,7 @@ class MultiRepoConfigTest(unittest.TestCase):
     def test_duplicate_slug_error_precedes_option_errors(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             with self.assertRaises(SystemExit) as cm:
-                self._load_config({
+                _load_config({
                     "REPOS": (
                         f"alpha/one|{td}|main\n"
                         f"alpha/one|{td}|develop|origin|invalid"
@@ -742,13 +620,13 @@ class MultiRepoConfigTest(unittest.TestCase):
     def test_malformed_entry_aborts_at_import(self) -> None:
         # Wrong number of '|' segments.
         with self.assertRaises(SystemExit) as cm:
-            self._load_config({"REPOS": "owner/repo|/tmp"})
+            _load_config({"REPOS": "owner/repo|/tmp"})
         self.assertIn("malformed", str(cm.exception))
 
     def test_empty_slug_aborts_at_import(self) -> None:
         # Slug must contain '/'.
         with self.assertRaises(SystemExit) as cm:
-            self._load_config({"REPOS": "no-slash|/tmp|main"})
+            _load_config({"REPOS": "no-slash|/tmp|main"})
         self.assertIn("owner/name", str(cm.exception))
 
     def test_empty_slug_component_aborts_import(self) -> None:
@@ -757,7 +635,7 @@ class MultiRepoConfigTest(unittest.TestCase):
         for bad_slug in ("owner//repo", "/repo", "owner/", "//"):
             with self.subTest(slug=bad_slug):
                 with self.assertRaises(SystemExit) as cm:
-                    self._load_config({"REPOS": f"{bad_slug}|/tmp|main"})
+                    _load_config({"REPOS": f"{bad_slug}|/tmp|main"})
                 self.assertIn("owner/name", str(cm.exception))
 
     def test_extra_slug_segment_aborts_import(self) -> None:
@@ -765,17 +643,17 @@ class MultiRepoConfigTest(unittest.TestCase):
         # as the full repo identifier, so any extra `/` would resolve to
         # a wrong (or nonexistent) repo at runtime. Reject at import.
         with self.assertRaises(SystemExit) as cm:
-            self._load_config({"REPOS": "owner/repo/extra|/tmp|main"})
+            _load_config({"REPOS": "owner/repo/extra|/tmp|main"})
         self.assertIn("owner/name", str(cm.exception))
 
     def test_empty_base_branch_aborts_at_import(self) -> None:
         with self.assertRaises(SystemExit) as cm:
-            self._load_config({"REPOS": "owner/repo|/tmp|"})
+            _load_config({"REPOS": "owner/repo|/tmp|"})
         self.assertIn("base_branch", str(cm.exception))
 
     def test_empty_target_root_aborts_at_import(self) -> None:
         with self.assertRaises(SystemExit) as cm:
-            self._load_config({"REPOS": "owner/repo||main"})
+            _load_config({"REPOS": "owner/repo||main"})
         self.assertIn("target_root", str(cm.exception))
 
     def test_repos_with_only_comments_aborts(self) -> None:
@@ -783,7 +661,7 @@ class MultiRepoConfigTest(unittest.TestCase):
         # better to fail loudly than silently fall back to the legacy trio
         # (which the user explicitly opted out of by setting REPOS).
         with self.assertRaises(SystemExit) as cm:
-            self._load_config({"REPOS": "# just a comment\n  \n"})
+            _load_config({"REPOS": "# just a comment\n  \n"})
         self.assertIn("no valid entries", str(cm.exception))
 
     def test_missing_target_warns_but_loads(self) -> None:
@@ -795,7 +673,7 @@ class MultiRepoConfigTest(unittest.TestCase):
         captured_stderr = io.StringIO()
         captured_stdout = io.StringIO()
         with redirect_stdout(captured_stdout), redirect_stderr(captured_stderr):
-            config = self._load_config(
+            config = _load_config(
                 {"REPOS": "alpha/one|/this/path/does/not/exist|main"}
             )
         specs = config.default_repo_specs()
@@ -812,26 +690,13 @@ class ParallelLimitsConfigTest(unittest.TestCase):
     can override its per-repo limit via the optional fifth pipe field.
     """
 
-    def _load_config(self, env: dict[str, str] | None = None):
-        full_env = {
-            "ORCHESTRATOR_SKIP_DOTENV": "1",
-            "ORCHESTRATOR_TOKEN_FILE": "/tmp/agent-orchestrator-token-missing",
-        }
-        if env:
-            full_env.update(env)
-        with patch.dict(os.environ, full_env, clear=True):
-            sys.modules.pop("orchestrator.config", None)
-            import orchestrator.config as config
-
-            return config
-
     def test_defaults_one_per_repo_three_global(self) -> None:
-        config = self._load_config()
+        config = _load_config()
         self.assertEqual(config.MAX_PARALLEL_ISSUES_PER_REPO, 1)
         self.assertEqual(config.MAX_PARALLEL_ISSUES_GLOBAL, 3)
 
     def test_env_overrides_take_effect(self) -> None:
-        config = self._load_config({
+        config = _load_config({
             "MAX_PARALLEL_ISSUES_PER_REPO": "2",
             "MAX_PARALLEL_ISSUES_GLOBAL": "10",
         })
@@ -841,13 +706,13 @@ class ParallelLimitsConfigTest(unittest.TestCase):
     def test_legacy_repo_gets_default_limit(self) -> None:
         # When REPOS is unset, the legacy single-repo RepoSpec must adopt
         # whatever MAX_PARALLEL_ISSUES_PER_REPO is set to (default 1).
-        config = self._load_config()
+        config = _load_config()
         specs = config.default_repo_specs()
         self.assertEqual(len(specs), 1)
         self.assertEqual(specs[0].parallel_limit, 1)
 
     def test_legacy_single_repo_picks_up_env_override(self) -> None:
-        config = self._load_config({"MAX_PARALLEL_ISSUES_PER_REPO": "4"})
+        config = _load_config({"MAX_PARALLEL_ISSUES_PER_REPO": "4"})
         specs = config.default_repo_specs()
         self.assertEqual(specs[0].parallel_limit, 4)
 
@@ -855,7 +720,7 @@ class ParallelLimitsConfigTest(unittest.TestCase):
         # Backward-compat: existing three-field REPOS configs inherit the
         # MAX_PARALLEL_ISSUES_PER_REPO env default (or 1 if unset).
         with tempfile.TemporaryDirectory() as td:
-            config = self._load_config({
+            config = _load_config({
                 "MAX_PARALLEL_ISSUES_PER_REPO": "2",
                 "REPOS": f"alpha/one|{td}|main",
             })
@@ -866,7 +731,7 @@ class ParallelLimitsConfigTest(unittest.TestCase):
         # The existing four-field (with remote_name) shape stays backward-
         # compatible: parallel_limit falls back to the env default.
         with tempfile.TemporaryDirectory() as td:
-            config = self._load_config({
+            config = _load_config({
                 "MAX_PARALLEL_ISSUES_PER_REPO": "5",
                 "REPOS": f"alpha/one|{td}|main|private",
             })
@@ -878,7 +743,7 @@ class ParallelLimitsConfigTest(unittest.TestCase):
         # Per-entry override takes precedence over the global env default,
         # so a busy repo can run more issues in parallel than its peers.
         with tempfile.TemporaryDirectory() as td:
-            config = self._load_config({
+            config = _load_config({
                 "MAX_PARALLEL_ISSUES_PER_REPO": "1",
                 "REPOS": (
                     f"alpha/one|{td}|main|origin|3\n"
@@ -895,7 +760,7 @@ class ParallelLimitsConfigTest(unittest.TestCase):
         # All three legacy field counts coexist; only the five-field entry
         # overrides the per-repo default.
         with tempfile.TemporaryDirectory() as td:
-            config = self._load_config({
+            config = _load_config({
                 "MAX_PARALLEL_ISSUES_PER_REPO": "2",
                 "REPOS": (
                     f"alpha/one|{td}|main\n"
@@ -915,36 +780,36 @@ class ParallelLimitsConfigTest(unittest.TestCase):
 
     def test_non_numeric_repo_limit_aborts_import(self) -> None:
         with self.assertRaises(SystemExit) as cm:
-            self._load_config({"MAX_PARALLEL_ISSUES_PER_REPO": "lots"})
+            _load_config({"MAX_PARALLEL_ISSUES_PER_REPO": "lots"})
         msg = str(cm.exception)
         self.assertIn("MAX_PARALLEL_ISSUES_PER_REPO", msg)
         self.assertIn("lots", msg)
 
     def test_zero_per_repo_env_aborts_at_import(self) -> None:
         with self.assertRaises(SystemExit) as cm:
-            self._load_config({"MAX_PARALLEL_ISSUES_PER_REPO": "0"})
+            _load_config({"MAX_PARALLEL_ISSUES_PER_REPO": "0"})
         self.assertIn("MAX_PARALLEL_ISSUES_PER_REPO", str(cm.exception))
 
     def test_negative_per_repo_env_aborts_at_import(self) -> None:
         with self.assertRaises(SystemExit) as cm:
-            self._load_config({"MAX_PARALLEL_ISSUES_PER_REPO": "-1"})
+            _load_config({"MAX_PARALLEL_ISSUES_PER_REPO": "-1"})
         self.assertIn("MAX_PARALLEL_ISSUES_PER_REPO", str(cm.exception))
 
     def test_non_numeric_global_env_aborts_at_import(self) -> None:
         with self.assertRaises(SystemExit) as cm:
-            self._load_config({"MAX_PARALLEL_ISSUES_GLOBAL": "many"})
+            _load_config({"MAX_PARALLEL_ISSUES_GLOBAL": "many"})
         msg = str(cm.exception)
         self.assertIn("MAX_PARALLEL_ISSUES_GLOBAL", msg)
 
     def test_zero_global_env_aborts_at_import(self) -> None:
         with self.assertRaises(SystemExit) as cm:
-            self._load_config({"MAX_PARALLEL_ISSUES_GLOBAL": "0"})
+            _load_config({"MAX_PARALLEL_ISSUES_GLOBAL": "0"})
         self.assertIn("MAX_PARALLEL_ISSUES_GLOBAL", str(cm.exception))
 
     def test_malformed_parallel_limit_in_repos_aborts(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             with self.assertRaises(SystemExit) as cm:
-                self._load_config({
+                _load_config({
                     "REPOS": f"alpha/one|{td}|main|origin|seven",
                 })
             msg = str(cm.exception)
@@ -954,7 +819,7 @@ class ParallelLimitsConfigTest(unittest.TestCase):
     def test_zero_parallel_limit_in_repos_aborts(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             with self.assertRaises(SystemExit) as cm:
-                self._load_config({
+                _load_config({
                     "REPOS": f"alpha/one|{td}|main|origin|0",
                 })
             self.assertIn("parallel_limit", str(cm.exception))
@@ -963,7 +828,7 @@ class ParallelLimitsConfigTest(unittest.TestCase):
     def test_negative_parallel_limit_in_repos_aborts(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             with self.assertRaises(SystemExit) as cm:
-                self._load_config({
+                _load_config({
                     "REPOS": f"alpha/one|{td}|main|origin|-2",
                 })
             self.assertIn("parallel_limit", str(cm.exception))
@@ -973,7 +838,7 @@ class ParallelLimitsConfigTest(unittest.TestCase):
         # trailing '|' to get the default. Surface the mistake at startup.
         with tempfile.TemporaryDirectory() as td:
             with self.assertRaises(SystemExit) as cm:
-                self._load_config({"REPOS": f"alpha/one|{td}|main|origin|"})
+                _load_config({"REPOS": f"alpha/one|{td}|main|origin|"})
             self.assertIn("parallel_limit", str(cm.exception))
 
 
