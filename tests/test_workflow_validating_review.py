@@ -260,8 +260,8 @@ class HandleValidatingFreshReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
 
 
 class HandleValidatingFixLoopEdgeCasesTest(unittest.TestCase, _PatchedWorkflowMixin):
-    def _seeded(self, **state):
-        gh = FakeGitHubClient()
+    def _seeded(self, *, stale_label_cache=False, **state):
+        gh = FakeGitHubClient(stale_label_cache=stale_label_cache)
         issue = make_issue(6, label=LABEL_VALIDATING)
         gh.add_issue(issue)
         defaults = dict(
@@ -407,7 +407,12 @@ class HandleValidatingFixLoopEdgeCasesTest(unittest.TestCase, _PatchedWorkflowMi
         # labeled only `validating`; the `fixing` entry must therefore
         # appear in the label history strictly before any later flip
         # back to `validating`.
-        gh, issue = self._seeded()
+        #
+        # `stale_label_cache` reproduces PyGithub: `set_labels(FIXING)`
+        # writes the remote but leaves the cached `issue.labels` at
+        # `validating`, so the dev-run stage cannot be read back off the
+        # issue -- the reviewer-requested fix path must pass it explicitly.
+        gh, issue = self._seeded(stale_label_cache=True)
         self._run(
             lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
             run_agent=[
@@ -426,16 +431,18 @@ class HandleValidatingFixLoopEdgeCasesTest(unittest.TestCase, _PatchedWorkflowMi
         fixing_idx = gh.label_history.index((6, LABEL_FIXING))
         validating_idx = gh.label_history.index((6, LABEL_VALIDATING))
         self.assertLess(fixing_idx, validating_idx)
-        # The dev work is tagged with `stage="fixing"` for analytics so
-        # spend on a CHANGES_REQUESTED fix is not double-counted against
-        # the validating bucket alongside the reviewer/verify spend.
-        dev_spawns = [
-            e for e in gh.recorded_events
+        # Reviewer work stays attributed to `validating`; the CHANGES_REQUESTED
+        # developer fix is attributed to `fixing` even though the resume runs
+        # on the same `Issue` object whose cached labels still read
+        # `validating`. Attributing the fix to `validating` would double-count
+        # its spend against the reviewer/verify bucket.
+        spawns_by_role = {
+            e["agent_role"]: e
+            for e in gh.recorded_events
             if e["event"] == EVENT_AGENT_SPAWN
-            and e.get("agent_role") == ROLE_DEVELOPER
-        ]
-        self.assertEqual(len(dev_spawns), 1)
-        self.assertEqual(dev_spawns[0]["stage"], LABEL_FIXING)
+        }
+        self.assertEqual(spawns_by_role[ROLE_REVIEWER]["stage"], LABEL_VALIDATING)
+        self.assertEqual(spawns_by_role[ROLE_DEVELOPER]["stage"], LABEL_FIXING)
 
     def test_interrupted_fix_skips_write_and_push(self) -> None:
         # A shutdown-killed CHANGES_REQUESTED dev resume is ignored: the

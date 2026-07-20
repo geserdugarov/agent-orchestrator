@@ -175,8 +175,15 @@ class FakeGitHubClient:
         issues: Iterable[FakeIssue] = (),
         *,
         repo_slug: str = "geserdugarov/agent-orchestrator",
+        stale_label_cache: bool = False,
     ) -> None:
         self._repo_slug = repo_slug
+        # When True, `set_workflow_label` writes GitHub-side state (history +
+        # events) but leaves the passed `issue.labels` untouched, reproducing
+        # PyGithub's real behavior: `Issue.set_labels()` updates the remote
+        # but does not refresh the cached object. Tests use this to catch code
+        # that reads a stage back off an `Issue` it just relabeled.
+        self._stale_label_cache = stale_label_cache
         # Mirrors GitHubClient.recorded_events: every `set_workflow_label`
         # call with a non-None label appends a `stage_enter` event here so
         # workflow tests can assert on the sequence without scraping the
@@ -305,7 +312,8 @@ class FakeGitHubClient:
         keep = [l for l in issue.labels if l.name not in WORKFLOW_LABELS]
         if new_label:
             keep.append(FakeLabel(new_label))
-        issue.labels = keep
+        if not self._stale_label_cache:
+            issue.labels = keep
         self.label_history.append((issue.number, new_label))
         if new_label:
             self.emit_event(
