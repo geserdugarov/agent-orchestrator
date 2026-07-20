@@ -43,7 +43,7 @@ Do not mark a stage complete until its completion gate is satisfied.
 | 2 | Extreme production complexity hotspots | 8/8 | [x] |
 | 3 | Remaining production complexity | 5/6 | [ ] |
 | 4 | Remaining production style and structure | 5/5 | [x] |
-| 5 | Test structure and complexity | 2/7 | [ ] |
+| 5 | Test structure and complexity | 3/7 | [ ] |
 | 6 | Test literals and naming | 1/7 | [ ] |
 | 7 | Long-tail cleanup and final verification | 0/5 | [ ] |
 
@@ -337,7 +337,7 @@ For every package:
 
 ### Package 5.3 — Scheduler, base-sync, git, and worktree tests
 
-- [ ] Refactor scheduler-routing, base-sync, branch-publication, cleanup, serialization, and real-git test modules.
+- [x] Refactor scheduler-routing, base-sync, branch-publication, cleanup, serialization, and real-git test modules.
 
 ### Package 5.4 — Decomposition, question, and documenting tests
 
@@ -933,6 +933,63 @@ considered.
   and the trajectory tests.
 - Reviewed: [x]
 
+### Scheduler and base-sync scenario density
+
+- File and symbols: scenario tests in `tests/test_scheduler.py`, `tests/test_workflow_scheduler_routing.py`,
+  `tests/test_workflow_base_sync_unit.py`, `tests/test_workflow_base_sync_real_git.py`, and
+  `tests/test_workflow_worktree_serialization.py`.
+- Rule: `WPS204`, `WPS210`, and `WPS213`.
+- Reason: Shared schedulers, event gates, patch bundles, git results, state recorders, and worktree fixtures were
+  extracted. The remaining expressions and locals describe distinct ordered calls, state transitions, concurrency
+  signals, or per-field outcomes. Further extraction either hides the scenario sequence behind a generic assertion
+  helper or merely trades repeated expressions for additional locals.
+- Protected by: the 167 focused Package 5.3 tests.
+- Reviewed: [x]
+
+### Scheduler and worktree cleanup barriers
+
+- File and symbols: `tests/test_workflow_scheduler_routing.py: _SequentialIssueProcessor.__call__` and
+  `tests/test_workflow_worktree_serialization.py: _ConcurrencyProbe.record`.
+- Rule: `WPS501`.
+- Reason: Each `finally` decrements an in-flight counter even when a gated worker times out or raises. Moving the same
+  counter release into another context manager would relocate, rather than simplify, the cleanup guarantee.
+- Protected by: scheduler family-bucket serialization and target-root plumbing concurrency tests.
+- Reviewed: [x]
+
+### Future callback registration race hook
+
+- File and symbol: `tests/test_scheduler.py: ShutdownDrainRaceTest.test_shutdown_waits_for_callback_registration`
+  (`gated_add`).
+- Rule: `WPS430`.
+- Reason: The callback must close over the original bound `Future.add_done_callback` method and two event gates while
+  the test patches the descriptor. A module callable would need to expose that one-test timing bundle as mutable
+  state and would obscure the exact registration race being exercised.
+- Protected by: `ShutdownDrainRaceTest.test_shutdown_waits_for_callback_registration`.
+- Reviewed: [x]
+
+### Cohesive infrastructure-test shapes
+
+- File and symbols: the Package 5.3 modules carrying `WPS202`, the workflow-helper imports in
+  `tests/test_workflow_scheduler_routing.py`, and `_RefreshBaseRealGitFixture` in
+  `tests/test_workflow_base_sync_real_git.py`.
+- Rule: `WPS202`, `WPS230`, and `WPS235`.
+- Reason: The modules are already divided by infrastructure contract and their formerly oversized classes were split
+  into behavior groups. Splitting files at the seven-member threshold would duplicate setup across artificial module
+  boundaries. The real-git fixture's seven public paths are named filesystem seams used by its tests, and the helper
+  imports keep the workflow labels explicit at use sites.
+- Protected by: the 167 focused Package 5.3 tests.
+- Reviewed: [x]
+
+### Unittest log-capture variables
+
+- File and symbols: `assertLogs` captures in `tests/test_scheduler.py`,
+  `tests/test_workflow_scheduler_routing.py`, and `tests/test_workflow_branch_publication.py`.
+- Rule: `WPS441`.
+- Reason: `unittest` populates each capture's `output` only when the context exits. Reading the capture afterward is
+  the standard assertion boundary; wrapping it in a helper would hide the log level and operation under test.
+- Protected by: scheduler failure/skip logging and unsafe-transport refusal tests.
+- Reviewed: [x]
+
 ## Session log
 
 Add one row for every implementation session, including partial sessions.
@@ -1002,6 +1059,29 @@ Add one row for every implementation session, including partial sessions.
 | 2026-07-20 | 5.1+6.1 r2 | Partial | Restored read asserts; gate 2150p/3s | Not committed | Heavy-module residual |
 | 2026-07-20 | 5.1+6.1 | Complete | WPS 470->446; WPS118->0; gate 2150p/3s | Not committed | Stage 5/6 1/7 |
 | 2026-07-20 | 5.2 | Complete | WPS430 55->19, WPS338 16->1; gate 2116p/36s | Not committed | Start Package 5.3 |
+| 2026-07-20 | 5.3 | Complete | WPS 681->363; 167 focused; gate 2150p/3s | Not committed | Start Package 5.2 |
+
+Package 5.3 is **complete**. The pass covered scheduler execution and routing, base-sync unit and real-git
+scenarios, branch publication, cleanup, worktree path resolution, and worktree serialization. Repeated event-gate
+cleanup moved into `_release_on_exit`; shared issue processors and concurrency probes replaced one-test nested
+callbacks; scheduler-routing setup moved into a common fixture; base-sync scenarios were divided into behavior-focused
+classes; and git results, token resolution, local fetches, cleanup clients, path/state builders, and branch push
+recorders moved into small reusable helpers. Every test scenario and its distinct observable assertions remain in
+place.
+
+The scoped `--select=WPS` count over the eight modules fell from 681 to 363, removing 318 findings. In particular,
+`WPS430` fell from 60 to 1, `WPS501` from 51 to 2, and `WPS229` from 27 to 0; the method-order, local-import,
+mutable-constant, and nested-callback families targeted by the package were cleared or reduced to the reviewed
+remainders above. The 116 retained structural findings are `WPS202` (6), `WPS204` (33), `WPS210` (24), `WPS213`
+(31), `WPS230` (1), `WPS235` (1), `WPS430` (1), `WPS441` (17), and `WPS501` (2). The other 247 findings are naming,
+repeated-string, numeric-literal, and long-tail format findings assigned to Package 6.3 or Stage 7: `WPS110` (8),
+`WPS111` (33), `WPS114` (3), `WPS115` (1), `WPS117` (4), `WPS226` (43), `WPS237` (1), `WPS358` (1), and
+`WPS432` (153).
+
+All 167 focused tests and Ruff pass. The complete tracked suite passes with 2,150 tests and 3 live-Postgres skips,
+and both committed-range and working-tree diff checks are clean. A bare repository-root pytest collection also sees
+the ignored, externally owned `analytics-db/data` volume and receives `PermissionError`; running pytest against the
+tracked `tests/` tree exercises every tracked test file and is the recorded full gate for this session.
 
 Package 3.1 retained 18 reviewed API findings and passed 2,099 tests, 3 skips, and 627 subtests.
 

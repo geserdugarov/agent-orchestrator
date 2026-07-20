@@ -4,20 +4,42 @@
 
 Each test gates the workers with ``threading.Event`` so the in-flight
 state under load is observable without depending on wall-clock timing.
-Workers always release their gate inside a ``try/finally`` so a failing
-assertion later in the test cannot leave threads pinned and stall the
-suite under shutdown.
+Worker gates are held through ``_release_on_exit``, whose cleanup releases
+them even when an assertion fails so shutdown cannot stall the suite.
 """
 from __future__ import annotations
 
+import contextlib
 import logging
 import threading
 import time
 import unittest
 from concurrent.futures import Future
+from functools import partial
 from unittest.mock import patch
 
 from orchestrator.scheduler import IssueScheduler
+
+
+@contextlib.contextmanager
+def _release_on_exit(*events: threading.Event):
+    try:
+        yield
+    finally:
+        for event in events:
+            event.set()
+
+
+def _wait_until_inactive(
+    scheduler: IssueScheduler,
+    repo_slug: str,
+    issue_number: int,
+    *,
+    timeout: float = 2.0,
+) -> None:
+    deadline = time.monotonic() + timeout
+    while scheduler.is_active(repo_slug, issue_number) and time.monotonic() < deadline:
+        time.sleep(0.01)
 
 
 def _worker(start: threading.Event, release: threading.Event) -> None:
@@ -27,13 +49,76 @@ def _worker(start: threading.Event, release: threading.Event) -> None:
     release.wait(timeout=5.0)
 
 
+def _finishing_worker(
+    start: threading.Event,
+    release: threading.Event,
+    finished: threading.Event,
+) -> None:
+    _worker(start, release)
+    finished.set()
+
+
+def _failing_worker(message: str = "worker exploded") -> None:
+    raise RuntimeError(message)
+
+
+def _signaling_failure(done: threading.Event, message: str) -> None:
+    done.set()
+    raise RuntimeError(message)
+
+
+def _gated_failure(
+    start: threading.Event,
+    release: threading.Event,
+    message: str,
+) -> None:
+    _worker(start, release)
+    raise RuntimeError(message)
+
+
+def _submit_then_signal(
+    scheduler: IssueScheduler,
+    worker,
+    done: threading.Event,
+) -> None:
+    scheduler.submit("owner/repo", 1, worker)
+    done.set()
+
+
+def _shutdown_then_signal(
+    scheduler: IssueScheduler,
+    done: threading.Event,
+) -> None:
+    scheduler.shutdown(wait=True)
+    done.set()
+
+
+def _release_after(delay: float, release: threading.Event) -> None:
+    time.sleep(delay)
+    release.set()
+
+
+def _tracked_worker(
+    scheduler: IssueScheduler,
+    repo_slug: str,
+    issue_number: int,
+    signals: tuple[threading.Event, threading.Event, threading.Event],
+) -> None:
+    start, release, claimed_event = signals
+    with scheduler.track_active(repo_slug, issue_number) as claimed:
+        if claimed:
+            claimed_event.set()
+        start.set()
+        release.wait(timeout=5.0)
+
+
 class DuplicateActiveIssueSkipTest(unittest.TestCase):
     def test_same_key_skipped_while_first_in_flight(self) -> None:
         sched = IssueScheduler(global_cap=4, per_repo_cap=4)
         self.addCleanup(sched.shutdown)
         start = threading.Event()
         release = threading.Event()
-        try:
+        with _release_on_exit(release):
             self.assertTrue(
                 sched.submit("owner/repo", 1, lambda: _worker(start, release))
             )
@@ -56,8 +141,6 @@ class DuplicateActiveIssueSkipTest(unittest.TestCase):
             )
             self.assertTrue(start_b.wait(timeout=2.0))
             self.assertEqual(sched.active_count(), 2)
-        finally:
-            release.set()
 
 
 class CompletionClearingTest(unittest.TestCase):
@@ -66,24 +149,13 @@ class CompletionClearingTest(unittest.TestCase):
         self.addCleanup(sched.shutdown)
         done = threading.Event()
 
-        def _first() -> None:
-            done.set()
-
-        self.assertTrue(sched.submit("owner/repo", 7, _first))
+        self.assertTrue(sched.submit("owner/repo", 7, done.set))
         self.assertTrue(done.wait(timeout=2.0))
 
         # Wait for the done-callback to clear the marker. The callback
         # runs on a background thread, so poll briefly to avoid a race
         # between worker exit and marker clear.
-        deadline = threading.Event()
-        timer = threading.Timer(2.0, deadline.set)
-        timer.daemon = True
-        timer.start()
-        try:
-            while sched.is_active("owner/repo", 7) and not deadline.is_set():
-                pass
-        finally:
-            timer.cancel()
+        _wait_until_inactive(sched, "owner/repo", 7)
         self.assertFalse(sched.is_active("owner/repo", 7))
         self.assertEqual(sched.active_count(), 0)
         self.assertEqual(sched.active_count("owner/repo"), 0)
@@ -91,38 +163,26 @@ class CompletionClearingTest(unittest.TestCase):
         # Now a fresh submit for the same key succeeds.
         start = threading.Event()
         release = threading.Event()
-        try:
+        with _release_on_exit(release):
             self.assertTrue(
                 sched.submit("owner/repo", 7, lambda: _worker(start, release))
             )
             self.assertTrue(start.wait(timeout=2.0))
-        finally:
-            release.set()
 
     def test_completion_logs_worker_failure_via_reap(self) -> None:
         sched = IssueScheduler(global_cap=2, per_repo_cap=2)
         self.addCleanup(sched.shutdown)
         done = threading.Event()
 
-        def _boom() -> None:
-            try:
-                raise RuntimeError("worker exploded")
-            finally:
-                done.set()
-
-        self.assertTrue(sched.submit("owner/repo", 9, _boom))
+        self.assertTrue(sched.submit(
+            "owner/repo",
+            9,
+            partial(_signaling_failure, done, "worker exploded"),
+        ))
         self.assertTrue(done.wait(timeout=2.0))
         # The marker must clear regardless of the exception: a failed
         # worker still hands its slot back.
-        deadline = threading.Event()
-        timer = threading.Timer(2.0, deadline.set)
-        timer.daemon = True
-        timer.start()
-        try:
-            while sched.is_active("owner/repo", 9) and not deadline.is_set():
-                pass
-        finally:
-            timer.cancel()
+        _wait_until_inactive(sched, "owner/repo", 9)
         self.assertFalse(sched.is_active("owner/repo", 9))
 
         with self.assertLogs("orchestrator.scheduler", level=logging.ERROR) as logs:
@@ -140,15 +200,15 @@ class GlobalCapEnforcementTest(unittest.TestCase):
         self.addCleanup(sched.shutdown)
         starts = [threading.Event() for _ in range(2)]
         release = threading.Event()
-        try:
+        with _release_on_exit(release):
             self.assertTrue(
                 sched.submit(
-                    "owner/a", 1, lambda start=starts[0]: _worker(start, release)
+                    "owner/a", 1, partial(_worker, starts[0], release)
                 )
             )
             self.assertTrue(
                 sched.submit(
-                    "owner/b", 2, lambda start=starts[1]: _worker(start, release)
+                    "owner/b", 2, partial(_worker, starts[1], release)
                 )
             )
             for start in starts:
@@ -166,8 +226,6 @@ class GlobalCapEnforcementTest(unittest.TestCase):
                 sched.submit("owner/a", 99, lambda: self.fail("must not run"))
             )
             self.assertEqual(sched.active_count(), 2)
-        finally:
-            release.set()
 
 
 class PerRepoCapEnforcementTest(unittest.TestCase):
@@ -176,15 +234,15 @@ class PerRepoCapEnforcementTest(unittest.TestCase):
         self.addCleanup(sched.shutdown)
         starts = [threading.Event() for _ in range(2)]
         release = threading.Event()
-        try:
+        with _release_on_exit(release):
             self.assertTrue(
                 sched.submit(
-                    "owner/repo", 1, lambda start=starts[0]: _worker(start, release)
+                    "owner/repo", 1, partial(_worker, starts[0], release)
                 )
             )
             self.assertTrue(
                 sched.submit(
-                    "owner/repo", 2, lambda start=starts[1]: _worker(start, release)
+                    "owner/repo", 2, partial(_worker, starts[1], release)
                 )
             )
             for start in starts:
@@ -208,8 +266,6 @@ class PerRepoCapEnforcementTest(unittest.TestCase):
             self.assertTrue(start_b.wait(timeout=2.0))
             self.assertEqual(sched.active_count("owner/repo"), 2)
             self.assertEqual(sched.active_count("owner/other"), 1)
-        finally:
-            release.set()
 
     def test_per_repo_cap_override_takes_precedence(self) -> None:
         # The per-call override lets a RepoSpec with `parallel_limit=1`
@@ -218,7 +274,7 @@ class PerRepoCapEnforcementTest(unittest.TestCase):
         self.addCleanup(sched.shutdown)
         start = threading.Event()
         release = threading.Event()
-        try:
+        with _release_on_exit(release):
             self.assertTrue(
                 sched.submit(
                     "owner/repo", 1,
@@ -234,8 +290,6 @@ class PerRepoCapEnforcementTest(unittest.TestCase):
                     per_repo_cap=1,
                 )
             )
-        finally:
-            release.set()
 
 
 class FamilyGateTest(unittest.TestCase):
@@ -246,7 +300,7 @@ class FamilyGateTest(unittest.TestCase):
         self.addCleanup(sched.shutdown)
         start = threading.Event()
         release = threading.Event()
-        try:
+        with _release_on_exit(release):
             self.assertTrue(
                 sched.submit(
                     "owner/repo", 100,
@@ -288,8 +342,6 @@ class FamilyGateTest(unittest.TestCase):
                 )
             )
             self.assertTrue(start_c.wait(timeout=2.0))
-        finally:
-            release.set()
 
     def test_family_slot_clears_on_completion(self) -> None:
         sched = IssueScheduler(global_cap=4, per_repo_cap=4)
@@ -304,21 +356,13 @@ class FamilyGateTest(unittest.TestCase):
         )
         self.assertTrue(done.wait(timeout=2.0))
 
-        deadline = threading.Event()
-        timer = threading.Timer(2.0, deadline.set)
-        timer.daemon = True
-        timer.start()
-        try:
-            while sched.is_active("owner/repo", 50) and not deadline.is_set():
-                pass
-        finally:
-            timer.cancel()
+        _wait_until_inactive(sched, "owner/repo", 50)
 
         # Family slot must be released on completion, so a follow-up
         # family-aware submit on the same repo succeeds.
         start = threading.Event()
         release = threading.Event()
-        try:
+        with _release_on_exit(release):
             self.assertTrue(
                 sched.submit(
                     "owner/repo", 51,
@@ -327,8 +371,6 @@ class FamilyGateTest(unittest.TestCase):
                 )
             )
             self.assertTrue(start.wait(timeout=2.0))
-        finally:
-            release.set()
 
 
 class ShutdownDrainRaceTest(unittest.TestCase):
@@ -367,18 +409,16 @@ class ShutdownDrainRaceTest(unittest.TestCase):
                 register_gate.wait(timeout=5.0)
             return real_add(self_fut, fn)
 
-        def _failing() -> None:
-            raise RuntimeError("worker exploded")
-
         with patch.object(Future, "add_done_callback", gated_add):
             with self.assertLogs("orchestrator.scheduler", level=logging.ERROR) as logs:
                 submit_done = threading.Event()
 
-                def _do_submit() -> None:
-                    sched.submit("owner/repo", 1, _failing)
-                    submit_done.set()
-
-                submitter = threading.Thread(target=_do_submit)
+                submitter = threading.Thread(target=partial(
+                    _submit_then_signal,
+                    sched,
+                    _failing_worker,
+                    submit_done,
+                ))
                 submitter.start()
                 # Wait until submit is parked inside the gated callback.
                 # 0.1s is generous; if the submitter raced past the gate
@@ -389,11 +429,11 @@ class ShutdownDrainRaceTest(unittest.TestCase):
 
                 shutdown_done = threading.Event()
 
-                def _do_shutdown() -> None:
-                    sched.shutdown(wait=True)
-                    shutdown_done.set()
-
-                shutter = threading.Thread(target=_do_shutdown)
+                shutter = threading.Thread(target=partial(
+                    _shutdown_then_signal,
+                    sched,
+                    shutdown_done,
+                ))
                 shutter.start()
                 time.sleep(0.1)
                 # With the fix, submit holds the scheduler lock through
@@ -423,9 +463,6 @@ class ShutdownDrainRaceTest(unittest.TestCase):
             sched = IssueScheduler(global_cap=8, per_repo_cap=8)
             accepted = 0
 
-            def _failing() -> None:
-                raise RuntimeError("worker exploded")
-
             # Submit a head-start batch BEFORE launching the shutdown
             # thread so the race is "shutdown overlaps in-flight
             # submits" rather than "shutdown closes the gate before
@@ -435,12 +472,12 @@ class ShutdownDrainRaceTest(unittest.TestCase):
             head_start = 20
             with self.assertLogs("orchestrator.scheduler", level=logging.ERROR) as logs:
                 for i in range(head_start):
-                    if sched.submit(f"owner/repo-{trial}", i, _failing):
+                    if sched.submit(f"owner/repo-{trial}", i, _failing_worker):
                         accepted += 1
                 shutdown_thread = threading.Thread(target=sched.shutdown)
                 shutdown_thread.start()
                 for i in range(head_start, head_start + 60):
-                    if sched.submit(f"owner/repo-{trial}", i, _failing):
+                    if sched.submit(f"owner/repo-{trial}", i, _failing_worker):
                         accepted += 1
                 shutdown_thread.join(timeout=10.0)
                 self.assertFalse(shutdown_thread.is_alive())
@@ -472,13 +509,12 @@ class ShutdownRepeatableWaitTest(unittest.TestCase):
         release = threading.Event()
         finished = threading.Event()
 
-        def _worker() -> None:
-            start.set()
-            release.wait(timeout=5.0)
-            finished.set()
-
-        try:
-            self.assertTrue(sched.submit("owner/repo", 1, _worker))
+        with _release_on_exit(release):
+            self.assertTrue(sched.submit(
+                "owner/repo",
+                1,
+                partial(_finishing_worker, start, release, finished),
+            ))
             self.assertTrue(start.wait(timeout=2.0))
 
             # First call returns immediately, leaving the worker running.
@@ -487,10 +523,9 @@ class ShutdownRepeatableWaitTest(unittest.TestCase):
 
             # Second call must actually wait. Release the worker from
             # another thread after a brief delay so the wait is real.
-            def _release_soon() -> None:
-                time.sleep(0.05)
-                release.set()
-            releaser = threading.Thread(target=_release_soon)
+            releaser = threading.Thread(
+                target=partial(_release_after, 0.05, release),
+            )
             releaser.start()
 
             sched.shutdown(wait=True)
@@ -501,8 +536,6 @@ class ShutdownRepeatableWaitTest(unittest.TestCase):
             self.assertTrue(finished.is_set())
             self.assertEqual(sched.active_count(), 0)
             releaser.join(timeout=2.0)
-        finally:
-            release.set()
 
     def test_wait_true_after_false_drains_completion(self) -> None:
         # A worker that finishes between the two shutdown calls must
@@ -511,13 +544,17 @@ class ShutdownRepeatableWaitTest(unittest.TestCase):
         start = threading.Event()
         release = threading.Event()
 
-        def _failing() -> None:
-            start.set()
-            release.wait(timeout=5.0)
-            raise RuntimeError("late worker exploded")
-
-        try:
-            self.assertTrue(sched.submit("owner/repo", 7, _failing))
+        with _release_on_exit(release):
+            self.assertTrue(sched.submit(
+                "owner/repo",
+                7,
+                partial(
+                    _gated_failure,
+                    start,
+                    release,
+                    "late worker exploded",
+                ),
+            ))
             self.assertTrue(start.wait(timeout=2.0))
             sched.shutdown(wait=False)
 
@@ -530,8 +567,6 @@ class ShutdownRepeatableWaitTest(unittest.TestCase):
                 any("late worker exploded" in msg for msg in logs.output),
                 logs.output,
             )
-        finally:
-            release.set()
 
 
 class SubmitSkipLoggingTest(unittest.TestCase):
@@ -547,7 +582,7 @@ class SubmitSkipLoggingTest(unittest.TestCase):
         self.addCleanup(sched.shutdown)
         start = threading.Event()
         release = threading.Event()
-        try:
+        with _release_on_exit(release):
             self.assertTrue(
                 sched.submit(
                     "owner/repo", 100,
@@ -575,15 +610,13 @@ class SubmitSkipLoggingTest(unittest.TestCase):
                 ),
                 logs.output,
             )
-        finally:
-            release.set()
 
     def test_per_repo_cap_skip_logs_at_info(self) -> None:
         sched = IssueScheduler(global_cap=10, per_repo_cap=5)
         self.addCleanup(sched.shutdown)
         start = threading.Event()
         release = threading.Event()
-        try:
+        with _release_on_exit(release):
             self.assertTrue(
                 sched.submit(
                     "owner/repo", 1,
@@ -610,8 +643,6 @@ class SubmitSkipLoggingTest(unittest.TestCase):
                 ),
                 logs.output,
             )
-        finally:
-            release.set()
 
     def test_duplicate_active_skip_logs_at_debug(self) -> None:
         # The duplicate-active path is the routine case while a
@@ -621,7 +652,7 @@ class SubmitSkipLoggingTest(unittest.TestCase):
         self.addCleanup(sched.shutdown)
         start = threading.Event()
         release = threading.Event()
-        try:
+        with _release_on_exit(release):
             self.assertTrue(
                 sched.submit(
                     "owner/repo", 1, lambda: _worker(start, release),
@@ -645,8 +676,6 @@ class SubmitSkipLoggingTest(unittest.TestCase):
                 ),
                 logs.output,
             )
-        finally:
-            release.set()
 
 
 class TrackActiveContextManagerTest(unittest.TestCase):
@@ -692,18 +721,24 @@ class TrackActiveContextManagerTest(unittest.TestCase):
         release_bucket = threading.Event()
         bucket_inner_claimed = threading.Event()
 
-        def _bucket_worker() -> None:
-            with sched.track_active("owner/family", 100) as claimed:
-                if claimed:
-                    bucket_inner_claimed.set()
-                start_bucket.set()
-                release_bucket.wait(timeout=5.0)
-
-        try:
+        with _release_on_exit(release_bucket):
             # Bucket submit (family-aware) takes one executor slot.
             self.assertTrue(
                 sched.submit(
-                    "owner/family", 0, _bucket_worker, family=True,
+                    "owner/family",
+                    0,
+                    partial(
+                        _tracked_worker,
+                        sched,
+                        "owner/family",
+                        100,
+                        (
+                            start_bucket,
+                            release_bucket,
+                            bucket_inner_claimed,
+                        ),
+                    ),
+                    family=True,
                 )
             )
             self.assertTrue(start_bucket.wait(timeout=2.0))
@@ -725,8 +760,6 @@ class TrackActiveContextManagerTest(unittest.TestCase):
             )
             self.assertTrue(start_b.wait(timeout=2.0))
             release_b.set()
-        finally:
-            release_bucket.set()
 
     def test_duplicate_claim_keeps_existing_marker(
         self,
@@ -738,7 +771,7 @@ class TrackActiveContextManagerTest(unittest.TestCase):
         self.addCleanup(sched.shutdown)
         start = threading.Event()
         release = threading.Event()
-        try:
+        with _release_on_exit(release):
             self.assertTrue(
                 sched.submit(
                     "owner/repo", 7, lambda: _worker(start, release),
@@ -755,8 +788,6 @@ class TrackActiveContextManagerTest(unittest.TestCase):
                 self.assertTrue(sched.is_active("owner/repo", 7))
             # The original owner's marker survives the inner exit.
             self.assertTrue(sched.is_active("owner/repo", 7))
-        finally:
-            release.set()
 
     def test_submit_rejects_fanout_for_tracked_issue(self) -> None:
         # A fanout submit for an issue currently held by track_active
@@ -769,17 +800,19 @@ class TrackActiveContextManagerTest(unittest.TestCase):
         release = threading.Event()
         inner_claimed = threading.Event()
 
-        def _bucket_worker() -> None:
-            with sched.track_active("owner/repo", 42) as claimed:
-                if claimed:
-                    inner_claimed.set()
-                start.set()
-                release.wait(timeout=5.0)
-
-        try:
+        with _release_on_exit(release):
             self.assertTrue(
                 sched.submit(
-                    "owner/repo", 0, _bucket_worker, family=True,
+                    "owner/repo",
+                    0,
+                    partial(
+                        _tracked_worker,
+                        sched,
+                        "owner/repo",
+                        42,
+                        (start, release, inner_claimed),
+                    ),
+                    family=True,
                 )
             )
             self.assertTrue(start.wait(timeout=2.0))
@@ -792,8 +825,6 @@ class TrackActiveContextManagerTest(unittest.TestCase):
                     lambda: self.fail("must not run"),
                 )
             )
-        finally:
-            release.set()
 
 
 class CapExemptSubmitTest(unittest.TestCase):
@@ -810,7 +841,7 @@ class CapExemptSubmitTest(unittest.TestCase):
         start_a = threading.Event()
         start_b = threading.Event()
         release = threading.Event()
-        try:
+        with _release_on_exit(release):
             self.assertTrue(
                 sched.submit(
                     "owner/a", 1, lambda: _worker(start_a, release),
@@ -842,8 +873,6 @@ class CapExemptSubmitTest(unittest.TestCase):
             self.assertEqual(sched.active_count(), 1)
             # And the exempt submit is visible via `is_active`.
             self.assertTrue(sched.is_active("owner/b", 3))
-        finally:
-            release.set()
 
     def test_cap_exempt_submit_bypasses_per_repo_cap(self) -> None:
         sched = IssueScheduler(global_cap=10, per_repo_cap=1)
@@ -851,7 +880,7 @@ class CapExemptSubmitTest(unittest.TestCase):
         start_a = threading.Event()
         start_b = threading.Event()
         release = threading.Event()
-        try:
+        with _release_on_exit(release):
             self.assertTrue(
                 sched.submit(
                     "owner/repo", 1, lambda: _worker(start_a, release),
@@ -891,8 +920,6 @@ class CapExemptSubmitTest(unittest.TestCase):
             )
             self.assertTrue(start_c.wait(timeout=2.0))
             self.assertEqual(sched.active_count("owner/repo"), 1)
-        finally:
-            release.set()
 
     def test_submit_honors_family_mutex(self) -> None:
         # The cap exemption only bypasses the cap counters; family-aware
@@ -902,7 +929,7 @@ class CapExemptSubmitTest(unittest.TestCase):
         self.addCleanup(sched.shutdown)
         start = threading.Event()
         release = threading.Event()
-        try:
+        with _release_on_exit(release):
             self.assertTrue(
                 sched.submit(
                     "owner/repo", 100,
@@ -922,8 +949,6 @@ class CapExemptSubmitTest(unittest.TestCase):
                     cap_exempt=True,
                 )
             )
-        finally:
-            release.set()
 
     def test_submit_honors_duplicate_active(self) -> None:
         # A cap-exempt submit for an already-in-flight key is rejected.
@@ -933,7 +958,7 @@ class CapExemptSubmitTest(unittest.TestCase):
         self.addCleanup(sched.shutdown)
         start = threading.Event()
         release = threading.Event()
-        try:
+        with _release_on_exit(release):
             self.assertTrue(
                 sched.submit(
                     "owner/repo", 7,
@@ -959,8 +984,6 @@ class CapExemptSubmitTest(unittest.TestCase):
                     lambda: self.fail("must not run"),
                 )
             )
-        finally:
-            release.set()
 
     def test_pool_is_independent_of_global_cap(self) -> None:
         # Regression: a prior implementation sized the cap-exempt
@@ -978,7 +1001,7 @@ class CapExemptSubmitTest(unittest.TestCase):
         start_a = threading.Event()
         start_b = threading.Event()
         release = threading.Event()
-        try:
+        with _release_on_exit(release):
             self.assertTrue(
                 sched.submit(
                     "owner/a", 0,
@@ -1008,8 +1031,6 @@ class CapExemptSubmitTest(unittest.TestCase):
                 "second exempt family bucket queued behind the first -- "
                 "exempt executor is still capped by global_cap",
             )
-        finally:
-            release.set()
 
     def test_completion_clears_marker_and_family_slot(self) -> None:
         # Completing an exempt family submit must release BOTH its
@@ -1030,15 +1051,7 @@ class CapExemptSubmitTest(unittest.TestCase):
         )
         self.assertTrue(done.wait(timeout=2.0))
 
-        deadline = threading.Event()
-        timer = threading.Timer(2.0, deadline.set)
-        timer.daemon = True
-        timer.start()
-        try:
-            while sched.is_active("owner/repo", 50) and not deadline.is_set():
-                pass
-        finally:
-            timer.cancel()
+        _wait_until_inactive(sched, "owner/repo", 50)
         self.assertFalse(sched.is_active("owner/repo", 50))
         self.assertEqual(sched.active_count(), 0)
         self.assertEqual(sched.active_count("owner/repo"), 0)
@@ -1047,7 +1060,7 @@ class CapExemptSubmitTest(unittest.TestCase):
         # accepted -- the exempt completion released the family slot.
         start = threading.Event()
         release = threading.Event()
-        try:
+        with _release_on_exit(release):
             self.assertTrue(
                 sched.submit(
                     "owner/repo", 51,
@@ -1056,8 +1069,6 @@ class CapExemptSubmitTest(unittest.TestCase):
                 )
             )
             self.assertTrue(start.wait(timeout=2.0))
-        finally:
-            release.set()
 
 
 if __name__ == "__main__":

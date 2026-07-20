@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import logging
+import threading
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from orchestrator import base_sync, config, workflow
 from orchestrator.github import BACKLOG_LABEL, PAUSED_LABEL
+from orchestrator.scheduler import IssueScheduler
 
 from tests.fakes import FakeGitHubClient, FakeLabel, make_issue
 from tests.workflow_helpers import (
@@ -31,7 +33,218 @@ REFRESH_BASE = "_refresh_base_and_worktrees"
 FANOUT_START_TIMEOUT_MESSAGE = "implementing fanout #1 did not start"
 
 
-class TickViaSchedulerTest(unittest.TestCase):
+def _wait_for_first_started(
+    starts: dict[int, threading.Event],
+    *,
+    timeout: float = 2.0,
+) -> int | None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        for issue_number, started in starts.items():
+            if started.is_set():
+                return issue_number
+        time.sleep(0.01)
+    return None
+
+
+def _record_current_thread(thread_ids: list[int], _gh, _spec, _issue) -> None:
+    thread_ids.append(threading.get_ident())
+
+
+def _wait_for_log(log_capture, *fragments: str, timeout: float = 2.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if any(
+            all(fragment in message for fragment in fragments)
+            for message in log_capture.output
+        ):
+            return True
+        time.sleep(0.01)
+    return False
+
+
+class _IssueProcessor:
+    def __init__(self, issue_numbers: tuple[int, ...], *, blocking: bool = True):
+        self.starts = {
+            issue_number: threading.Event() for issue_number in issue_numbers
+        }
+        self.releases = {
+            issue_number: threading.Event() for issue_number in issue_numbers
+        }
+        self.processed: list[int] = []
+        self._blocking = blocking
+        self._lock = threading.Lock()
+
+    def __call__(self, _gh, _spec, issue) -> None:
+        with self._lock:
+            self.processed.append(issue.number)
+        start = self.starts.get(issue.number)
+        if start is not None:
+            start.set()
+        if self._blocking:
+            release = self.releases.get(issue.number)
+            if release is not None:
+                release.wait(timeout=5.0)
+
+    def release_all(self) -> None:
+        for release in self.releases.values():
+            release.set()
+
+    def processed_snapshot(self) -> list[int]:
+        with self._lock:
+            return list(self.processed)
+
+
+class _GatedWorker:
+    def __init__(self) -> None:
+        self.started = threading.Event()
+        self.release = threading.Event()
+
+    def __call__(self) -> None:
+        self.started.set()
+        self.release.wait(timeout=5.0)
+
+
+class _SequentialIssueProcessor(_IssueProcessor):
+    def __init__(self, issue_numbers: tuple[int, ...]):
+        super().__init__(issue_numbers)
+        self.maximum_in_flight = 0
+        self._in_flight = 0
+
+    def __call__(self, gh, spec, issue) -> None:
+        with self._lock:
+            self._in_flight += 1
+            self.maximum_in_flight = max(
+                self.maximum_in_flight,
+                self._in_flight,
+            )
+        try:
+            super().__call__(gh, spec, issue)
+        finally:
+            with self._lock:
+                self._in_flight -= 1
+
+
+class _BarrierIssueProcessor:
+    def __init__(self, parties: int):
+        self._barrier = threading.Barrier(parties, timeout=5.0)
+        self._processed: list[int] = []
+        self._lock = threading.Lock()
+
+    def __call__(self, _gh, _spec, issue) -> None:
+        self._barrier.wait()
+        with self._lock:
+            self._processed.append(issue.number)
+
+    def processed_snapshot(self) -> list[int]:
+        with self._lock:
+            return list(self._processed)
+
+
+class _WorkerClientFactory:
+    def __init__(self) -> None:
+        self.clients: list[FakeGitHubClient] = []
+        self._lock = threading.Lock()
+
+    def __call__(self) -> FakeGitHubClient:
+        client = FakeGitHubClient()
+        client.add_issue(make_issue(1, label=LABEL_IMPLEMENTING))
+        with self._lock:
+            self.clients.append(client)
+        return client
+
+
+class _FakeWorktreeDir:
+    name = "issue-7"
+
+    def is_dir(self) -> bool:
+        return True
+
+
+class _FakeWorktreeRoot:
+    def exists(self) -> bool:
+        return True
+
+    def iterdir(self) -> list[_FakeWorktreeDir]:
+        return [_FakeWorktreeDir()]
+
+
+class _PyGithubIssue:
+    def __init__(self, state: str):
+        self.state = state
+
+
+class _SchedulerWorkflowTest(unittest.TestCase):
+    def _spec(self, parallel_limit: int = 5) -> config.RepoSpec:
+        return config.RepoSpec(
+            slug=REPO_SLUG,
+            target_root=TARGET_ROOT,
+            base_branch=TEST_BASE_BRANCH,
+            parallel_limit=parallel_limit,
+        )
+
+    def _scheduler(
+        self,
+        *,
+        global_cap: int = 8,
+        per_repo_cap: int = 8,
+    ) -> IssueScheduler:
+        scheduler = IssueScheduler(
+            global_cap=global_cap,
+            per_repo_cap=per_repo_cap,
+        )
+        self.addCleanup(scheduler.shutdown)
+        return scheduler
+
+    def _processor(
+        self,
+        *issue_numbers: int,
+        blocking: bool = True,
+    ) -> _IssueProcessor:
+        processor = _IssueProcessor(issue_numbers, blocking=blocking)
+        self.addCleanup(processor.release_all)
+        return processor
+
+    def _sequential_processor(
+        self,
+        *issue_numbers: int,
+    ) -> _SequentialIssueProcessor:
+        processor = _SequentialIssueProcessor(issue_numbers)
+        self.addCleanup(processor.release_all)
+        return processor
+
+    def _wait_idle(
+        self,
+        scheduler: IssueScheduler,
+        repo_slug: str = REPO_SLUG,
+        deadline_s: float = 5.0,
+    ) -> None:
+        deadline = time.monotonic() + deadline_s
+        while scheduler.active_count(repo_slug) > 0 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertEqual(
+            scheduler.active_count(repo_slug),
+            0,
+            f"scheduler still has active workers on {repo_slug}",
+        )
+
+    def _wait_issue_idle(
+        self,
+        scheduler: IssueScheduler,
+        issue_number: int,
+        *,
+        timeout: float = 2.0,
+    ) -> None:
+        deadline = time.monotonic() + timeout
+        while (
+            scheduler.is_active(REPO_SLUG, issue_number)
+            and time.monotonic() < deadline
+        ):
+            time.sleep(0.01)
+        self.assertFalse(scheduler.is_active(REPO_SLUG, issue_number))
+
+
+class TickFanoutRoutingTest(_SchedulerWorkflowTest):
     """`workflow.tick` accepts an optional `IssueScheduler` that takes
     over per-issue dispatch entirely: each polling pass enumerates the
     pollable issues, classifies family-aware vs fan-out work, and
@@ -47,37 +260,6 @@ class TickViaSchedulerTest(unittest.TestCase):
     pray timing.
     """
 
-    def _spec(self, parallel_limit: int = 5) -> config.RepoSpec:
-        return config.RepoSpec(
-            slug=REPO_SLUG,
-            target_root=TARGET_ROOT,
-            base_branch=TEST_BASE_BRANCH,
-            parallel_limit=parallel_limit,
-        )
-
-    def _wait_idle(self, sched, repo_slug: str, deadline_s: float = 5.0) -> None:
-        """Block until the scheduler reports zero active workers for `repo_slug`.
-
-        The done-callback releases the in-flight markers from a background
-        thread, so a brief poll prevents the next tick from observing the
-        old marker. Time-bounded so a regression fails the test instead of
-        hanging the suite.
-        """
-        import threading as _threading
-        deadline = _threading.Event()
-        timer = _threading.Timer(deadline_s, deadline.set)
-        timer.daemon = True
-        timer.start()
-        try:
-            while sched.active_count(repo_slug) > 0 and not deadline.is_set():
-                pass
-        finally:
-            timer.cancel()
-        self.assertEqual(
-            sched.active_count(repo_slug), 0,
-            f"scheduler still has active workers on {repo_slug}",
-        )
-
     def test_active_issue_is_skipped_until_completion(self) -> None:
         # Tick 1 accepts the issue and the worker holds inside
         # `_process_issue`. Tick 2 must NOT submit the same issue
@@ -85,73 +267,46 @@ class TickViaSchedulerTest(unittest.TestCase):
         # duplicate-active-issue gate keeps a second submit out so the
         # handler isn't entered twice concurrently. After the worker
         # exits, a third tick may submit it again.
-        import threading
-        from orchestrator.scheduler import IssueScheduler
-        sched = IssueScheduler(global_cap=4, per_repo_cap=4)
-        self.addCleanup(sched.shutdown)
+        sched = self._scheduler(global_cap=4, per_repo_cap=4)
         gh = FakeGitHubClient()
         gh.add_issue(make_issue(7, label=LABEL_IMPLEMENTING))
 
-        start = threading.Event()
-        release = threading.Event()
-        call_count = 0
-        count_lock = threading.Lock()
+        first_process = self._processor(7)
+        with patch.object(workflow, REFRESH_BASE), patch.object(
+            workflow,
+            PROCESS_ISSUE,
+            side_effect=first_process,
+        ):
+            workflow.tick(gh, self._spec(), scheduler=sched)
+            self.assertTrue(
+                first_process.starts[7].wait(timeout=2.0),
+                "worker never entered _process_issue after first tick",
+            )
+            self.assertTrue(sched.is_active(REPO_SLUG, 7))
 
-        def fake_process(_gh, _spec, _issue) -> None:
-            nonlocal call_count
-            with count_lock:
-                call_count += 1
-            start.set()
-            release.wait(timeout=5.0)
+            workflow.tick(gh, self._spec(), scheduler=sched)
+            time.sleep(0.1)
+            self.assertEqual(first_process.processed_snapshot(), [7])
+            self.assertTrue(sched.is_active(REPO_SLUG, 7))
+            first_process.releases[7].set()
+        self._wait_idle(sched)
 
-        try:
-            with patch.object(workflow, REFRESH_BASE), \
-                 patch.object(workflow, PROCESS_ISSUE, side_effect=fake_process):
-                # Tick 1: accept and dispatch.
-                workflow.tick(gh, self._spec(), scheduler=sched)
-                self.assertTrue(
-                    start.wait(timeout=2.0),
-                    "worker never entered _process_issue after first tick",
-                )
-                self.assertTrue(sched.is_active(REPO_SLUG, 7))
-
-                # Tick 2: while the worker is still in flight, the
-                # duplicate-active gate must reject the resubmit. The
-                # handler must NOT be called a second time.
-                workflow.tick(gh, self._spec(), scheduler=sched)
-                # Brief breathing room: any in-flight executor task
-                # would have invoked the fake by now.
-                time.sleep(0.1)
-                with count_lock:
-                    self.assertEqual(call_count, 1)
-                self.assertTrue(sched.is_active(REPO_SLUG, 7))
-
-                # Release the worker and let it complete.
-                release.set()
-            self._wait_idle(sched, REPO_SLUG)
-
-            # Tick 3: completion cleared the marker so the same issue
-            # is accepted again.
-            second_start = threading.Event()
-
-            def fake_process_2(_gh, _spec, _issue) -> None:
-                nonlocal call_count
-                with count_lock:
-                    call_count += 1
-                second_start.set()
-
-            with patch.object(workflow, REFRESH_BASE), \
-                 patch.object(workflow, PROCESS_ISSUE, side_effect=fake_process_2):
-                workflow.tick(gh, self._spec(), scheduler=sched)
-                self.assertTrue(
-                    second_start.wait(timeout=2.0),
-                    "worker never re-entered _process_issue after first completed",
-                )
-        finally:
-            release.set()
-
-        with count_lock:
-            self.assertEqual(call_count, 2)
+        second_process = self._processor(7, blocking=False)
+        with patch.object(workflow, REFRESH_BASE), patch.object(
+            workflow,
+            PROCESS_ISSUE,
+            side_effect=second_process,
+        ):
+            workflow.tick(gh, self._spec(), scheduler=sched)
+            self.assertTrue(
+                second_process.starts[7].wait(timeout=2.0),
+                "worker never re-entered _process_issue after first completed",
+            )
+        self.assertEqual(
+            first_process.processed_snapshot()
+            + second_process.processed_snapshot(),
+            [7, 7],
+        )
 
     def test_same_repo_fanout_runs_with_capacity(self) -> None:
         # Three non-family issues on the same repo with the scheduler's
@@ -159,150 +314,83 @@ class TickViaSchedulerTest(unittest.TestCase):
         # loop must submit each one and the scheduler must let all three
         # workers run concurrently -- the per-repo cap is the only gate
         # that could keep them apart.
-        import threading
-        from orchestrator.scheduler import IssueScheduler
-        sched = IssueScheduler(global_cap=8, per_repo_cap=3)
-        self.addCleanup(sched.shutdown)
+        sched = self._scheduler(global_cap=8, per_repo_cap=3)
         gh = FakeGitHubClient()
         for n in (1, 2, 3):
             gh.add_issue(make_issue(n, label=LABEL_IMPLEMENTING))
 
-        barrier = threading.Barrier(3, timeout=5.0)
-        passed: list[int] = []
-        lock = threading.Lock()
+        process = _BarrierIssueProcessor(parties=3)
 
-        def fake_process(_gh, _spec, issue) -> None:
-            # If any submission was rejected, fewer than three workers
-            # would arrive at the barrier and `wait` would raise
-            # BrokenBarrierError on timeout -- the test then fails on
-            # the unrejected workers' unhandled exception.
-            barrier.wait()
-            with lock:
-                passed.append(issue.number)
+        with patch.object(workflow, REFRESH_BASE), patch.object(
+            workflow,
+            PROCESS_ISSUE,
+            side_effect=process,
+        ):
+            workflow.tick(gh, self._spec(), scheduler=sched)
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline:
+                if len(process.processed_snapshot()) == 3:
+                    break
+                time.sleep(0.01)
+        self._wait_idle(sched)
 
-        try:
-            with patch.object(workflow, REFRESH_BASE), \
-                 patch.object(workflow, PROCESS_ISSUE, side_effect=fake_process):
-                workflow.tick(gh, self._spec(), scheduler=sched)
-                # Wait for all three to pass through the barrier and
-                # record their issue numbers. The barrier guarantees
-                # they're all in `_process_issue` at the same time;
-                # this loop just waits for the final list write.
-                deadline = time.monotonic() + 5.0
-                while time.monotonic() < deadline:
-                    with lock:
-                        if len(passed) == 3:
-                            break
-                    time.sleep(0.01)
-            self._wait_idle(sched, REPO_SLUG)
-        finally:
-            # Defensive: a barrier broken by an early failure could
-            # leave a worker pinned; releasing the underlying scheduler
-            # is enough because `addCleanup(sched.shutdown)` waits for
-            # workers to exit.
-            pass
-
-        self.assertEqual(sorted(passed), [1, 2, 3])
+        self.assertEqual(sorted(process.processed_snapshot()), [1, 2, 3])
 
     def test_repo_cap_defers_until_slot_frees(self) -> None:
         # With `parallel_limit=2` and three eligible non-family issues,
         # the first two are accepted and the third is skipped this
         # tick. After one of the in-flight workers exits, a follow-up
         # tick admits the previously-skipped issue.
-        import threading
-        from orchestrator.scheduler import IssueScheduler
-        sched = IssueScheduler(global_cap=8, per_repo_cap=8)
-        self.addCleanup(sched.shutdown)
+        sched = self._scheduler()
         gh = FakeGitHubClient()
         for n in (10, 11, 12):
             gh.add_issue(make_issue(n, label=LABEL_IMPLEMENTING))
 
-        starts: dict[int, threading.Event] = {
-            10: threading.Event(),
-            11: threading.Event(),
-            12: threading.Event(),
-        }
-        releases: dict[int, threading.Event] = {
-            10: threading.Event(),
-            11: threading.Event(),
-            12: threading.Event(),
-        }
-        seen: list[int] = []
-        seen_lock = threading.Lock()
+        process = self._processor(10, 11, 12)
+        with patch.object(workflow, REFRESH_BASE), patch.object(
+            workflow,
+            PROCESS_ISSUE,
+            side_effect=process,
+        ):
+            workflow.tick(
+                gh, self._spec(parallel_limit=2), scheduler=sched,
+            )
+            accepted = [
+                number
+                for number, started in process.starts.items()
+                if started.wait(timeout=2.0)
+            ]
+            self.assertEqual(len(accepted), 2, accepted)
+            time.sleep(0.1)
+            rejected_numbers = [
+                number for number in (10, 11, 12) if number not in accepted
+            ]
+            self.assertEqual(len(rejected_numbers), 1)
+            rejected_number = rejected_numbers[0]
+            self.assertFalse(
+                process.starts[rejected_number].is_set(),
+                f"#{rejected_number} should have been skipped by per-repo cap",
+            )
 
-        def fake_process(_gh, _spec, issue) -> None:
-            starts[issue.number].set()
-            with seen_lock:
-                seen.append(issue.number)
-            releases[issue.number].wait(timeout=5.0)
+            drained = accepted[0]
+            process.releases[drained].set()
+            self._wait_issue_idle(sched, drained)
 
-        try:
-            with patch.object(workflow, REFRESH_BASE), \
-                 patch.object(workflow, PROCESS_ISSUE, side_effect=fake_process):
-                # Tick 1: parallel_limit=2 caps to two accepted submits.
-                workflow.tick(
-                    gh, self._spec(parallel_limit=2), scheduler=sched,
-                )
-                # Two workers must enter; the third must NOT (per-repo
-                # cap holds it back).
-                accepted = [
-                    n for n, ev in starts.items() if ev.wait(timeout=2.0)
-                ]
-                self.assertEqual(len(accepted), 2, accepted)
-                time.sleep(0.1)
-                rejected_numbers = [n for n in (10, 11, 12) if n not in accepted]
-                self.assertEqual(len(rejected_numbers), 1)
-                rejected_number = rejected_numbers[0]
-                self.assertFalse(
-                    starts[rejected_number].is_set(),
-                    f"#{rejected_number} should have been skipped by per-repo cap",
-                )
-
-                # Release one of the two accepted workers and wait for
-                # the scheduler to reflect the freed slot.
-                drained = accepted[0]
-                releases[drained].set()
-                deadline = threading.Event()
-                timer = threading.Timer(2.0, deadline.set)
-                timer.daemon = True
-                timer.start()
-                try:
-                    while (
-                        sched.is_active(REPO_SLUG, drained)
-                        and not deadline.is_set()
-                    ):
-                        pass
-                finally:
-                    timer.cancel()
-                self.assertFalse(sched.is_active(REPO_SLUG, drained))
-
-                # The handler stub does not flip labels, so model the
-                # drained worker finalizing the issue to `done` -- in
-                # production it would relabel to a terminal (non-sweep)
-                # label, so the next enumeration drops it. Merely closing
-                # while KEEPING a sweep label is not enough: a closed
-                # sweep-labeled issue stays pollable AND is now submitted
-                # cap-exempt (a cheap terminal finalize), so it would
-                # re-run every tick and take the freed slot back, starving
-                # the previously-skipped one.
-                gh._issues[drained].closed = True
-                gh._issues[drained].labels = [FakeLabel("done")]
-
-                # Tick 2: previously-skipped issue is now admitted.
-                workflow.tick(
-                    gh, self._spec(parallel_limit=2), scheduler=sched,
-                )
-                self.assertTrue(
-                    starts[rejected_number].wait(timeout=2.0),
-                    f"#{rejected_number} not admitted after a slot freed up",
-                )
-        finally:
-            for ev in releases.values():
-                ev.set()
+            gh._issues[drained].closed = True
+            gh._issues[drained].labels = [FakeLabel("done")]
+            workflow.tick(
+                gh, self._spec(parallel_limit=2), scheduler=sched,
+            )
+            self.assertTrue(
+                process.starts[rejected_number].wait(timeout=2.0),
+                f"#{rejected_number} not admitted after a slot freed up",
+            )
 
         # All three issues eventually ran exactly once between the two ticks.
-        self.assertEqual(sorted(seen), [10, 11, 12])
+        self.assertEqual(sorted(process.processed_snapshot()), [10, 11, 12])
 
+
+class FamilyBucketRoutingTest(_SchedulerWorkflowTest):
     def test_family_bucket_drains_in_order(self) -> None:
         # All family-aware issues this tick are folded into ONE bucket
         # task that drains them sequentially. The bucket holds the family
@@ -313,96 +401,52 @@ class TickViaSchedulerTest(unittest.TestCase):
         # bucket task -- no extra polling pass needed -- which is the
         # issue #326 fix: a backlog/blocked child can no longer take the
         # family slot and starve the parent umbrella issue.
-        import threading
-        from orchestrator.scheduler import IssueScheduler
-        sched = IssueScheduler(global_cap=8, per_repo_cap=8)
-        self.addCleanup(sched.shutdown)
+        sched = self._scheduler()
         gh = FakeGitHubClient()
         gh.add_issue(make_issue(1, label=LABEL_DECOMPOSING))
         gh.add_issue(make_issue(2, label=LABEL_BLOCKED))
 
-        family_in_flight = 0
-        family_max_in_flight = 0
-        family_starts: dict[int, threading.Event] = {
-            1: threading.Event(),
-            2: threading.Event(),
-        }
-        family_releases: dict[int, threading.Event] = {
-            1: threading.Event(),
-            2: threading.Event(),
-        }
-        order: list[int] = []
-        counter_lock = threading.Lock()
+        process = self._sequential_processor(1, 2)
+        with patch.object(workflow, REFRESH_BASE), patch.object(
+            workflow,
+            PROCESS_ISSUE,
+            side_effect=process,
+        ):
+            workflow.tick(gh, self._spec(), scheduler=sched)
+            self.assertTrue(
+                process.starts[1].wait(timeout=2.0),
+                "drain did not enter the first family-aware issue",
+            )
+            time.sleep(0.1)
+            self.assertFalse(
+                process.starts[2].is_set(),
+                "drain entered second family-aware issue before "
+                "releasing the first -- bucket must process sequentially",
+            )
+            self.assertEqual(process.maximum_in_flight, 1)
 
-        def fake_process(_gh, _spec, issue) -> None:
-            nonlocal family_in_flight, family_max_in_flight
-            with counter_lock:
-                family_in_flight += 1
-                family_max_in_flight = max(
-                    family_max_in_flight, family_in_flight,
-                )
-                order.append(issue.number)
-            family_starts[issue.number].set()
-            family_releases[issue.number].wait(timeout=5.0)
-            with counter_lock:
-                family_in_flight -= 1
+            workflow.tick(gh, self._spec(), scheduler=sched)
+            time.sleep(0.1)
+            self.assertFalse(
+                process.starts[2].is_set(),
+                "family-slot leak: second family worker started "
+                "while the first was still in flight",
+            )
+            self.assertEqual(process.maximum_in_flight, 1)
 
-        try:
-            with patch.object(workflow, REFRESH_BASE), \
-                 patch.object(workflow, PROCESS_ISSUE, side_effect=fake_process):
-                # Tick 1: one bucket task submitted, drain enters its
-                # first family-aware issue.
-                workflow.tick(gh, self._spec(), scheduler=sched)
-                self.assertTrue(
-                    family_starts[1].wait(timeout=2.0),
-                    "drain did not enter the first family-aware issue",
-                )
-                time.sleep(0.1)
-                self.assertFalse(
-                    family_starts[2].is_set(),
-                    "drain entered second family-aware issue before "
-                    "releasing the first -- bucket must process "
-                    "sequentially",
-                )
-                with counter_lock:
-                    self.assertEqual(family_in_flight, 1)
-
-                # Tick 2 BEFORE releasing the first handler: the family
-                # slot is still held by the bucket task, so a second
-                # bucket submit must be skipped. This is the "do not
-                # overlap across polling passes" property: a polling
-                # pass that observes a family worker mid-flight cannot
-                # squeeze a second one past the gate.
-                workflow.tick(gh, self._spec(), scheduler=sched)
-                time.sleep(0.1)
-                self.assertFalse(
-                    family_starts[2].is_set(),
-                    "family-slot leak: second family worker started "
-                    "while the first was still in flight",
-                )
-                with counter_lock:
-                    self.assertEqual(family_in_flight, 1)
-
-                # Release #1. The SAME bucket task advances to #2
-                # without needing another tick -- that's the bug-fix
-                # contract: a no-op family child cannot block the next
-                # family issue (e.g. the parent umbrella) from running.
-                family_releases[1].set()
-                self.assertTrue(
-                    family_starts[2].wait(timeout=2.0),
-                    "drain did not advance to second family issue "
-                    "after first one was released",
-                )
-                family_releases[2].set()
-            self._wait_idle(sched, REPO_SLUG)
-        finally:
-            for ev in family_releases.values():
-                ev.set()
+            process.releases[1].set()
+            self.assertTrue(
+                process.starts[2].wait(timeout=2.0),
+                "drain did not advance to second family issue "
+                "after first one was released",
+            )
+            process.releases[2].set()
+        self._wait_idle(sched)
 
         # At no point did two family-aware handlers run concurrently.
-        self.assertEqual(family_max_in_flight, 1)
+        self.assertEqual(process.maximum_in_flight, 1)
         # Both issues ran exactly once -- and within ticks 1's bucket.
-        self.assertEqual(sorted(order), [1, 2])
+        self.assertEqual(sorted(process.processed_snapshot()), [1, 2])
 
     def test_family_bucket_skip_is_logged(self) -> None:
         # The dispatch layer logs a "family bucket (...) not submitted
@@ -412,48 +456,33 @@ class TickViaSchedulerTest(unittest.TestCase):
         # scheduler also logs the per-submit `reason=family_slot_held`
         # skip; this test asserts the higher-level dispatch context
         # makes it into the log too.
-        import threading
-        from orchestrator.scheduler import IssueScheduler
-        sched = IssueScheduler(global_cap=8, per_repo_cap=8)
-        self.addCleanup(sched.shutdown)
+        sched = self._scheduler()
         gh = FakeGitHubClient()
         gh.add_issue(make_issue(1, label=LABEL_DECOMPOSING))
         gh.add_issue(make_issue(2, label=LABEL_BLOCKED))
 
-        start = threading.Event()
-        release = threading.Event()
-        entered: list[int] = []
-        lock = threading.Lock()
+        process = self._processor(1, 2)
+        with patch.object(workflow, REFRESH_BASE), patch.object(
+            workflow,
+            PROCESS_ISSUE,
+            side_effect=process,
+        ):
+            workflow.tick(gh, self._spec(), scheduler=sched)
+            self.assertTrue(process.starts[1].wait(timeout=2.0))
 
-        def fake_process(_gh, _spec, issue) -> None:
-            with lock:
-                entered.append(issue.number)
-            start.set()
-            release.wait(timeout=5.0)
-
-        try:
-            with patch.object(workflow, REFRESH_BASE), \
-                 patch.object(workflow, PROCESS_ISSUE, side_effect=fake_process):
+            with self.assertLogs(
+                "orchestrator.workflow", level=logging.INFO,
+            ) as logs:
                 workflow.tick(gh, self._spec(), scheduler=sched)
-                self.assertTrue(start.wait(timeout=2.0))
-
-                # The drain is parked on the first family issue; a
-                # follow-up tick must observe the bucket skip and log
-                # it with the count of pending family issues.
-                with self.assertLogs(
-                    "orchestrator.workflow", level=logging.INFO,
-                ) as logs:
-                    workflow.tick(gh, self._spec(), scheduler=sched)
-                self.assertTrue(
-                    any(
-                        "family bucket" in msg and "not submitted" in msg
-                        for msg in logs.output
-                    ),
-                    logs.output,
-                )
-        finally:
-            release.set()
-        self._wait_idle(sched, REPO_SLUG)
+            self.assertTrue(
+                any(
+                    "family bucket" in message and "not submitted" in message
+                    for message in logs.output
+                ),
+                logs.output,
+            )
+        process.release_all()
+        self._wait_idle(sched)
 
     def test_family_drain_marks_issue_active(self) -> None:
         # The bucket task wraps each per-issue iteration in
@@ -461,32 +490,21 @@ class TickViaSchedulerTest(unittest.TestCase):
         # for the issue currently being processed inside the bucket.
         # Without this, the pre-tick base refresh would not skip the
         # in-flight family issue's worktree and could race the agent.
-        import threading
-        from orchestrator.scheduler import IssueScheduler
-        sched = IssueScheduler(global_cap=8, per_repo_cap=8)
-        self.addCleanup(sched.shutdown)
+        sched = self._scheduler()
         gh = FakeGitHubClient()
         gh.add_issue(make_issue(42, label=LABEL_DECOMPOSING))
 
-        start = threading.Event()
-        release = threading.Event()
-
-        def fake_process(_gh, _spec, _issue) -> None:
-            start.set()
-            release.wait(timeout=5.0)
-
-        try:
-            with patch.object(workflow, REFRESH_BASE), \
-                 patch.object(workflow, PROCESS_ISSUE, side_effect=fake_process):
-                workflow.tick(gh, self._spec(), scheduler=sched)
-                self.assertTrue(start.wait(timeout=2.0))
-                # The bucket's sentinel key (issue 0) IS active and the
-                # currently-processed family issue #42 is ALSO marked
-                # active so the refresh-skip contract holds.
-                self.assertTrue(sched.is_active(REPO_SLUG, 42))
-        finally:
-            release.set()
-        self._wait_idle(sched, REPO_SLUG)
+        process = self._processor(42)
+        with patch.object(workflow, REFRESH_BASE), patch.object(
+            workflow,
+            PROCESS_ISSUE,
+            side_effect=process,
+        ):
+            workflow.tick(gh, self._spec(), scheduler=sched)
+            self.assertTrue(process.starts[42].wait(timeout=2.0))
+            self.assertTrue(sched.is_active(REPO_SLUG, 42))
+        process.release_all()
+        self._wait_idle(sched)
         # After completion, #42's per-iteration claim is released.
         self.assertFalse(sched.is_active(REPO_SLUG, 42))
 
@@ -499,65 +517,40 @@ class TickViaSchedulerTest(unittest.TestCase):
         # holds the active marker), and must SKIP `_process_issue` for
         # that iteration -- two workers running the same handler
         # concurrently would race the worktree and pinned state.
-        import threading
-        from orchestrator.scheduler import IssueScheduler
-        sched = IssueScheduler(global_cap=8, per_repo_cap=8)
-        self.addCleanup(sched.shutdown)
+        sched = self._scheduler()
         gh = FakeGitHubClient()
         gh.add_issue(make_issue(50, label=LABEL_IMPLEMENTING))
 
         # Simulate the fanout worker holding (acme/widget, 50) via a
         # direct scheduler.submit that parks until released.
-        fanout_start = threading.Event()
-        fanout_release = threading.Event()
+        fanout = _GatedWorker()
+        self.addCleanup(fanout.release.set)
+        process = self._processor(50, blocking=False)
 
-        def _fanout_worker() -> None:
-            fanout_start.set()
-            fanout_release.wait(timeout=5.0)
+        self.assertTrue(
+            sched.submit(REPO_SLUG, 50, fanout),
+        )
+        self.assertTrue(fanout.started.wait(timeout=2.0))
 
-        process_calls: list[int] = []
-        process_lock = threading.Lock()
+        # Relabel #50 to a family-aware state so the next tick
+        # folds it into the family bucket.
+        gh._issues[50].labels = [FakeLabel(LABEL_BLOCKED)]
 
-        def fake_process(_gh, _spec, issue) -> None:
-            with process_lock:
-                process_calls.append(issue.number)
-
-        try:
-            # Plant the fanout worker on #50.
+        with (
+            self.assertLogs(
+                "orchestrator.workflow", level=logging.INFO,
+            ) as logs,
+            patch.object(workflow, REFRESH_BASE),
+            patch.object(workflow, PROCESS_ISSUE, side_effect=process),
+        ):
+            workflow.tick(gh, self._spec(), scheduler=sched)
             self.assertTrue(
-                sched.submit(REPO_SLUG, 50, _fanout_worker),
+                _wait_for_log(logs, "already in flight", "#50"),
+                logs.output,
             )
-            self.assertTrue(fanout_start.wait(timeout=2.0))
-
-            # Relabel #50 to a family-aware state so the next tick
-            # folds it into the family bucket.
-            gh._issues[50].labels = [FakeLabel(LABEL_BLOCKED)]
-
-            with (
-                self.assertLogs(
-                    "orchestrator.workflow", level=logging.INFO,
-                ) as logs,
-                patch.object(workflow, REFRESH_BASE),
-                patch.object(workflow, PROCESS_ISSUE, side_effect=fake_process),
-            ):
-                workflow.tick(gh, self._spec(), scheduler=sched)
-                # Wait for the bucket drain to attempt #50 and skip it.
-                deadline = time.monotonic() + 2.0
-                skipped = False
-                while time.monotonic() < deadline and not skipped:
-                    skipped = any(
-                        "already in flight" in msg and "#50" in msg
-                        for msg in logs.output
-                    )
-                    time.sleep(0.01)
-                self.assertTrue(skipped, logs.output)
-            # The fanout worker is the ONLY one that processed #50;
-            # the drain refused to enter a second concurrent handler.
-            with process_lock:
-                self.assertNotIn(50, process_calls)
-        finally:
-            fanout_release.set()
-        self._wait_idle(sched, REPO_SLUG)
+        self.assertNotIn(50, process.processed_snapshot())
+        fanout.release.set()
+        self._wait_idle(sched)
 
     def test_unlabeled_pickup_is_family_aware(self) -> None:
         # An unlabeled issue routes through `_handle_pickup`, which can
@@ -566,106 +559,66 @@ class TickViaSchedulerTest(unittest.TestCase):
         # therefore fold it into the family bucket alongside the
         # explicit family labels and process it sequentially under the
         # one family slot, never as a fanout submit.
-        import threading
-        from orchestrator.scheduler import IssueScheduler
-        sched = IssueScheduler(global_cap=8, per_repo_cap=8)
-        self.addCleanup(sched.shutdown)
+        sched = self._scheduler()
         gh = FakeGitHubClient()
         gh.add_issue(make_issue(1, label=LABEL_DECOMPOSING))
         gh.add_issue(make_issue(2, label=None))
 
-        family_in_flight = 0
-        family_max_in_flight = 0
-        starts: dict[int, threading.Event] = {
-            1: threading.Event(),
-            2: threading.Event(),
-        }
-        releases: dict[int, threading.Event] = {
-            1: threading.Event(),
-            2: threading.Event(),
-        }
-        order: list[int] = []
-        counter_lock = threading.Lock()
+        process = self._sequential_processor(1, 2)
+        with patch.object(workflow, REFRESH_BASE), patch.object(
+            workflow,
+            PROCESS_ISSUE,
+            side_effect=process,
+        ):
+            workflow.tick(gh, self._spec(), scheduler=sched)
+            started_first = _wait_for_first_started(process.starts)
+            self.assertIsNotNone(started_first)
+            time.sleep(0.1)
+            second = 2 if started_first == 1 else 1
+            self.assertFalse(
+                process.starts[second].is_set(),
+                "second family-aware issue must wait for the first "
+                "to release inside the drain",
+            )
 
-        def fake_process(_gh, _spec, issue) -> None:
-            nonlocal family_in_flight, family_max_in_flight
-            with counter_lock:
-                family_in_flight += 1
-                family_max_in_flight = max(
-                    family_max_in_flight, family_in_flight,
-                )
-                order.append(issue.number)
-            starts[issue.number].set()
-            releases[issue.number].wait(timeout=5.0)
-            with counter_lock:
-                family_in_flight -= 1
-
-        try:
-            with patch.object(workflow, REFRESH_BASE), \
-                 patch.object(workflow, PROCESS_ISSUE, side_effect=fake_process):
-                workflow.tick(gh, self._spec(), scheduler=sched)
-                # Drain enters its first family-aware issue (could be
-                # either depending on enumeration order). The other
-                # must NOT be entered until the first is released --
-                # the bucket drains sequentially.
-                started_first = None
-                deadline = time.monotonic() + 2.0
-                while time.monotonic() < deadline and started_first is None:
-                    for n, ev in starts.items():
-                        if ev.is_set():
-                            started_first = n
-                            break
-                    time.sleep(0.01)
-                self.assertIsNotNone(started_first)
-                time.sleep(0.1)
-                second = 2 if started_first == 1 else 1
-                self.assertFalse(
-                    starts[second].is_set(),
-                    "second family-aware issue must wait for the first "
-                    "to release inside the drain",
-                )
-
-                # Release the first; the SAME bucket task advances to
-                # the second family-aware issue.
-                releases[started_first].set()
-                self.assertTrue(
-                    starts[second].wait(timeout=2.0),
-                    "unlabeled-pickup issue did not run inside the "
-                    "family bucket after the first family issue released",
-                )
-                releases[second].set()
-        finally:
-            for ev in releases.values():
-                ev.set()
-        self._wait_idle(sched, REPO_SLUG)
+            process.releases[started_first].set()
+            self.assertTrue(
+                process.starts[second].wait(timeout=2.0),
+                "unlabeled-pickup issue did not run inside the "
+                "family bucket after the first family issue released",
+            )
+            process.releases[second].set()
+        self._wait_idle(sched)
 
         # Both ran exactly once, sequentially, in the same bucket.
-        self.assertEqual(family_max_in_flight, 1)
-        self.assertEqual(sorted(order), [1, 2])
+        self.assertEqual(process.maximum_in_flight, 1)
+        self.assertEqual(sorted(process.processed_snapshot()), [1, 2])
 
+
+class TickExecutionIsolationTest(_SchedulerWorkflowTest):
     def test_legacy_path_used_when_scheduler_is_none(self) -> None:
         # `scheduler=None` must keep the existing synchronous in-thread
         # behavior intact. The legacy path runs `_process_issue` on the
         # caller thread for `parallel_limit=1`, never touches the
         # scheduler, and -- crucially -- never calls `_for_worker_thread`
         # on that path.
-        import threading
-        from unittest.mock import MagicMock
         gh = FakeGitHubClient()
         gh.add_issue(make_issue(1, label=LABEL_IMPLEMENTING))
 
         caller_thread = threading.get_ident()
         worker_threads: list[int] = []
 
-        def fake_process(_gh, _spec, _issue) -> None:
-            worker_threads.append(threading.get_ident())
-
-        clone = MagicMock(side_effect=lambda: self.fail(
-            "_for_worker_thread must not be called on the legacy path"
+        clone = MagicMock(side_effect=AssertionError(
+            "_for_worker_thread must not be called on the legacy path",
         ))
-        with patch.object(gh, "_for_worker_thread", clone), \
-             patch.object(workflow, REFRESH_BASE), \
-             patch.object(workflow, PROCESS_ISSUE, side_effect=fake_process):
+        with patch.object(gh, "_for_worker_thread", clone), patch.object(
+            workflow,
+            REFRESH_BASE,
+        ), patch.object(
+            workflow,
+            PROCESS_ISSUE,
+            side_effect=lambda *args: _record_current_thread(worker_threads, *args),
+        ):
             workflow.tick(gh, self._spec(parallel_limit=1))
 
         self.assertEqual(worker_threads, [caller_thread])
@@ -688,106 +641,51 @@ class TickViaSchedulerTest(unittest.TestCase):
         # one, not a mock) treats the active-issue case by patching
         # only the inner `_sync_worktree_with_base` step, which is
         # what would actually mutate the worktree / pinned state.
-        import threading
-        from orchestrator.scheduler import IssueScheduler
-        sched = IssueScheduler(global_cap=4, per_repo_cap=4)
-        self.addCleanup(sched.shutdown)
+        sched = self._scheduler(global_cap=4, per_repo_cap=4)
         gh = FakeGitHubClient()
         gh.add_issue(make_issue(7, label=LABEL_IMPLEMENTING))
 
-        start = threading.Event()
-        release = threading.Event()
-
-        def fake_process(_gh, _spec, _issue) -> None:
-            start.set()
-            release.wait(timeout=5.0)
+        process = self._processor(7)
 
         # Stub fetch + iterdir so the real `_refresh_base_and_worktrees`
         # runs but never touches the filesystem or the network. The
         # scheduler-aware skip lives in the per-worktree loop; if it
         # regressed, `sync` would be called for the still-active
         # issue.
-        sync_calls: list[int] = []
-        sync_lock = threading.Lock()
+        sync = MagicMock()
+        fake_fetch_result = MagicMock(returncode=0, stderr="")
+        fake_root = _FakeWorktreeRoot()
 
-        def fake_sync(_gh, _spec, _wt, issue_number) -> None:
-            with sync_lock:
-                sync_calls.append(issue_number)
+        with patch.object(
+            base_sync, "_authed_target_fetch",
+            return_value=fake_fetch_result,
+        ), patch.object(
+            base_sync, "_repo_worktrees_root", return_value=fake_root,
+        ), patch.object(
+            base_sync, "_sync_worktree_with_base", sync,
+        ), patch.object(workflow, PROCESS_ISSUE, side_effect=process):
+            workflow.tick(gh, self._spec(), scheduler=sched)
+            self.assertTrue(
+                process.starts[7].wait(timeout=2.0),
+                "worker never entered _process_issue",
+            )
+            self.assertTrue(sched.is_active(REPO_SLUG, 7))
+            sync.reset_mock()
+            workflow.tick(gh, self._spec(), scheduler=sched)
+            sync.assert_not_called()
+            process.releases[7].set()
+        self._wait_idle(sched)
 
-        class _FakeWtDir:
-            def __init__(self, name: str) -> None:
-                self.name = name
-
-            def is_dir(self) -> bool:
-                return True
-
-        fake_fetch_result = type("R", (), {"returncode": 0, "stderr": ""})()
-        fake_root = type(
-            "Root", (),
-            {
-                "exists": lambda self: True,
-                "iterdir": lambda self: [_FakeWtDir("issue-7")],
-            },
-        )()
-
-        try:
-            with patch.object(
-                base_sync, "_authed_target_fetch",
-                return_value=fake_fetch_result,
-            ), patch.object(
-                base_sync, "_repo_worktrees_root", return_value=fake_root,
-            ), patch.object(
-                base_sync, "_sync_worktree_with_base", side_effect=fake_sync,
-            ), patch.object(workflow, PROCESS_ISSUE, side_effect=fake_process):
-                # Tick 1: handler is dispatched and parks in fake_process.
-                workflow.tick(gh, self._spec(), scheduler=sched)
-                self.assertTrue(
-                    start.wait(timeout=2.0),
-                    "worker never entered _process_issue",
-                )
-                self.assertTrue(sched.is_active(REPO_SLUG, 7))
-                # The first tick's refresh ran while issue #7 was NOT
-                # yet active in the scheduler (the worker is dispatched
-                # AFTER refresh completes), so `_sync_worktree_with_base`
-                # may or may not have been called depending on ordering.
-                # Reset the call log before the second tick so the
-                # assertion below isolates the "active issue skip"
-                # property.
-                with sync_lock:
-                    sync_calls.clear()
-
-                # Tick 2: scheduler still reports #7 as active. The
-                # refresh helper must observe that and skip the
-                # per-worktree sync entirely.
-                workflow.tick(gh, self._spec(), scheduler=sched)
-                with sync_lock:
-                    self.assertEqual(
-                        sync_calls, [],
-                        "refresh did not skip active issue's worktree; "
-                        "_sync_worktree_with_base was called for an "
-                        "in-flight handler",
-                    )
-
-                # Release the worker, wait for the slot to clear, and
-                # confirm a follow-up tick DOES sync the (now idle)
-                # worktree -- the skip is conditional on active state,
-                # not a permanent suppression.
-                release.set()
-            self._wait_idle(sched, REPO_SLUG)
-
-            with patch.object(
-                base_sync, "_authed_target_fetch",
-                return_value=fake_fetch_result,
-            ), patch.object(
-                base_sync, "_repo_worktrees_root", return_value=fake_root,
-            ), patch.object(
-                base_sync, "_sync_worktree_with_base", side_effect=fake_sync,
-            ), patch.object(workflow, PROCESS_ISSUE):
-                workflow.tick(gh, self._spec(), scheduler=sched)
-                with sync_lock:
-                    self.assertIn(7, sync_calls)
-        finally:
-            release.set()
+        with patch.object(
+            base_sync, "_authed_target_fetch",
+            return_value=fake_fetch_result,
+        ), patch.object(
+            base_sync, "_repo_worktrees_root", return_value=fake_root,
+        ), patch.object(
+            base_sync, "_sync_worktree_with_base", sync,
+        ), patch.object(workflow, PROCESS_ISSUE):
+            workflow.tick(gh, self._spec(), scheduler=sched)
+            self.assertEqual(sync.call_args.args[3], 7)
 
     def test_workers_use_own_clients_and_refetch(
         self,
@@ -796,43 +694,28 @@ class TickViaSchedulerTest(unittest.TestCase):
         # mint a worker-thread client via `_for_worker_thread()` and
         # refetch the Issue against that client so PyGithub's
         # Requester chain isn't shared across threads.
-        import threading
-        from orchestrator.scheduler import IssueScheduler
-        sched = IssueScheduler(global_cap=4, per_repo_cap=4)
-        self.addCleanup(sched.shutdown)
+        sched = self._scheduler(global_cap=4, per_repo_cap=4)
         gh = FakeGitHubClient()
         gh.add_issue(make_issue(1, label=LABEL_IMPLEMENTING))
 
-        clone_calls: list[int] = []
-        clone_lock = threading.Lock()
-        cloned_clients: list[FakeGitHubClient] = []
+        client_factory = _WorkerClientFactory()
+        process = MagicMock()
 
-        def fake_clone() -> FakeGitHubClient:
-            twin = FakeGitHubClient()
-            twin.add_issue(make_issue(1, label=LABEL_IMPLEMENTING))
-            with clone_lock:
-                clone_calls.append(1)
-                cloned_clients.append(twin)
-            return twin
-
-        seen_client_ids: list[int] = []
-
-        def fake_process(worker_gh, _spec, _issue) -> None:
-            seen_client_ids.append(id(worker_gh))
-
-        with patch.object(gh, "_for_worker_thread", fake_clone), \
-             patch.object(workflow, REFRESH_BASE), \
-             patch.object(workflow, PROCESS_ISSUE, side_effect=fake_process):
+        with patch.object(gh, "_for_worker_thread", client_factory), patch.object(
+            workflow,
+            REFRESH_BASE,
+        ), patch.object(workflow, PROCESS_ISSUE, process):
             workflow.tick(gh, self._spec(), scheduler=sched)
             self._wait_idle(sched, REPO_SLUG)
 
-        self.assertEqual(len(cloned_clients), 1)
+        self.assertEqual(len(client_factory.clients), 1)
         # The parent client is NOT what the worker saw.
-        self.assertNotIn(id(gh), seen_client_ids)
-        self.assertEqual(seen_client_ids[0], id(cloned_clients[0]))
+        worker_client = process.call_args.args[0]
+        self.assertIsNot(worker_client, gh)
+        self.assertIs(worker_client, client_factory.clients[0])
 
 
-class UmbrellaCapExemptionTest(unittest.TestCase):
+class UmbrellaCapExemptionTest(_SchedulerWorkflowTest):
     """A family bucket is cap-exempt when every issue in it this tick
     runs a no-agent / no-worktree handler -- i.e. every label is in
     ``workflow._CAP_EXEMPT_FAMILY_LABELS`` (``blocked`` or ``umbrella``,
@@ -846,72 +729,34 @@ class UmbrellaCapExemptionTest(unittest.TestCase):
     because those entries DO real, slot-worthy work.
     """
 
-    def _spec(self, parallel_limit: int = 5) -> config.RepoSpec:
-        return config.RepoSpec(
-            slug=REPO_SLUG,
-            target_root=TARGET_ROOT,
-            base_branch=TEST_BASE_BRANCH,
-            parallel_limit=parallel_limit,
-        )
-
-    def _wait_idle(self, sched, repo_slug: str, deadline_s: float = 5.0) -> None:
-        import threading as _threading
-        deadline = _threading.Event()
-        timer = _threading.Timer(deadline_s, deadline.set)
-        timer.daemon = True
-        timer.start()
-        try:
-            while sched.active_count(repo_slug) > 0 and not deadline.is_set():
-                pass
-        finally:
-            timer.cancel()
-        self.assertEqual(sched.active_count(repo_slug), 0)
-
     def test_umbrella_bucket_ignores_saturated_cap(self) -> None:
         # Per-repo cap is 1 and a fanout `implementing` issue already
         # holds the slot. A pure umbrella bucket on the same repo must
         # still run this tick: the dispatcher submits it cap-exempt so
         # the parent aggregation cannot be starved by the implementer.
-        import threading
-        from orchestrator.scheduler import IssueScheduler
-        sched = IssueScheduler(global_cap=8, per_repo_cap=1)
-        self.addCleanup(sched.shutdown)
+        sched = self._scheduler(per_repo_cap=1)
         gh = FakeGitHubClient()
         gh.add_issue(make_issue(1, label=LABEL_IMPLEMENTING))
         gh.add_issue(make_issue(2, label=LABEL_UMBRELLA))
 
-        starts: dict[int, threading.Event] = {
-            1: threading.Event(),
-            2: threading.Event(),
-        }
-        releases: dict[int, threading.Event] = {
-            1: threading.Event(),
-            2: threading.Event(),
-        }
-
-        def fake_process(_gh, _spec, issue) -> None:
-            starts[issue.number].set()
-            releases[issue.number].wait(timeout=5.0)
-
-        try:
-            with patch.object(workflow, REFRESH_BASE), \
-                 patch.object(workflow, PROCESS_ISSUE, side_effect=fake_process):
-                workflow.tick(
-                    gh, self._spec(parallel_limit=1), scheduler=sched,
-                )
-                self.assertTrue(
-                    starts[1].wait(timeout=2.0),
-                    FANOUT_START_TIMEOUT_MESSAGE,
-                )
-                self.assertTrue(
-                    starts[2].wait(timeout=2.0),
-                    "umbrella #2 was blocked by the per-repo cap -- the "
-                    "exempt bucket must run alongside the fanout slot",
-                )
-        finally:
-            for ev in releases.values():
-                ev.set()
-        self._wait_idle(sched, REPO_SLUG)
+        process = self._processor(1, 2)
+        with patch.object(workflow, REFRESH_BASE), patch.object(
+            workflow,
+            PROCESS_ISSUE,
+            side_effect=process,
+        ):
+            workflow.tick(gh, self._spec(parallel_limit=1), scheduler=sched)
+            self.assertTrue(
+                process.starts[1].wait(timeout=2.0),
+                FANOUT_START_TIMEOUT_MESSAGE,
+            )
+            self.assertTrue(
+                process.starts[2].wait(timeout=2.0),
+                "umbrella #2 was blocked by the per-repo cap -- the "
+                "exempt bucket must run alongside the fanout slot",
+            )
+        process.release_all()
+        self._wait_idle(sched)
 
     def test_umbrella_bucket_keeps_counters(self) -> None:
         # While an umbrella-only bucket is in flight, the scheduler's
@@ -919,35 +764,23 @@ class UmbrellaCapExemptionTest(unittest.TestCase):
         # bucket sentinel lives in the cap-exempt tracked set. Without
         # this, a follow-up fanout submit on a tightly-capped repo
         # would see the umbrella inflating the counter and be skipped.
-        import threading
-        from orchestrator.scheduler import IssueScheduler
-        sched = IssueScheduler(global_cap=4, per_repo_cap=4)
-        self.addCleanup(sched.shutdown)
+        sched = self._scheduler(global_cap=4, per_repo_cap=4)
         gh = FakeGitHubClient()
         gh.add_issue(make_issue(1, label=LABEL_UMBRELLA))
 
-        start = threading.Event()
-        release = threading.Event()
-
-        def fake_process(_gh, _spec, _issue) -> None:
-            start.set()
-            release.wait(timeout=5.0)
-
-        try:
-            with patch.object(workflow, REFRESH_BASE), \
-                 patch.object(workflow, PROCESS_ISSUE, side_effect=fake_process):
-                workflow.tick(gh, self._spec(), scheduler=sched)
-                self.assertTrue(start.wait(timeout=2.0))
-                # The umbrella bucket is in flight but the cap counters
-                # are untouched -- the bucket sentinel is exempt.
-                self.assertEqual(sched.active_count(), 0)
-                self.assertEqual(sched.active_count(REPO_SLUG), 0)
-                # Active tracking still works: the umbrella issue
-                # currently being processed registers via `track_active`.
-                self.assertTrue(sched.is_active(REPO_SLUG, 1))
-        finally:
-            release.set()
-        self._wait_idle(sched, REPO_SLUG)
+        process = self._processor(1)
+        with patch.object(workflow, REFRESH_BASE), patch.object(
+            workflow,
+            PROCESS_ISSUE,
+            side_effect=process,
+        ):
+            workflow.tick(gh, self._spec(), scheduler=sched)
+            self.assertTrue(process.starts[1].wait(timeout=2.0))
+            self.assertEqual(sched.active_count(), 0)
+            self.assertEqual(sched.active_count(REPO_SLUG), 0)
+            self.assertTrue(sched.is_active(REPO_SLUG, 1))
+        process.release_all()
+        self._wait_idle(sched)
 
     def test_mixed_family_bucket_counts_against_caps(self) -> None:
         # When the bucket has a non-umbrella family entry (decomposing
@@ -955,53 +788,30 @@ class UmbrellaCapExemptionTest(unittest.TestCase):
         # decomposing handler invokes an agent and is real work. A
         # fanout submit beyond the per-repo cap must be skipped this
         # tick.
-        import threading
-        from orchestrator.scheduler import IssueScheduler
-        sched = IssueScheduler(global_cap=8, per_repo_cap=1)
-        self.addCleanup(sched.shutdown)
+        sched = self._scheduler(per_repo_cap=1)
         gh = FakeGitHubClient()
         gh.add_issue(make_issue(1, label=LABEL_DECOMPOSING))
         gh.add_issue(make_issue(2, label=LABEL_UMBRELLA))
         gh.add_issue(make_issue(3, label=LABEL_IMPLEMENTING))
 
-        starts: dict[int, threading.Event] = {
-            1: threading.Event(),
-            2: threading.Event(),
-            3: threading.Event(),
-        }
-        releases: dict[int, threading.Event] = {
-            1: threading.Event(),
-            2: threading.Event(),
-            3: threading.Event(),
-        }
-
-        def fake_process(_gh, _spec, issue) -> None:
-            starts[issue.number].set()
-            releases[issue.number].wait(timeout=5.0)
-
-        try:
-            with patch.object(workflow, REFRESH_BASE), \
-                 patch.object(workflow, PROCESS_ISSUE, side_effect=fake_process):
-                workflow.tick(
-                    gh, self._spec(parallel_limit=1), scheduler=sched,
-                )
-                # Mixed family bucket (decomposing + umbrella) is the
-                # one allowed cap-counted slot. The implementing fanout
-                # must be skipped: per_repo_cap=1.
-                self.assertTrue(starts[1].wait(timeout=2.0))
-                time.sleep(0.1)
-                self.assertFalse(
-                    starts[3].is_set(),
-                    "implementing #3 should have been rejected by the "
-                    "per-repo cap -- the family bucket is cap-counted "
-                    "because the mix contains a non-umbrella entry",
-                )
-                # While the bucket is in flight the cap counter shows 1.
-                self.assertEqual(sched.active_count(REPO_SLUG), 1)
-        finally:
-            for ev in releases.values():
-                ev.set()
-        self._wait_idle(sched, REPO_SLUG)
+        process = self._processor(1, 2, 3)
+        with patch.object(workflow, REFRESH_BASE), patch.object(
+            workflow,
+            PROCESS_ISSUE,
+            side_effect=process,
+        ):
+            workflow.tick(gh, self._spec(parallel_limit=1), scheduler=sched)
+            self.assertTrue(process.starts[1].wait(timeout=2.0))
+            time.sleep(0.1)
+            self.assertFalse(
+                process.starts[3].is_set(),
+                "implementing #3 should have been rejected by the "
+                "per-repo cap -- the family bucket is cap-counted "
+                "because the mix contains a non-umbrella entry",
+            )
+            self.assertEqual(sched.active_count(REPO_SLUG), 1)
+        process.release_all()
+        self._wait_idle(sched)
 
     def test_blocked_bucket_ignores_saturated_cap(self) -> None:
         # Regression for the blocked-parent deadlock: `_handle_blocked` is
@@ -1011,80 +821,53 @@ class UmbrellaCapExemptionTest(unittest.TestCase):
         # run this tick. Before the fix the bucket was cap-counted, so the
         # parent (dispatched first) grabbed the only slot every tick and
         # starved the very child it was blocked on -- deadlocking the pair.
-        import threading
-        from orchestrator.scheduler import IssueScheduler
-        sched = IssueScheduler(global_cap=8, per_repo_cap=1)
-        self.addCleanup(sched.shutdown)
+        sched = self._scheduler(per_repo_cap=1)
         gh = FakeGitHubClient()
         gh.add_issue(make_issue(1, label=LABEL_IMPLEMENTING))
         gh.add_issue(make_issue(2, label=LABEL_BLOCKED))
 
-        starts: dict[int, threading.Event] = {
-            1: threading.Event(),
-            2: threading.Event(),
-        }
-        releases: dict[int, threading.Event] = {
-            1: threading.Event(),
-            2: threading.Event(),
-        }
-
-        def fake_process(_gh, _spec, issue) -> None:
-            starts[issue.number].set()
-            releases[issue.number].wait(timeout=5.0)
-
-        try:
-            with patch.object(workflow, REFRESH_BASE), \
-                 patch.object(workflow, PROCESS_ISSUE, side_effect=fake_process):
-                workflow.tick(
-                    gh, self._spec(parallel_limit=1), scheduler=sched,
-                )
-                self.assertTrue(
-                    starts[1].wait(timeout=2.0),
-                    FANOUT_START_TIMEOUT_MESSAGE,
-                )
-                self.assertTrue(
-                    starts[2].wait(timeout=2.0),
-                    "blocked #2 was starved by the per-repo cap -- the "
-                    "no-agent family bucket must run cap-exempt alongside "
-                    "the fanout slot",
-                )
-        finally:
-            for ev in releases.values():
-                ev.set()
-        self._wait_idle(sched, REPO_SLUG)
+        process = self._processor(1, 2)
+        with patch.object(workflow, REFRESH_BASE), patch.object(
+            workflow,
+            PROCESS_ISSUE,
+            side_effect=process,
+        ):
+            workflow.tick(gh, self._spec(parallel_limit=1), scheduler=sched)
+            self.assertTrue(
+                process.starts[1].wait(timeout=2.0),
+                FANOUT_START_TIMEOUT_MESSAGE,
+            )
+            self.assertTrue(
+                process.starts[2].wait(timeout=2.0),
+                "blocked #2 was starved by the per-repo cap -- the "
+                "no-agent family bucket must run cap-exempt alongside "
+                "the fanout slot",
+            )
+        process.release_all()
+        self._wait_idle(sched)
 
     def test_blocked_bucket_keeps_counters(self) -> None:
         # A `blocked`-only bucket is in flight but the scheduler's
         # cap counters must read ZERO: the bucket sentinel lives in the
         # cap-exempt tracked set, so a follow-up fanout submit on a
         # tightly-capped repo is not blocked by the parent's poll.
-        import threading
-        from orchestrator.scheduler import IssueScheduler
-        sched = IssueScheduler(global_cap=4, per_repo_cap=4)
-        self.addCleanup(sched.shutdown)
+        sched = self._scheduler(global_cap=4, per_repo_cap=4)
         gh = FakeGitHubClient()
         gh.add_issue(make_issue(1, label=LABEL_BLOCKED))
 
-        start = threading.Event()
-        release = threading.Event()
-
-        def fake_process(_gh, _spec, _issue) -> None:
-            start.set()
-            release.wait(timeout=5.0)
-
-        try:
-            with patch.object(workflow, REFRESH_BASE), \
-                 patch.object(workflow, PROCESS_ISSUE, side_effect=fake_process):
-                workflow.tick(gh, self._spec(), scheduler=sched)
-                self.assertTrue(start.wait(timeout=2.0))
-                self.assertEqual(sched.active_count(), 0)
-                self.assertEqual(sched.active_count(REPO_SLUG), 0)
-                # Active tracking still works: the blocked issue currently
-                # being processed registers via `track_active`.
-                self.assertTrue(sched.is_active(REPO_SLUG, 1))
-        finally:
-            release.set()
-        self._wait_idle(sched, REPO_SLUG)
+        process = self._processor(1)
+        with patch.object(workflow, REFRESH_BASE), patch.object(
+            workflow,
+            PROCESS_ISSUE,
+            side_effect=process,
+        ):
+            workflow.tick(gh, self._spec(), scheduler=sched)
+            self.assertTrue(process.starts[1].wait(timeout=2.0))
+            self.assertEqual(sched.active_count(), 0)
+            self.assertEqual(sched.active_count(REPO_SLUG), 0)
+            self.assertTrue(sched.is_active(REPO_SLUG, 1))
+        process.release_all()
+        self._wait_idle(sched)
 
     def test_mixed_blocked_bucket_still_counts(self) -> None:
         # The cap-exemption requires EVERY family entry to be a no-agent
@@ -1092,59 +875,33 @@ class UmbrellaCapExemptionTest(unittest.TestCase):
         # (spawns the decomposer agent) must stay cap-counted -- `blocked`
         # in the mix does not rescue the exemption. A fanout submit beyond
         # the per-repo cap is therefore skipped this tick.
-        import threading
-        from orchestrator.scheduler import IssueScheduler
-        sched = IssueScheduler(global_cap=8, per_repo_cap=1)
-        self.addCleanup(sched.shutdown)
+        sched = self._scheduler(per_repo_cap=1)
         gh = FakeGitHubClient()
         gh.add_issue(make_issue(1, label=LABEL_BLOCKED))
         gh.add_issue(make_issue(2, label=LABEL_DECOMPOSING))
         gh.add_issue(make_issue(3, label=LABEL_IMPLEMENTING))
 
-        starts: dict[int, threading.Event] = {
-            1: threading.Event(),
-            2: threading.Event(),
-            3: threading.Event(),
-        }
-        releases: dict[int, threading.Event] = {
-            1: threading.Event(),
-            2: threading.Event(),
-            3: threading.Event(),
-        }
-
-        def fake_process(_gh, _spec, issue) -> None:
-            starts[issue.number].set()
-            releases[issue.number].wait(timeout=5.0)
-
-        try:
-            with patch.object(workflow, REFRESH_BASE), \
-                 patch.object(workflow, PROCESS_ISSUE, side_effect=fake_process):
-                workflow.tick(
-                    gh, self._spec(parallel_limit=1), scheduler=sched,
-                )
-                # The family bucket (blocked + decomposing) takes the one
-                # cap-counted slot; the drain enters its first family issue.
-                deadline = time.monotonic() + 2.0
-                while time.monotonic() < deadline and not (
-                    starts[1].is_set() or starts[2].is_set()
-                ):
-                    time.sleep(0.01)
-                self.assertTrue(starts[1].is_set() or starts[2].is_set())
-                time.sleep(0.1)
-                self.assertFalse(
-                    starts[3].is_set(),
-                    "implementing #3 should be rejected by the per-repo cap "
-                    "-- a bucket containing decomposing stays cap-counted "
-                    "even with a blocked sibling",
-                )
-                self.assertEqual(sched.active_count(REPO_SLUG), 1)
-        finally:
-            for ev in releases.values():
-                ev.set()
-        self._wait_idle(sched, REPO_SLUG)
+        process = self._processor(1, 2, 3)
+        with patch.object(workflow, REFRESH_BASE), patch.object(
+            workflow,
+            PROCESS_ISSUE,
+            side_effect=process,
+        ):
+            workflow.tick(gh, self._spec(parallel_limit=1), scheduler=sched)
+            self.assertIsNotNone(_wait_for_first_started(process.starts))
+            time.sleep(0.1)
+            self.assertFalse(
+                process.starts[3].is_set(),
+                "implementing #3 should be rejected by the per-repo cap "
+                "-- a bucket containing decomposing stays cap-counted "
+                "even with a blocked sibling",
+            )
+            self.assertEqual(sched.active_count(REPO_SLUG), 1)
+        process.release_all()
+        self._wait_idle(sched)
 
 
-class BacklogDispatchFilterTest(unittest.TestCase):
+class _BacklogDispatchFixture(_SchedulerWorkflowTest):
     """A hard-skip (`backlog` / `paused`) issue carries no workflow label, so
     the per-tick dispatcher would otherwise fold it into the family bucket.
     Because such an issue is neither `blocked` nor `umbrella`, that flips the
@@ -1154,27 +911,6 @@ class BacklogDispatchFilterTest(unittest.TestCase):
     the family/fanout split so they never reserve or block a scheduler slot
     (`_process_issue` skips them anyway).
     """
-
-    def _spec(self, parallel_limit: int = 5) -> config.RepoSpec:
-        return config.RepoSpec(
-            slug=REPO_SLUG,
-            target_root=TARGET_ROOT,
-            base_branch=TEST_BASE_BRANCH,
-            parallel_limit=parallel_limit,
-        )
-
-    def _wait_idle(self, sched, repo_slug: str, deadline_s: float = 5.0) -> None:
-        import threading as _threading
-        deadline = _threading.Event()
-        timer = _threading.Timer(deadline_s, deadline.set)
-        timer.daemon = True
-        timer.start()
-        try:
-            while sched.active_count(repo_slug) > 0 and not deadline.is_set():
-                pass
-        finally:
-            timer.cancel()
-        self.assertEqual(sched.active_count(repo_slug), 0)
 
     def _parked_issue(self, number: int, label: str = BACKLOG_LABEL):
         issue = make_issue(number)
@@ -1187,44 +923,33 @@ class BacklogDispatchFilterTest(unittest.TestCase):
         # cap-counted family bucket that grabs the only slot, so the
         # implementer is `per_repo_cap`-skipped every tick. Filtered at
         # dispatch, the fanout runs and the parked issue is never processed.
-        import threading
-        from orchestrator.scheduler import IssueScheduler
-        sched = IssueScheduler(global_cap=8, per_repo_cap=1)
-        self.addCleanup(sched.shutdown)
+        sched = self._scheduler(per_repo_cap=1)
         gh = FakeGitHubClient()
         gh.add_issue(make_issue(1, label=LABEL_IMPLEMENTING))
         gh.add_issue(self._parked_issue(2, parked_label))
 
-        start = threading.Event()
-        release = threading.Event()
-        processed: list[int] = []
-        lock = threading.Lock()
-
-        def fake_process(_gh, _spec, issue) -> None:
-            with lock:
-                processed.append(issue.number)
-            if issue.number == 1:
-                start.set()
-                release.wait(timeout=5.0)
-
-        try:
-            with patch.object(workflow, REFRESH_BASE), \
-                 patch.object(workflow, PROCESS_ISSUE, side_effect=fake_process):
-                workflow.tick(gh, self._spec(parallel_limit=1), scheduler=sched)
-                self.assertTrue(
-                    start.wait(timeout=2.0),
-                    f"implementing #1 was starved -- the {parked_label} issue "
-                    "must not occupy the only per-repo slot",
-                )
-        finally:
-            release.set()
-        self._wait_idle(sched, REPO_SLUG)
-        with lock:
-            self.assertNotIn(
-                2, processed,
-                f"{parked_label} #2 must be filtered at dispatch, never processed",
+        process = self._processor(1)
+        with patch.object(workflow, REFRESH_BASE), patch.object(
+            workflow,
+            PROCESS_ISSUE,
+            side_effect=process,
+        ):
+            workflow.tick(gh, self._spec(parallel_limit=1), scheduler=sched)
+            self.assertTrue(
+                process.starts[1].wait(timeout=2.0),
+                f"implementing #1 was starved -- the {parked_label} issue "
+                "must not occupy the only per-repo slot",
             )
+        process.release_all()
+        self._wait_idle(sched)
+        self.assertNotIn(
+            2,
+            process.processed_snapshot(),
+            f"{parked_label} #2 must be filtered at dispatch, never processed",
+        )
 
+
+class BacklogDispatchFilterTest(_BacklogDispatchFixture):
     def test_backlog_only_does_not_starve_fanout(self) -> None:
         self._assert_parked_does_not_starve_fanout(BACKLOG_LABEL)
 
@@ -1238,59 +963,38 @@ class BacklogDispatchFilterTest(unittest.TestCase):
         # only slot and the `implementing` fanout never ran. With the backlog
         # issue filtered out, the bucket is `blocked`-only -> cap-exempt, so
         # BOTH the blocked parent and the fanout implementer run this tick.
-        import threading
-        from orchestrator.scheduler import IssueScheduler
-        sched = IssueScheduler(global_cap=8, per_repo_cap=1)
-        self.addCleanup(sched.shutdown)
+        sched = self._scheduler(per_repo_cap=1)
         gh = FakeGitHubClient()
         gh.add_issue(make_issue(1, label=LABEL_IMPLEMENTING))
         gh.add_issue(make_issue(2, label=LABEL_BLOCKED))
         gh.add_issue(self._parked_issue(3, BACKLOG_LABEL))
 
-        starts: dict[int, threading.Event] = {
-            1: threading.Event(),
-            2: threading.Event(),
-        }
-        releases: dict[int, threading.Event] = {
-            1: threading.Event(),
-            2: threading.Event(),
-        }
-        processed: list[int] = []
-        lock = threading.Lock()
-
-        def fake_process(_gh, _spec, issue) -> None:
-            with lock:
-                processed.append(issue.number)
-            ev = starts.get(issue.number)
-            if ev is not None:
-                ev.set()
-                releases[issue.number].wait(timeout=5.0)
-
-        try:
-            with patch.object(workflow, REFRESH_BASE), \
-                 patch.object(workflow, PROCESS_ISSUE, side_effect=fake_process):
-                workflow.tick(gh, self._spec(parallel_limit=1), scheduler=sched)
-                self.assertTrue(
-                    starts[1].wait(timeout=2.0),
-                    FANOUT_START_TIMEOUT_MESSAGE,
-                )
-                self.assertTrue(
-                    starts[2].wait(timeout=2.0),
-                    "blocked #2 did not start -- the bucket must stay "
-                    "cap-exempt once the backlog issue is filtered out",
-                )
-        finally:
-            for ev in releases.values():
-                ev.set()
-        self._wait_idle(sched, REPO_SLUG)
-        with lock:
-            self.assertNotIn(
-                3, processed,
-                "backlog #3 must be filtered at dispatch, never processed",
+        process = self._processor(1, 2)
+        with patch.object(workflow, REFRESH_BASE), patch.object(
+            workflow,
+            PROCESS_ISSUE,
+            side_effect=process,
+        ):
+            workflow.tick(gh, self._spec(parallel_limit=1), scheduler=sched)
+            self.assertTrue(
+                process.starts[1].wait(timeout=2.0),
+                FANOUT_START_TIMEOUT_MESSAGE,
             )
+            self.assertTrue(
+                process.starts[2].wait(timeout=2.0),
+                "blocked #2 did not start -- the bucket must stay "
+                "cap-exempt once the backlog issue is filtered out",
+            )
+        process.release_all()
+        self._wait_idle(sched)
+        self.assertNotIn(
+            3,
+            process.processed_snapshot(),
+            "backlog #3 must be filtered at dispatch, never processed",
+        )
 
 
-class ClosedFanoutCapExemptionTest(unittest.TestCase):
+class ClosedFanoutCapExemptionTest(_SchedulerWorkflowTest):
     """A CLOSED fan-out issue (a merged-PR or closed-question issue still
     carrying its sweep label) only runs a terminal finalization (flip to
     `done` / `rejected` + branch cleanup) with no agent spawn, so the
@@ -1300,137 +1004,83 @@ class ClosedFanoutCapExemptionTest(unittest.TestCase):
     labeled for many ticks behind a sibling validating/documenting agent.
     """
 
-    def _spec(self, parallel_limit: int = 1) -> config.RepoSpec:
-        return config.RepoSpec(
-            slug=REPO_SLUG,
-            target_root=TARGET_ROOT,
-            base_branch=TEST_BASE_BRANCH,
-            parallel_limit=parallel_limit,
-        )
-
-    def _wait_idle(self, sched, repo_slug: str, deadline_s: float = 5.0) -> None:
-        import threading as _threading
-        deadline = _threading.Event()
-        timer = _threading.Timer(deadline_s, deadline.set)
-        timer.daemon = True
-        timer.start()
-        try:
-            while sched.active_count(repo_slug) > 0 and not deadline.is_set():
-                pass
-        finally:
-            timer.cancel()
-        self.assertEqual(sched.active_count(repo_slug), 0)
-
     def test_closed_fanout_runs_when_cap_saturated(self) -> None:
         # Per-repo cap is 1 and an open `validating` fanout issue holds the
         # slot. A CLOSED `in_review` issue on the same repo must still run
         # this tick: it is submitted cap-exempt so its terminal finalize
         # is not starved by the active reviewer.
-        import threading
-        from orchestrator.scheduler import IssueScheduler
-        sched = IssueScheduler(global_cap=8, per_repo_cap=1)
-        self.addCleanup(sched.shutdown)
+        sched = self._scheduler(per_repo_cap=1)
         gh = FakeGitHubClient()
         gh.add_issue(make_issue(1, label=LABEL_VALIDATING))
         closed = make_issue(2, label=LABEL_IN_REVIEW)
         closed.closed = True
         gh.add_issue(closed)
 
-        starts: dict[int, threading.Event] = {
-            1: threading.Event(), 2: threading.Event(),
-        }
-        releases: dict[int, threading.Event] = {
-            1: threading.Event(), 2: threading.Event(),
-        }
-
-        def fake_process(_gh, _spec, issue) -> None:
-            starts[issue.number].set()
-            releases[issue.number].wait(timeout=5.0)
-
-        try:
-            with patch.object(workflow, REFRESH_BASE), \
-                 patch.object(workflow, PROCESS_ISSUE, side_effect=fake_process):
-                workflow.tick(gh, self._spec(parallel_limit=1), scheduler=sched)
-                self.assertTrue(
-                    starts[1].wait(timeout=2.0),
-                    "open validating #1 did not start",
-                )
-                self.assertTrue(
-                    starts[2].wait(timeout=2.0),
-                    "closed in_review #2 was starved by the per-repo cap -- "
-                    "a terminal finalization must run cap-exempt",
-                )
-        finally:
-            for ev in releases.values():
-                ev.set()
-        self._wait_idle(sched, REPO_SLUG)
+        process = self._processor(1, 2)
+        with patch.object(workflow, REFRESH_BASE), patch.object(
+            workflow,
+            PROCESS_ISSUE,
+            side_effect=process,
+        ):
+            workflow.tick(gh, self._spec(parallel_limit=1), scheduler=sched)
+            self.assertTrue(
+                process.starts[1].wait(timeout=2.0),
+                "open validating #1 did not start",
+            )
+            self.assertTrue(
+                process.starts[2].wait(timeout=2.0),
+                "closed in_review #2 was starved by the per-repo cap -- "
+                "a terminal finalization must run cap-exempt",
+            )
+        process.release_all()
+        self._wait_idle(sched)
 
     def test_closed_fanout_does_not_inflate_counters(self) -> None:
         # While a closed fan-out finalize is in flight, the scheduler's
         # cap counters stay at zero (its worker lives in the cap-exempt
         # tracked set), so a concurrent open fan-out submit is not skipped.
-        import threading
-        from orchestrator.scheduler import IssueScheduler
-        sched = IssueScheduler(global_cap=4, per_repo_cap=4)
-        self.addCleanup(sched.shutdown)
+        sched = self._scheduler(global_cap=4, per_repo_cap=4)
         gh = FakeGitHubClient()
         closed = make_issue(1, label=LABEL_IN_REVIEW)
         closed.closed = True
         gh.add_issue(closed)
 
-        start = threading.Event()
-        release = threading.Event()
-
-        def fake_process(_gh, _spec, _issue) -> None:
-            start.set()
-            release.wait(timeout=5.0)
-
-        try:
-            with patch.object(workflow, REFRESH_BASE), \
-                 patch.object(workflow, PROCESS_ISSUE, side_effect=fake_process):
-                workflow.tick(gh, self._spec(parallel_limit=4), scheduler=sched)
-                self.assertTrue(start.wait(timeout=2.0))
-                self.assertEqual(sched.active_count(), 0)
-                self.assertEqual(sched.active_count(REPO_SLUG), 0)
-                # Active tracking still works for the in-flight finalize.
-                self.assertTrue(sched.is_active(REPO_SLUG, 1))
-        finally:
-            release.set()
-        self._wait_idle(sched, REPO_SLUG)
+        process = self._processor(1)
+        with patch.object(workflow, REFRESH_BASE), patch.object(
+            workflow,
+            PROCESS_ISSUE,
+            side_effect=process,
+        ):
+            workflow.tick(gh, self._spec(parallel_limit=4), scheduler=sched)
+            self.assertTrue(process.starts[1].wait(timeout=2.0))
+            self.assertEqual(sched.active_count(), 0)
+            self.assertEqual(sched.active_count(REPO_SLUG), 0)
+            self.assertTrue(sched.is_active(REPO_SLUG, 1))
+        process.release_all()
+        self._wait_idle(sched)
 
     def test_open_fanout_is_not_cap_exempt(self) -> None:
         # The exemption is closed-only: an OPEN fan-out issue beyond the
         # per-repo cap is still skipped this tick (no cap-exempt smuggling).
-        import threading
-        from orchestrator.scheduler import IssueScheduler
-        sched = IssueScheduler(global_cap=8, per_repo_cap=1)
-        self.addCleanup(sched.shutdown)
+        sched = self._scheduler(per_repo_cap=1)
         gh = FakeGitHubClient()
         gh.add_issue(make_issue(1, label=LABEL_VALIDATING))
         gh.add_issue(make_issue(2, label=LABEL_IN_REVIEW))  # OPEN -> cap-counted
 
-        starts: dict[int, threading.Event] = {
-            1: threading.Event(), 2: threading.Event(),
-        }
-        release = threading.Event()
-
-        def fake_process(_gh, _spec, issue) -> None:
-            starts[issue.number].set()
-            release.wait(timeout=5.0)
-
-        try:
-            with patch.object(workflow, REFRESH_BASE), \
-                 patch.object(workflow, PROCESS_ISSUE, side_effect=fake_process):
-                workflow.tick(gh, self._spec(parallel_limit=1), scheduler=sched)
-                self.assertTrue(starts[1].wait(timeout=2.0))
-                # #2 is open, so the per-repo cap (1, held by #1) skips it.
-                self.assertFalse(
-                    starts[2].wait(timeout=1.0),
-                    "open in_review #2 should be cap-skipped, not exempt",
-                )
-        finally:
-            release.set()
-        self._wait_idle(sched, REPO_SLUG)
+        process = self._processor(1, 2)
+        with patch.object(workflow, REFRESH_BASE), patch.object(
+            workflow,
+            PROCESS_ISSUE,
+            side_effect=process,
+        ):
+            workflow.tick(gh, self._spec(parallel_limit=1), scheduler=sched)
+            self.assertTrue(process.starts[1].wait(timeout=2.0))
+            self.assertFalse(
+                process.starts[2].wait(timeout=1.0),
+                "open in_review #2 should be cap-skipped, not exempt",
+            )
+        process.release_all()
+        self._wait_idle(sched)
 
 
 class IssueIsClosedHelperTest(unittest.TestCase):
@@ -1444,12 +1094,11 @@ class IssueIsClosedHelperTest(unittest.TestCase):
         self.assertTrue(workflow._issue_is_closed(issue))
 
     def test_detects_pygithub_state_string(self) -> None:
-        from types import SimpleNamespace
         self.assertTrue(
-            workflow._issue_is_closed(SimpleNamespace(state=STATE_CLOSED)),
+            workflow._issue_is_closed(_PyGithubIssue(STATE_CLOSED)),
         )
         self.assertFalse(
-            workflow._issue_is_closed(SimpleNamespace(state=STATE_OPEN)),
+            workflow._issue_is_closed(_PyGithubIssue(STATE_OPEN)),
         )
 
 
