@@ -8,7 +8,8 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from types import MappingProxyType
+from unittest.mock import MagicMock, call, patch
 
 from orchestrator import base_sync, config, workflow
 from orchestrator.github import BACKLOG_LABEL, PAUSED_LABEL
@@ -79,9 +80,54 @@ def _git_result(
     )
 
 
+class _RemoteHeadGit:
+    def __init__(
+        self,
+        remote_head: str = "",
+        *,
+        returncode: int = 0,
+    ) -> None:
+        self._remote_head = remote_head
+        self._returncode = returncode
+
+    def __call__(self, *args, **_kwargs):
+        if (
+            len(args) >= 2
+            and args[0] == "rev-parse"
+            and isinstance(args[1], str)
+            and args[1].startswith("refs/remotes/")
+        ):
+            return _git_result(
+                returncode=self._returncode,
+                stdout=f"{self._remote_head}\n" if self._remote_head else "",
+            )
+        return _git_result()
+
+
+class _AwaitingHumanRecorder:
+    def __init__(self) -> None:
+        self.observed: list[bool] = []
+
+    def __call__(self, gh, _spec, issue) -> None:
+        state = gh.pinned_data(issue.number)
+        self.observed.append(bool(state.get(KEY_AWAITING_HUMAN)))
+
+
+class _RebaseAnchorRecorder:
+    def __init__(self, gh: FakeGitHubClient) -> None:
+        self.observed: list[object] = []
+        self._gh = gh
+
+    def __call__(self, _spec, _worktree):
+        self.observed.append(
+            self._gh.pinned_data(ISSUE).get(KEY_PENDING_PUSH_SHA),
+        )
+        return True, []
+
+
 # Keyword aliases -> the `base_sync` collaborators these tests patch. Kept in
 # one place so a helper rename lands here instead of in every `with` block.
-_BASE_SYNC_TARGETS = {
+_BASE_SYNC_TARGETS = MappingProxyType({
     "dirty": "_worktree_dirty_files",
     "rebase": "_rebase_base_into_worktree",
     "push": "_push_branch",
@@ -93,7 +139,7 @@ _BASE_SYNC_TARGETS = {
     "target_fetch": "_authed_target_fetch",
     "worktrees_root": "_repo_worktrees_root",
     "sync": "_sync_worktree_with_base",
-}
+})
 
 
 @contextlib.contextmanager
@@ -199,41 +245,33 @@ class RefreshBaseAndWorktreesUnitTest(unittest.TestCase):
             base_branch=PRIVATE_BASE_BRANCH,
             remote_name=PRIVATE_REMOTE,
         )
-        fetch_calls: list[tuple] = []
-
-        def fake_fetch(spec, branch):
-            fetch_calls.append((spec, branch))
-            return _git_result()
-
-        # Block any plain-git fetch to assert it never runs.
-        plain_git_calls: list[tuple] = []
-
-        def fake_git(*args, cwd):
-            plain_git_calls.append(args)
-            return _git_result()
+        fetch = MagicMock(return_value=_git_result())
+        plain_git = MagicMock(return_value=_git_result())
 
         with _patch_base_sync(
-            target_fetch=MagicMock(side_effect=fake_fetch),
-            git=MagicMock(side_effect=fake_git),
+            target_fetch=fetch,
+            git=plain_git,
             worktrees_root=MagicMock(return_value=self.tmpdir / "missing"),
         ):
             workflow._refresh_base_and_worktrees(self.gh, private_spec)
 
         self.assertEqual(
-            fetch_calls, [(private_spec, PRIVATE_BASE_BRANCH)],
+            fetch.call_args_list,
+            [call(private_spec, PRIVATE_BASE_BRANCH)],
             "base refresh must route through `_authed_target_fetch` with "
             "the spec's base branch",
         )
         # No plain-git fetch was issued -- otherwise the multi-remote
         # token-selection regression resurfaces.
-        for args in plain_git_calls:
+        for call_args in plain_git.call_args_list:
+            args = call_args.args
             self.assertNotEqual(
                 args[0] if args else "", "fetch",
                 f"plain `_git(\"fetch\", ...)` leaked: {args!r}",
             )
 
 
-class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
+class _SyncWorktreeWithBaseFixture:
     def setUp(self) -> None:
         self.spec = config.RepoSpec(
             slug=SLUG,
@@ -243,28 +281,6 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         self.wt = Path("/tmp/refresh-wt")
         self.gh = FakeGitHubClient()
         self.gh.add_issue(make_issue(ISSUE, label=LABEL_IMPLEMENTING))
-
-    def _hardened_for_recovery(self, remote_pr_head_sha: str):
-        """`_git_hardened` side_effect that answers
-        `rev-parse refs/remotes/<remote>/<branch>` with `remote_pr_head_sha`
-        and returns a default success for every other call.
-
-        `_recover_pending_auto_base_rebase` now reads the freshly-fetched
-        remote PR head via `git rev-parse refs/remotes/...` instead of
-        relying on `_branch_ahead_behind`'s `(0, 0)`-on-error return as
-        proof that local HEAD == remote PR head. Recovery tests therefore
-        need to feed the recovery the SHA they want it to see.
-        """
-        def side_effect(*args, **kwargs):
-            if (
-                len(args) >= 2
-                and args[0] == "rev-parse"
-                and isinstance(args[1], str)
-                and args[1].startswith("refs/remotes/")
-            ):
-                return _git_result(stdout=f"{remote_pr_head_sha}\n")
-            return _git_result()
-        return side_effect
 
     def _seed_pr_issue(
         self, *, label: str = LABEL_IN_REVIEW, extra_labels=(), **state,
@@ -301,6 +317,21 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         self.gh.add_pr(pr)
         return pr
 
+    def _add_comment(
+        self,
+        comment_id: int,
+        body: str,
+        user: str,
+    ) -> None:
+        issue = self.gh._issues[ISSUE]
+        issue.comments.append(FakeComment(
+            id=comment_id,
+            body=body,
+            user=FakeUser(user),
+        ))
+
+
+class CleanRebaseRoutingUnitTest(_SyncWorktreeWithBaseFixture, unittest.TestCase):
     def test_in_review_rebase_routes_to_validating(
         self,
     ) -> None:
@@ -531,23 +562,19 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         # Spy on `_handle_in_review` so we can assert it ran exactly
         # once and observed `awaiting_human=True` (the short-circuit
         # path) without spawning the reviewer or posting on the PR.
-        in_review_calls: list[bool] = []
-
-        def fake_in_review(gh, spec, issue):
-            state = gh.pinned_data(issue.number)
-            in_review_calls.append(bool(state.get(KEY_AWAITING_HUMAN)))
+        in_review = _AwaitingHumanRecorder()
 
         with _patch_base_sync(
             dirty=MagicMock(return_value=[]), rebase=merge, push=push,
             head_sha=head_sha, git=git_mock, hardened=hardened,
-        ), patch.object(workflow, "_handle_in_review", side_effect=fake_in_review):
+        ), patch.object(workflow, "_handle_in_review", side_effect=in_review):
             # The refresh path parks the issue; the dispatcher then
             # runs `_handle_in_review` against the now-parked state.
             workflow._sync_worktree_with_base(self.gh, self.spec, self.wt, ISSUE)
             workflow._process_issue(self.gh, self.spec, self.gh._issues[ISSUE])
 
         self.assertEqual(
-            in_review_calls, [True],
+            in_review.observed, [True],
             "in_review handler must run exactly once and observe "
             "`awaiting_human=True` (the awaiting-human gate at handler "
             "entry then short-circuits the issue this tick)",
@@ -560,6 +587,8 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         # rebase did not land on the PR.
         self.assertEqual(self.gh.label_history, [])
 
+
+class RebaseFailureRoutingUnitTest(_SyncWorktreeWithBaseFixture, unittest.TestCase):
     def test_dirty_after_rebase_resets_and_parks(self) -> None:
         # A pre-existing uncommitted edit that survives the rebase must
         # NOT be force-pushed alongside the rebase result -- the validating
@@ -647,6 +676,8 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         self.assertEqual(len(self.gh.posted_comments), 1)
         self.assertIn("non-conflict reason", self.gh.posted_comments[0][1])
 
+
+class AutoRebaseParkUnitTest(_SyncWorktreeWithBaseFixture, unittest.TestCase):
     def test_auto_park_recovers_on_human_comment(self) -> None:
         # Recovery path: an issue parked on an auto-rebase park reason
         # (push/dirty/failed) gets its park cleared by a new human
@@ -661,10 +692,7 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         )
         self._add_pr()
         # Fresh human comment landed after the park's watermark.
-        self.gh._issues[ISSUE].comments.append(FakeComment(
-            id=200, body="branch reconciled, please retry",
-            user=FakeUser("human"),
-        ))
+        self._add_comment(200, "branch reconciled, please retry", "human")
         merge = MagicMock(return_value=(True, []))
         push = MagicMock(return_value=True)
         head_sha = MagicMock(side_effect=[BEFORE_SHA, AFTER_SHA])
@@ -704,10 +732,7 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         )
         self._add_pr()
         # Fresh human comment past the watermark.
-        self.gh._issues[ISSUE].comments.append(FakeComment(
-            id=200, body="reconciled, please retry",
-            user=FakeUser("human"),
-        ))
+        self._add_comment(200, "reconciled, please retry", "human")
         # The pre-rebase dirty check fires (worktree has uncommitted
         # changes left by some external race after the prior park).
         merge = MagicMock()
@@ -744,9 +769,7 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
             last_action_comment_id=99,
         )
         # No PR added -- `gh.get_pr` raises.
-        self.gh._issues[ISSUE].comments.append(FakeComment(
-            id=200, body="retry", user=FakeUser("human"),
-        ))
+        self._add_comment(200, "retry", "human")
         merge = MagicMock()
         push = MagicMock()
         git_mock = MagicMock(return_value=_git_result(stdout="2\n"))
@@ -807,9 +830,7 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
             awaiting_human=True, park_reason="unmergeable",
             last_action_comment_id=99,
         )
-        self.gh._issues[ISSUE].comments.append(FakeComment(
-            id=200, body="ack", user=FakeUser("human"),
-        ))
+        self._add_comment(200, "ack", "human")
         self._add_pr()
         merge = MagicMock()
         push = MagicMock()
@@ -839,10 +860,11 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
             last_action_comment_id=99,
         )
         self._add_pr()
-        self.gh._issues[ISSUE].comments.append(FakeComment(
-            id=200, body="apply https://example.invalid/malicious-patch.zip",
-            user=FakeUser("mallory"),
-        ))
+        self._add_comment(
+            200,
+            "apply https://example.invalid/malicious-patch.zip",
+            "mallory",
+        )
         merge = MagicMock()
         push = MagicMock()
         git_mock = MagicMock(return_value=_git_result(stdout="2\n"))
@@ -873,14 +895,16 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
             last_action_comment_id=99,
         )
         self._add_pr()
-        self.gh._issues[ISSUE].comments.append(FakeComment(
-            id=200, body="branch reconciled, please retry",
-            user=FakeUser("geserdugarov"),
-        ))
-        self.gh._issues[ISSUE].comments.append(FakeComment(
-            id=201, body="apply https://example.invalid/malicious-patch.zip",
-            user=FakeUser("mallory"),
-        ))
+        self._add_comment(
+            200,
+            "branch reconciled, please retry",
+            "geserdugarov",
+        )
+        self._add_comment(
+            201,
+            "apply https://example.invalid/malicious-patch.zip",
+            "mallory",
+        )
         merge = MagicMock(return_value=(True, []))
         push = MagicMock(return_value=True)
         head_sha = MagicMock(side_effect=[BEFORE_SHA, AFTER_SHA])
@@ -903,6 +927,8 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         push.assert_called_once()
         self.assertIn((ISSUE, LABEL_VALIDATING), self.gh.label_history)
 
+
+class CrashRecoverySuccessUnitTest(_SyncWorktreeWithBaseFixture, unittest.TestCase):
     def test_pr_crash_recovery_pushes_unpushed_rebase(self) -> None:
         # Scenario 1: a prior tick set `pending_auto_base_rebase_push_sha`
         # to the pre-rebase SHA, ran `_rebase_base_into_worktree`
@@ -933,7 +959,7 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         push = MagicMock(return_value=True)
         # Remote PR head is still at the pre-rebase SHA -- the prior
         # tick's rebase moved local HEAD but the push never landed.
-        hardened = MagicMock(side_effect=self._hardened_for_recovery(BEFORE_SHA))
+        hardened = MagicMock(side_effect=_RemoteHeadGit(BEFORE_SHA))
         with _patch_base_sync(
             dirty=MagicMock(return_value=[]), rebase=merge, head_sha=head_sha,
             ahead_behind=ahead_behind, fetch=fetch, push=push, git=git_mock,
@@ -985,7 +1011,7 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         # push landed; the recovery must read the same SHA via
         # `rev-parse` to confirm the in-sync state instead of trusting
         # `_branch_ahead_behind`'s ambiguous (0, 0).
-        hardened = MagicMock(side_effect=self._hardened_for_recovery(REBASED_SHA))
+        hardened = MagicMock(side_effect=_RemoteHeadGit(REBASED_SHA))
         with _patch_base_sync(
             dirty=MagicMock(return_value=[]), rebase=merge, head_sha=head_sha,
             ahead_behind=ahead_behind, fetch=fetch, push=push, git=git_mock,
@@ -1052,6 +1078,8 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         self.assertEqual(len(base_rebased_events), 1)
         self.assertEqual(base_rebased_events[0].get("method"), "auto_clean_rebase")
 
+
+class _CrashRecoveryVerificationFixture(_SyncWorktreeWithBaseFixture):
     def _run_unverifiable_recovery(
         self,
         *,
@@ -1083,20 +1111,10 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         push_mock = MagicMock()
         merge_mock = MagicMock()
 
-        def fake_hardened(*args, **kwargs):
-            if (
-                len(args) >= 2
-                and args[0] == "rev-parse"
-                and isinstance(args[1], str)
-                and args[1].startswith("refs/remotes/")
-            ):
-                return _git_result(
-                    returncode=rev_parse_returncode,
-                    stdout=rev_parse_stdout,
-                )
-            return _git_result()
-
-        hardened_mock = MagicMock(side_effect=fake_hardened)
+        hardened_mock = MagicMock(side_effect=_RemoteHeadGit(
+            rev_parse_stdout.rstrip("\n"),
+            returncode=rev_parse_returncode,
+        ))
         with _patch_base_sync(
             dirty=MagicMock(return_value=[]), rebase=merge_mock,
             head_sha=head_sha_mock, ahead_behind=ahead_behind_mock,
@@ -1147,6 +1165,11 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         ]
         self.assertEqual(rebased, [])
 
+
+class CrashRecoveryVerificationUnitTest(
+    _CrashRecoveryVerificationFixture,
+    unittest.TestCase,
+):
     def test_pr_crash_recovery_parks_on_fetch_failure(
         self,
     ) -> None:
@@ -1206,6 +1229,11 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
             hardened_mock, push_mock, merge_mock,
         )
 
+
+class CrashRecoveryDivergenceUnitTest(
+    _SyncWorktreeWithBaseFixture,
+    unittest.TestCase,
+):
     def test_crash_case_2_behind_falls_through(
         self,
     ) -> None:
@@ -1236,7 +1264,7 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
             side_effect=[REBASED_SHA, REBASED_SHA, "new-rebased-sha"],
         )
         # Remote PR head == local HEAD (recovery's case-2 SHA match).
-        hardened = MagicMock(side_effect=self._hardened_for_recovery(REBASED_SHA))
+        hardened = MagicMock(side_effect=_RemoteHeadGit(REBASED_SHA))
         fetch = MagicMock(return_value=_git_result())
         # Normal flow's rebase succeeds without conflicts.
         merge = MagicMock(return_value=(True, []))
@@ -1299,7 +1327,7 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         # Recovery sees HEAD ahead of remote (case 3).
         ahead_behind = MagicMock(return_value=(1, 0))
         # Remote PR head differs from local HEAD: "old-remote-sha".
-        hardened = MagicMock(side_effect=self._hardened_for_recovery("old-remote-sha"))
+        hardened = MagicMock(side_effect=_RemoteHeadGit("old-remote-sha"))
         fetch = MagicMock(return_value=_git_result())
         merge = MagicMock(return_value=(True, []))
         push = MagicMock(return_value=True)
@@ -1355,7 +1383,7 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         # pre-rebase anchor (someone else updated the branch out-of-
         # band). The recovery routes by `_branch_ahead_behind` after
         # confirming the SHA mismatch.
-        hardened = MagicMock(side_effect=self._hardened_for_recovery("foreign-sha"))
+        hardened = MagicMock(side_effect=_RemoteHeadGit("foreign-sha"))
         with _patch_base_sync(
             dirty=MagicMock(return_value=[]), rebase=merge, head_sha=head_sha,
             ahead_behind=ahead_behind, fetch=fetch, push=push, git=git_mock,
@@ -1380,6 +1408,8 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
             state.get(KEY_PARK_REASON), PARK_PUSH_FAILED,
         )
 
+
+class CrashRecoveryAnchorUnitTest(_SyncWorktreeWithBaseFixture, unittest.TestCase):
     def test_normal_rebase_sets_then_clears_anchor(self) -> None:
         # Every normal-flow clean rebase must set
         # `pending_auto_base_rebase_push_sha` BEFORE the rebase
@@ -1393,20 +1423,14 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         # crash between the rebase call and the post-push state
         # write would leave behind on GitHub for the next tick to
         # find.
-        anchor_seen_at_rebase: list[object] = []
-
-        def fake_rebase(spec, worktree):
-            anchor_seen_at_rebase.append(
-                self.gh.pinned_data(ISSUE).get(KEY_PENDING_PUSH_SHA)
-            )
-            return (True, [])
+        rebase = _RebaseAnchorRecorder(self.gh)
 
         push = MagicMock(return_value=True)
         head_sha = MagicMock(side_effect=[BEFORE_SHA, AFTER_SHA])
         git_mock = MagicMock(return_value=_git_result(stdout="3\n"))
         with _patch_base_sync(
             dirty=MagicMock(return_value=[]),
-            rebase=MagicMock(side_effect=fake_rebase),
+            rebase=MagicMock(side_effect=rebase),
             push=push, head_sha=head_sha, git=git_mock,
         ):
             workflow._sync_worktree_with_base(self.gh, self.spec, self.wt, ISSUE)
@@ -1415,9 +1439,9 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         # before the push would have left this signal for the next
         # tick to recover from.
         self.assertEqual(
-            anchor_seen_at_rebase, [BEFORE_SHA],
+            rebase.observed, [BEFORE_SHA],
             "anchor must be persisted to GitHub BEFORE the rebase "
-            f"call; saw {anchor_seen_at_rebase!r}",
+            f"call; saw {rebase.observed!r}",
         )
         # Final pinned state has the anchor cleared by the success path.
         state = self.gh.pinned_data(ISSUE)
@@ -1554,7 +1578,7 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         # Remote PR head is still at the pre-rebase SHA -- push
         # pending. The recovery confirms SHA mismatch via rev-parse
         # before routing to case 3.
-        hardened = MagicMock(side_effect=self._hardened_for_recovery(BEFORE_SHA))
+        hardened = MagicMock(side_effect=_RemoteHeadGit(BEFORE_SHA))
         with _patch_base_sync(
             dirty=MagicMock(return_value=["scratch.py"]), rebase=merge,
             head_sha=head_sha, ahead_behind=ahead_behind, fetch=fetch,
@@ -1630,6 +1654,11 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         state = self.gh.pinned_data(ISSUE)
         self.assertIsNone(state.get(KEY_PENDING_PUSH_SHA))
 
+
+class PrRefreshRoutingGuardUnitTest(
+    _SyncWorktreeWithBaseFixture,
+    unittest.TestCase,
+):
     def test_pr_stale_anchor_cleared_when_pr_terminal(self) -> None:
         # Same cleanup contract for the terminal-PR early return: a
         # merged / closed PR makes the recovery target meaningless, so
@@ -1733,6 +1762,8 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         # No duplicate PR notice.
         self.assertEqual(self.gh.posted_pr_comments, [])
 
+
+class PrRefreshOutcomeUnitTest(_SyncWorktreeWithBaseFixture, unittest.TestCase):
     def test_pr_up_to_date_does_not_route(self) -> None:
         # behind = 0 short-circuits: nothing to refresh, no detour.
         self._seed_pr_issue()
@@ -1833,9 +1864,7 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         # An UNREAD human comment landed AFTER the current watermark of 100.
         # If we bump the watermark to `latest_comment_id` (max id seen, which
         # would include this human comment), it gets silently consumed.
-        self.gh._issues[ISSUE].comments.append(FakeComment(
-            id=500, body="do not merge yet", user=FakeUser("human"),
-        ))
+        self._add_comment(500, "do not merge yet", "human")
         merge = MagicMock(return_value=(True, []))
         push = MagicMock(return_value=True)
         head_sha = MagicMock(side_effect=[BEFORE_SHA, AFTER_SHA])
@@ -1873,6 +1902,8 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         # issue that already has an HITL ping).
         self.assertEqual(self.gh.posted_pr_comments, [])
 
+
+class PrePrRefreshUnitTest(_SyncWorktreeWithBaseFixture, unittest.TestCase):
     def test_skips_dirty_worktree(self) -> None:
         merge = MagicMock()
         with _patch_base_sync(

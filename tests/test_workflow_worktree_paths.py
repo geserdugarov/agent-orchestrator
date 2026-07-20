@@ -2,10 +2,36 @@
 # SPDX-License-Identifier: Apache-2.0
 from __future__ import annotations
 
+import subprocess
 import unittest
 from pathlib import Path
 
 from orchestrator import config, workflow
+from orchestrator.github import PinnedState
+
+
+def _spec(repo_slug: str) -> config.RepoSpec:
+    return config.RepoSpec(
+        slug=repo_slug,
+        target_root=Path(f"/tmp/{workflow._sanitize_slug(repo_slug)}-target"),
+        base_branch="main",
+    )
+
+
+def _branch(repo_slug: str, issue_number: int = 1) -> str:
+    return workflow._branch_name(_spec(repo_slug), issue_number)
+
+
+def _migration_spec() -> config.RepoSpec:
+    return config.RepoSpec(
+        slug="geserdugarov/agent-orchestrator",
+        target_root=Path("/tmp/x"),
+        base_branch="main",
+    )
+
+
+def _state(data=None) -> PinnedState:
+    return PinnedState(comment_id=None, data=dict(data or {}))
 
 
 class WorktreePathSlugNamespaceTest(unittest.TestCase):
@@ -16,16 +42,9 @@ class WorktreePathSlugNamespaceTest(unittest.TestCase):
     (no `/`, no leading `.`) since it becomes a directory name.
     """
 
-    def _spec(self, repo_slug: str) -> config.RepoSpec:
-        return config.RepoSpec(
-            slug=repo_slug,
-            target_root=Path(f"/tmp/{workflow._sanitize_slug(repo_slug)}-target"),
-            base_branch="main",
-        )
-
     def test_distinct_slugs_same_number_never_collide(self) -> None:
-        spec_a = self._spec("alice/repo")
-        spec_b = self._spec("bob/repo")
+        spec_a = _spec("alice/repo")
+        spec_b = _spec("bob/repo")
         path_a = workflow._worktree_path(spec_a, 7)
         path_b = workflow._worktree_path(spec_b, 7)
 
@@ -37,8 +56,8 @@ class WorktreePathSlugNamespaceTest(unittest.TestCase):
         self.assertEqual(path_b.parent.parent, config.WORKTREES_DIR)
 
     def test_decompose_path_also_namespaced_by_slug(self) -> None:
-        spec_a = self._spec("alice/repo")
-        spec_b = self._spec("bob/repo")
+        spec_a = _spec("alice/repo")
+        spec_b = _spec("bob/repo")
         self.assertNotEqual(
             workflow._decompose_worktree_path(spec_a, 7),
             workflow._decompose_worktree_path(spec_b, 7),
@@ -48,11 +67,13 @@ class WorktreePathSlugNamespaceTest(unittest.TestCase):
         # `WORKTREES_DIR/<slug>/issue-N` and `WORKTREES_DIR/<slug>/decompose-N`
         # share the per-repo subdirectory so cleanup on the parent dir
         # also reaps the decomposer scratch.
-        spec = self._spec("owner/name")
+        spec = _spec("owner/name")
         impl = workflow._worktree_path(spec, 11)
         dec = workflow._decompose_worktree_path(spec, 11)
         self.assertEqual(impl.parent, dec.parent)
 
+
+class SanitizeSlugTest(unittest.TestCase):
     def test_sanitize_slug_replaces_owner_separator(self) -> None:
         self.assertEqual(workflow._sanitize_slug("owner/name"), "owner__name")
 
@@ -165,12 +186,6 @@ class SanitizeBranchSegmentTest(unittest.TestCase):
     `git worktree add -b ...` before any PR could be created.
     """
 
-    def _branch(self, repo_slug: str, n: int = 1) -> str:
-        spec = config.RepoSpec(
-            slug=repo_slug, target_root=Path("/tmp/x"), base_branch="main",
-        )
-        return workflow._branch_name(spec, n)
-
     def test_dot_lock_suffix_is_rewritten(self) -> None:
         # `.lock` is replaced by `_lock`, then a `__h<digest>`
         # injectivity suffix is appended because the ref-only rewrite
@@ -246,6 +261,8 @@ class SanitizeBranchSegmentTest(unittest.TestCase):
             workflow._sanitize_branch_segment(repo_slug),
         )
 
+
+class BranchRefFormatTest(unittest.TestCase):
     def test_git_accepts_pathological_slug_branch(
         self,
     ) -> None:
@@ -254,7 +271,6 @@ class SanitizeBranchSegmentTest(unittest.TestCase):
         # `git check-ref-format --branch`. This is the bug the
         # filesystem-only sanitizer would smuggle through to the
         # first `git worktree add`.
-        import subprocess
         pathological = [
             "owner/foo.lock",
             "owner/foo..bar",
@@ -271,7 +287,7 @@ class SanitizeBranchSegmentTest(unittest.TestCase):
             "owner/foo_",
         ]
         for repo_slug in pathological:
-            branch = self._branch(repo_slug, 1)
+            branch = _branch(repo_slug, 1)
             r = subprocess.run(
                 ["git", "check-ref-format", "--branch", branch],
                 capture_output=True, text=True,
@@ -287,16 +303,16 @@ class SanitizeBranchSegmentTest(unittest.TestCase):
         # sanitizer, not the filesystem-only one -- regression guard
         # for the bug.
         self.assertRegex(
-            self._branch("owner/foo.lock", 7),
+            _branch("owner/foo.lock", 7),
             r"^orchestrator/owner__foo_lock__h[0-9a-f]{16}/issue-7$",
         )
         self.assertRegex(
-            self._branch("owner/foo..bar", 7),
+            _branch("owner/foo..bar", 7),
             r"^orchestrator/owner__foo_bar__h[0-9a-f]{16}/issue-7$",
         )
 
 
-class ResolveBranchNameLegacyMigrationTest(unittest.TestCase):
+class ResolveBranchNamePinnedTest(unittest.TestCase):
     """In-flight issues that were already in the orchestrator before
     branches were slug-namespaced have `state["branch"]` pinned to the
     legacy `orchestrator/issue-<n>` value and a live PR open against
@@ -309,29 +325,17 @@ class ResolveBranchNameLegacyMigrationTest(unittest.TestCase):
     not regress for new work.
     """
 
-    def _spec(self):
-        from orchestrator.github import PinnedState  # noqa: F401
-        return config.RepoSpec(
-            slug="geserdugarov/agent-orchestrator",
-            target_root=Path("/tmp/x"),
-            base_branch="main",
-        )
-
-    def _state(self, data=None):
-        from orchestrator.github import PinnedState
-        return PinnedState(comment_id=None, data=dict(data or {}))
-
     def test_pinned_legacy_branch_is_honored(self) -> None:
-        spec = self._spec()
-        state = self._state({"branch": "orchestrator/issue-7"})
+        spec = _migration_spec()
+        state = _state({"branch": "orchestrator/issue-7"})
         self.assertEqual(
             workflow._resolve_branch_name(state, spec, 7),
             "orchestrator/issue-7",
         )
 
     def test_no_pinned_uses_namespaced_default(self) -> None:
-        spec = self._spec()
-        state = self._state({})
+        spec = _migration_spec()
+        state = _state({})
         self.assertEqual(
             workflow._resolve_branch_name(state, spec, 7),
             "orchestrator/geserdugarov__agent-orchestrator/issue-7",
@@ -344,8 +348,8 @@ class ResolveBranchNameLegacyMigrationTest(unittest.TestCase):
         # the resolver at an arbitrary ref -- the `orchestrator/` prefix
         # check keeps `_cleanup_terminal_branch`'s "orchestrator-owned
         # namespace" invariant intact.
-        spec = self._spec()
-        state = self._state({"branch": "feature/foreign-branch"})
+        spec = _migration_spec()
+        state = _state({"branch": "feature/foreign-branch"})
         self.assertEqual(
             workflow._resolve_branch_name(state, spec, 7),
             "orchestrator/geserdugarov__agent-orchestrator/issue-7",
@@ -354,8 +358,8 @@ class ResolveBranchNameLegacyMigrationTest(unittest.TestCase):
     def test_pinned_namespaced_branch_round_trips(self) -> None:
         # Once the resolver computed and persisted the new form, a later
         # tick honors it unchanged.
-        spec = self._spec()
-        state = self._state({
+        spec = _migration_spec()
+        state = _state({
             "branch": "orchestrator/geserdugarov__agent-orchestrator/issue-9",
         })
         self.assertEqual(
@@ -364,15 +368,17 @@ class ResolveBranchNameLegacyMigrationTest(unittest.TestCase):
         )
 
     def test_non_string_pinned_branch_falls_back(self) -> None:
-        spec = self._spec()
+        spec = _migration_spec()
         for bad in (None, 42, ["orchestrator/issue-7"]):
-            state = self._state({"branch": bad})
+            state = _state({"branch": bad})
             self.assertEqual(
                 workflow._resolve_branch_name(state, spec, 7),
                 "orchestrator/geserdugarov__agent-orchestrator/issue-7",
                 f"bad pinned value {bad!r} did not fall back",
             )
 
+
+class ResolveBranchNamePrMigrationTest(unittest.TestCase):
     def test_unpinned_legacy_pr_uses_legacy_ref(self) -> None:
         # Pre-slug-namespacing in-flight PR: pinned state recorded
         # `pr_number` but no `branch` (the early implementations did
@@ -383,8 +389,8 @@ class ResolveBranchNameLegacyMigrationTest(unittest.TestCase):
         # the existing PR; without the fallback it would target the
         # new slug-namespaced branch, push there, open a duplicate
         # PR, and orphan the original.
-        spec = self._spec()
-        state = self._state({"pr_number": 42})
+        spec = _migration_spec()
+        state = _state({"pr_number": 42})
         self.assertEqual(
             workflow._resolve_branch_name(state, spec, 7),
             "orchestrator/issue-7",
@@ -396,8 +402,8 @@ class ResolveBranchNameLegacyMigrationTest(unittest.TestCase):
         # behavior) is still resolved via the pinned value, not via
         # the pr_number fallback -- the two cases agree on the legacy
         # form, but the pinned-value path is more specific.
-        spec = self._spec()
-        state = self._state({
+        spec = _migration_spec()
+        state = _state({
             "pr_number": 42,
             "branch": "orchestrator/issue-7",
         })
@@ -411,8 +417,8 @@ class ResolveBranchNameLegacyMigrationTest(unittest.TestCase):
         # `pr_number` and the namespaced `branch` set. The
         # pr_number-fallback must not override the pinned value, or
         # every new PR would silently route through the legacy ref.
-        spec = self._spec()
-        state = self._state({
+        spec = _migration_spec()
+        state = _state({
             "pr_number": 42,
             "branch": "orchestrator/geserdugarov__agent-orchestrator/issue-7",
         })

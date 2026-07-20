@@ -12,11 +12,11 @@ import os
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
-from typing import Optional
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from orchestrator import (
     base_sync,
@@ -25,6 +25,116 @@ from orchestrator import (
     worktree_lifecycle,
     worktrees,
 )
+
+
+def _git_result() -> MagicMock:
+    return MagicMock(returncode=0, stdout="", stderr="")
+
+
+def _has_no_new_commits(*_args, **_kwargs) -> bool:
+    return False
+
+
+def _local_fetch(spec, branch):
+    return subprocess.run(
+        ["git", "fetch", "--quiet", spec.remote_name, branch],
+        cwd=str(spec.target_root),
+        capture_output=True,
+        text=True,
+        env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+    )
+
+
+def _run_git(
+    *args: str,
+    cwd: Path,
+    env_extra: dict | None = None,
+) -> str:
+    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+    if env_extra:
+        env.update(env_extra)
+    result = subprocess.run(
+        ["git", *args],
+        cwd=str(cwd),
+        capture_output=True,
+        text=True,
+        env=env,
+        check=True,
+    )
+    return result.stdout
+
+
+def _start_and_join(threads: list[threading.Thread], *, timeout: float) -> None:
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=timeout)
+
+
+class _ConcurrencyProbe:
+    def __init__(
+        self,
+        *,
+        delay: float = 0.0,
+        barrier: threading.Barrier | None = None,
+    ) -> None:
+        self.maximum_in_flight = 0
+        self.order: list[str] = []
+        self._in_flight = 0
+        self._delay = delay
+        self._barrier = barrier
+        self._lock = threading.Lock()
+
+    def record(self, label: str) -> MagicMock:
+        with self._lock:
+            self._in_flight += 1
+            self.maximum_in_flight = max(
+                self.maximum_in_flight,
+                self._in_flight,
+            )
+            self.order.append(label)
+        try:
+            self._hold()
+        finally:
+            with self._lock:
+                self._in_flight -= 1
+        return _git_result()
+
+    def git(self, *args, cwd) -> MagicMock:
+        return self.record(f"{args[0]}({threading.get_ident()})")
+
+    def fetch(self, _spec, _branch) -> MagicMock:
+        return self.record(f"fetch({threading.get_ident()})")
+
+    def subprocess_run(self, args, **_kwargs) -> MagicMock:
+        if "fetch" in args and "--quiet" in args:
+            return self.record("fetch")
+        return _git_result()
+
+    def _hold(self) -> None:
+        if self._barrier is not None:
+            self._barrier.wait()
+        if self._delay:
+            time.sleep(self._delay)
+
+
+class _EnsureRecorder:
+    def __init__(self, spec: config.RepoSpec) -> None:
+        self.results: list[tuple[int, Path | None, BaseException | None]] = []
+        self._spec = spec
+        self._lock = threading.Lock()
+
+    def __call__(self, issue_number: int) -> None:
+        try:
+            result = (
+                issue_number,
+                worktrees._ensure_worktree(self._spec, issue_number),
+                None,
+            )
+        except BaseException as error:  # noqa: BLE001 - asserted by the test
+            result = (issue_number, None, error)
+        with self._lock:
+            self.results.append(result)
 
 
 class WorktreePlumbingSerializationTest(unittest.TestCase):
@@ -46,12 +156,14 @@ class WorktreePlumbingSerializationTest(unittest.TestCase):
         # locks across runs (a stale lock from a previous test pointing
         # at a deleted tmp dir would still satisfy the API but would
         # spuriously serialize against a different test's lookup key).
-        import threading
         worktrees._TARGET_ROOT_LOCKS.clear()
         # Sanity: the guard lock itself is recreated, not reused. Tests
         # do not need a fresh guard lock but `clear()` empties the dict
         # under the existing guard, which is fine.
-        self.assertIsInstance(worktrees._TARGET_ROOT_LOCKS_LOCK, type(threading.Lock()))
+        self.assertIsInstance(
+            worktrees._TARGET_ROOT_LOCKS_LOCK,
+            type(threading.Lock()),
+        )
 
     def test_root_lock_serializes_callers(self) -> None:
         # Drive `_ensure_worktree` against the SAME `spec.target_root`
@@ -60,94 +172,47 @@ class WorktreePlumbingSerializationTest(unittest.TestCase):
         # max-in-flight against target_root must be 1; without it, the
         # threads would interleave their git calls and trip an
         # assertion here.
-        import threading
-        from unittest.mock import MagicMock
-
         target_root = Path("/tmp/orchestrator-test-shared-target-root")
         spec = config.RepoSpec(
             slug="acme/widget", target_root=target_root, base_branch="main",
         )
-
-        in_flight = 0
-        max_in_flight = 0
-        order: list[str] = []
-        lock = threading.Lock()
-
-        def fake_git(*args, cwd) -> MagicMock:
-            # Every `_git(...)` call against this target_root counts -- a
-            # `worktree add` is just one of several plumbing operations
-            # that all share `.git/config.lock`.
-            nonlocal in_flight, max_in_flight
-            with lock:
-                in_flight += 1
-                max_in_flight = max(max_in_flight, in_flight)
-                order.append(f"{args[0]}({threading.get_ident()})")
-            # Sleep so threads piling up on the same target_root actually
-            # overlap if the lock isn't holding them.
-            time.sleep(0.02)
-            with lock:
-                in_flight -= 1
-            # Mimic `subprocess.CompletedProcess` enough for the helper:
-            # returncode=0 for everything, plus `.stderr=""` /
-            # `.stdout=""` defaults via MagicMock auto-attrs.
-            result = MagicMock()
-            result.returncode = 0
-            result.stdout = ""
-            result.stderr = ""
-            return result
-
-        def fake_authed_fetch(spec, branch):
-            # The base-branch fetch also runs under the lock; count it
-            # the same way so the serialization assertion holds.
-            nonlocal in_flight, max_in_flight
-            with lock:
-                in_flight += 1
-                max_in_flight = max(max_in_flight, in_flight)
-                order.append(f"fetch({threading.get_ident()})")
-            time.sleep(0.02)
-            with lock:
-                in_flight -= 1
-            result = MagicMock()
-            result.returncode = 0
-            result.stdout = ""
-            result.stderr = ""
-            return result
-
-        def fake_has_new_commits(*_a, **_kw) -> bool:
-            return False  # force the "(re)create" branch every time.
-
-        def call_ensure(n: int) -> None:
-            worktrees._ensure_worktree(spec, n)
+        probe = _ConcurrencyProbe(delay=0.02)
 
         with (
-            patch.object(worktree_lifecycle, "_git", side_effect=fake_git),
+            patch.object(worktree_lifecycle, "_git", side_effect=probe.git),
             patch.object(
                 worktree_lifecycle, "_authed_target_fetch",
-                side_effect=fake_authed_fetch,
+                side_effect=probe.fetch,
             ),
-            patch.object(worktree_lifecycle, "_has_new_commits", fake_has_new_commits),
+            patch.object(
+                worktree_lifecycle,
+                "_has_new_commits",
+                _has_no_new_commits,
+            ),
             patch.object(Path, "exists", lambda self: False),
             patch.object(Path, "mkdir", lambda self, **_kw: None),
         ):
             threads = [
-                threading.Thread(target=call_ensure, args=(n,))
-                for n in (1, 2, 3, 4)
+                threading.Thread(
+                    target=worktrees._ensure_worktree,
+                    args=(spec, issue_number),
+                )
+                for issue_number in (1, 2, 3, 4)
             ]
+            _start_and_join(threads, timeout=10.0)
             for thread in threads:
-                thread.start()
-            for thread in threads:
-                thread.join(timeout=10.0)
                 self.assertFalse(thread.is_alive(), "worker timed out")
 
         # Every `_git` invocation against this target_root was serialized:
         # the per-target_root lock kept max-in-flight at 1 despite four
         # concurrent callers.
         self.assertEqual(
-            max_in_flight, 1,
-            f"git plumbing was not serialized; observed order={order!r}",
+            probe.maximum_in_flight,
+            1,
+            f"git plumbing was not serialized; observed order={probe.order!r}",
         )
         # And we actually drove the workers (sanity check).
-        self.assertGreaterEqual(len(order), 4)
+        self.assertGreaterEqual(len(probe.order), 4)
 
     def test_fetch_serialized_per_root(self) -> None:
         # `_authed_fetch` updates `refs/remotes/<remote>/<branch>` in the
@@ -163,65 +228,38 @@ class WorktreePlumbingSerializationTest(unittest.TestCase):
         # `_target_root_lock`. This test patches `subprocess.run` to
         # record concurrency across the lock-protected critical
         # section and asserts max-in-flight == 1.
-        import threading
-        from unittest.mock import MagicMock
-
         target_root = Path("/tmp/orchestrator-test-authed-fetch-target-root")
         spec = config.RepoSpec(
             slug="acme/widget", target_root=target_root, base_branch="main",
         )
         wt = Path("/tmp/orchestrator-test-authed-fetch-worktree")
 
-        in_flight = 0
-        max_in_flight = 0
-        lock = threading.Lock()
-
-        # Track ONLY the `git fetch ...` call (not the pre-flight
-        # `git config --local --get-regexp ...` check, which runs
-        # outside the target_root lock on the worktree's own config).
-        def fake_subprocess_run(args, **_kw) -> MagicMock:
-            nonlocal in_flight, max_in_flight
-            result = MagicMock()
-            result.returncode = 0
-            result.stdout = ""
-            result.stderr = ""
-            if len(args) >= 2 and args[-2:] != ["fetch", "--quiet"]:
-                # The fetch invocation is `[git_prefix..., "fetch",
-                # "--quiet", auth_url, refspec]`. Match on "fetch" being
-                # present after the `git` binary + `-c` flags.
-                pass
-            if "fetch" in args and "--quiet" in args:
-                with lock:
-                    in_flight += 1
-                    max_in_flight = max(max_in_flight, in_flight)
-                time.sleep(0.02)
-                with lock:
-                    in_flight -= 1
-            return result
+        probe = _ConcurrencyProbe(delay=0.02)
 
         # `_resolve_github_token` must return non-empty so `_authed_fetch`
         # does not short-circuit before the lock.
         with patch.object(
             config, "_resolve_github_token", return_value="ghp-test",
-        ), patch.object(git_plumbing.subprocess, "run", side_effect=fake_subprocess_run):
+        ), patch.object(
+            git_plumbing.subprocess,
+            "run",
+            side_effect=probe.subprocess_run,
+        ):
             threads = [
                 threading.Thread(
-                    target=lambda i=i: worktrees._authed_fetch(
-                        spec,
-                        "+refs/heads/main:refs/remotes/origin/main",
-                        cwd=wt,
-                    ),
+                    target=worktrees._authed_fetch,
+                    args=(spec, "+refs/heads/main:refs/remotes/origin/main"),
+                    kwargs={"cwd": wt},
                 )
-                for i in range(4)
+                for _index in range(4)
             ]
+            _start_and_join(threads, timeout=10.0)
             for thread in threads:
-                thread.start()
-            for thread in threads:
-                thread.join(timeout=10.0)
                 self.assertFalse(thread.is_alive())
 
         self.assertEqual(
-            max_in_flight, 1,
+            probe.maximum_in_flight,
+            1,
             "_authed_fetch did not serialize concurrent fetches against "
             "the same target_root; the resolving_conflict handler would "
             "race on refs/remotes/<remote>/<base> lock files",
@@ -231,9 +269,6 @@ class WorktreePlumbingSerializationTest(unittest.TestCase):
         # Per-repo locks are keyed on `target_root`. Two specs pointing at
         # DIFFERENT target_roots must NOT serialize against each other --
         # otherwise the multi-repo loop would lose all parallelism.
-        import threading
-        from unittest.mock import MagicMock
-
         spec_a = config.RepoSpec(
             slug="acme/one",
             target_root=Path("/tmp/orchestrator-test-target-root-A"),
@@ -245,74 +280,39 @@ class WorktreePlumbingSerializationTest(unittest.TestCase):
             base_branch="main",
         )
 
-        in_flight = 0
-        max_in_flight = 0
-        lock = threading.Lock()
         # Block both threads inside `fake_git` simultaneously; if the
         # locks WERE shared across target_roots, one of the threads
         # would queue and the barrier would time out.
         barrier = threading.Barrier(2, timeout=5.0)
-
-        def fake_git(*args, cwd) -> MagicMock:
-            nonlocal in_flight, max_in_flight
-            with lock:
-                in_flight += 1
-                max_in_flight = max(max_in_flight, in_flight)
-            barrier.wait()
-            with lock:
-                in_flight -= 1
-            result = MagicMock()
-            result.returncode = 0
-            result.stdout = ""
-            result.stderr = ""
-            return result
-
-        def fake_authed_fetch(spec, branch) -> MagicMock:
-            # `_ensure_worktree` calls the authed fetch first; route it
-            # through the same barrier so the in-flight count is built
-            # from the fetch in each thread.
-            nonlocal in_flight, max_in_flight
-            with lock:
-                in_flight += 1
-                max_in_flight = max(max_in_flight, in_flight)
-            barrier.wait()
-            with lock:
-                in_flight -= 1
-            result = MagicMock()
-            result.returncode = 0
-            result.stdout = ""
-            result.stderr = ""
-            return result
-
-        def fake_has_new_commits(*_a, **_kw) -> bool:
-            return False
+        probe = _ConcurrencyProbe(barrier=barrier)
 
         with (
-            patch.object(worktree_lifecycle, "_git", side_effect=fake_git),
+            patch.object(worktree_lifecycle, "_git", side_effect=probe.git),
             patch.object(
                 worktree_lifecycle, "_authed_target_fetch",
-                side_effect=fake_authed_fetch,
+                side_effect=probe.fetch,
             ),
-            patch.object(worktree_lifecycle, "_has_new_commits", fake_has_new_commits),
+            patch.object(
+                worktree_lifecycle,
+                "_has_new_commits",
+                _has_no_new_commits,
+            ),
             patch.object(Path, "exists", lambda self: False),
             patch.object(Path, "mkdir", lambda self, **_kw: None),
         ):
-            t_a = threading.Thread(
-                target=lambda: worktrees._ensure_worktree(spec_a, 1)
-            )
-            t_b = threading.Thread(
-                target=lambda: worktrees._ensure_worktree(spec_b, 1)
-            )
-            t_a.start()
-            t_b.start()
-            t_a.join(timeout=10.0)
-            t_b.join(timeout=10.0)
-            self.assertFalse(t_a.is_alive())
-            self.assertFalse(t_b.is_alive())
+            threads = [
+                threading.Thread(
+                    target=worktrees._ensure_worktree,
+                    args=(spec, 1),
+                )
+                for spec in (spec_a, spec_b)
+            ]
+            _start_and_join(threads, timeout=10.0)
+            self.assertFalse(any(thread.is_alive() for thread in threads))
 
         # Both threads cleared the barrier together, so they were
         # genuinely in-flight at the same moment.
-        self.assertEqual(max_in_flight, 2)
+        self.assertEqual(probe.maximum_in_flight, 2)
 
 
 class EnsureWorktreeRealGitConcurrencyTest(unittest.TestCase):
@@ -325,16 +325,6 @@ class EnsureWorktreeRealGitConcurrencyTest(unittest.TestCase):
     worker should succeed and produce its own per-issue worktree
     deterministically.
     """
-
-    def _git(self, *args: str, cwd: Path, env_extra: dict | None = None) -> str:
-        env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
-        if env_extra:
-            env.update(env_extra)
-        result = subprocess.run(
-            ["git", *args], cwd=str(cwd),
-            capture_output=True, text=True, env=env, check=True,
-        )
-        return result.stdout
 
     def setUp(self) -> None:
         # Fresh lock dict per test so a leftover entry pointing at a
@@ -360,9 +350,9 @@ class EnsureWorktreeRealGitConcurrencyTest(unittest.TestCase):
             "GIT_COMMITTER_NAME": "Dev", "GIT_COMMITTER_EMAIL": "dev@example.com",
         }
         (self.work / "README.md").write_text("hello\n")
-        self._git("add", ".", cwd=self.work)
-        self._git("commit", "-m", "initial", cwd=self.work, env_extra=author_env)
-        self._git("push", "origin", "main", cwd=self.work)
+        _run_git("add", ".", cwd=self.work)
+        _run_git("commit", "-m", "initial", cwd=self.work, env_extra=author_env)
+        _run_git("push", "origin", "main", cwd=self.work)
 
         # Point WORKTREES_DIR at our tmp dir for the duration of the test
         # so `_repo_worktrees_root` creates worktrees here, not in the
@@ -378,18 +368,6 @@ class EnsureWorktreeRealGitConcurrencyTest(unittest.TestCase):
             remote_name="origin",
         )
 
-        # `_authed_target_fetch` dials `https://x-access-token@github.com/...`
-        # which has no answer for our local bare remote. Redirect to a
-        # plain local fetch so the test still exercises the
-        # `_ensure_worktree` worktree-add concurrency path.
-        def _local_fetch(spec, branch):
-            return subprocess.run(
-                ["git", "fetch", "--quiet", spec.remote_name, branch],
-                cwd=str(spec.target_root),
-                capture_output=True, text=True,
-                env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
-            )
-
         self._fetch_patch = patch.object(
             base_sync, "_authed_target_fetch", side_effect=_local_fetch,
         )
@@ -401,42 +379,38 @@ class EnsureWorktreeRealGitConcurrencyTest(unittest.TestCase):
         # worktree. With the lock in place all six must succeed; without
         # the lock at least one would intermittently surface
         # `error: could not lock config file .git/config: File exists`.
-        import threading
-        results: list[tuple[int, Optional[Path], Optional[BaseException]]] = []
-        results_lock = threading.Lock()
-
-        def call_ensure(n: int) -> None:
-            try:
-                wt = worktrees._ensure_worktree(self.spec, n)
-                with results_lock:
-                    results.append((n, wt, None))
-            except BaseException as e:  # noqa: BLE001 - record for assertion
-                with results_lock:
-                    results.append((n, None, e))
-
         issue_numbers = list(range(1, 7))
+        recorder = _EnsureRecorder(self.spec)
         threads = [
-            threading.Thread(target=call_ensure, args=(n,))
-            for n in issue_numbers
+            threading.Thread(target=recorder, args=(issue_number,))
+            for issue_number in issue_numbers
         ]
+        _start_and_join(threads, timeout=30.0)
         for thread in threads:
-            thread.start()
-        for thread in threads:
-            thread.join(timeout=30.0)
             self.assertFalse(
                 thread.is_alive(), "worker timed out (possible lock contention)",
             )
 
         # No worker raised; every requested worktree path exists on disk.
-        errors = [(n, e) for n, _, e in results if e is not None]
+        errors = [
+            (number, error)
+            for number, _, error in recorder.results
+            if error is not None
+        ]
         self.assertEqual(
             errors, [],
             f"concurrent _ensure_worktree raised: {errors!r}",
         )
-        self.assertEqual(sorted(n for n, _, _ in results), issue_numbers)
-        for n, wt, _ in results:
-            self.assertIsNotNone(wt)
-            self.assertTrue(wt.exists(), f"worktree {wt} missing for issue #{n}")
+        self.assertEqual(
+            sorted(number for number, _, _ in recorder.results),
+            issue_numbers,
+        )
+        for issue_number, worktree, _ in recorder.results:
+            self.assertIsNotNone(worktree)
+            self.assertTrue(
+                worktree.exists(),
+                f"worktree {worktree} missing for issue #{issue_number}",
+            )
 
 
 if __name__ == "__main__":

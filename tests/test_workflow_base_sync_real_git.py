@@ -32,22 +32,53 @@ def _branch(issue_number: int) -> str:
     return f"orchestrator/acme__widget/issue-{issue_number}"
 
 
-class RefreshBaseAndWorktreesRealGitTest(unittest.TestCase):
+def _local_fetch(spec, branch):
+    return subprocess.run(
+        ["git", "fetch", "--quiet", spec.remote_name, branch],
+        cwd=str(spec.target_root),
+        capture_output=True,
+        text=True,
+        env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+    )
+
+
+class _LocalBranchPusher:
+    def __init__(self) -> None:
+        self.branch = ""
+        self.force_with_lease = ""
+
+    def __call__(
+        self,
+        _spec,
+        worktree,
+        branch,
+        *,
+        force_with_lease=None,
+    ) -> bool:
+        self.branch = branch
+        self.force_with_lease = force_with_lease or ""
+        result = subprocess.run(
+            [
+                "git",
+                "push",
+                f"--force-with-lease=refs/heads/{branch}:{force_with_lease or ''}",
+                "origin",
+                f"HEAD:refs/heads/{branch}",
+            ],
+            cwd=str(worktree),
+            capture_output=True,
+            text=True,
+            env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+        )
+        return result.returncode == 0
+
+
+class _RefreshBaseRealGitFixture:
     """Integration coverage for `_refresh_base_and_worktrees` against a real
     bare remote + per-issue worktree. Mirrors `SquashHelperRealGitTest`'s
     setup so the helper's interaction with `git fetch` / `git rebase` /
     `git rebase --abort` is exercised end-to-end.
     """
-
-    def _git(self, *args: str, cwd: Path, env_extra: dict | None = None) -> str:
-        env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
-        if env_extra:
-            env.update(env_extra)
-        r = subprocess.run(
-            ["git", *args], cwd=str(cwd),
-            capture_output=True, text=True, env=env, check=True,
-        )
-        return r.stdout
 
     def setUp(self) -> None:
         self.tmpdir = Path(tempfile.mkdtemp(prefix="orch-refresh-real-"))
@@ -99,26 +130,21 @@ class RefreshBaseAndWorktreesRealGitTest(unittest.TestCase):
         self.gh = FakeGitHubClient()
         self.gh.add_issue(make_issue(7, label=LABEL_IMPLEMENTING))
 
-        # `_authed_target_fetch` would otherwise dial out to
-        # `https://x-access-token@github.com/acme/widget.git`, which
-        # does not exist for our local bare remote. Redirect it to a
-        # plain `git fetch <remote_name> <branch>` against the
-        # local-clone `origin` so the integration test still exercises
-        # the post-fetch merge / refresh logic end-to-end.
-        def _local_fetch(spec, branch):
-            r = subprocess.run(
-                ["git", "fetch", "--quiet", spec.remote_name, branch],
-                cwd=str(spec.target_root),
-                capture_output=True, text=True,
-                env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
-            )
-            return r
-
         self._fetch_patch = patch.object(
             base_sync, "_authed_target_fetch", side_effect=_local_fetch,
         )
         self._fetch_patch.start()
         self.addCleanup(self._fetch_patch.stop)
+
+    def _git(self, *args: str, cwd: Path, env_extra: dict | None = None) -> str:
+        env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+        if env_extra:
+            env.update(env_extra)
+        result = subprocess.run(
+            ["git", *args], cwd=str(cwd),
+            capture_output=True, text=True, env=env, check=True,
+        )
+        return result.stdout
 
     def _seed_pr_state(
         self, issue_number: int, pr_number: int = 999, *,
@@ -140,7 +166,8 @@ class RefreshBaseAndWorktreesRealGitTest(unittest.TestCase):
         will conflict with the local feature commit.
         """
         self._git("checkout", BASE_BRANCH, cwd=self.work)
-        path = self.work / ("feature.py" if conflicting else "extra.txt")
+        filename = "feature.py" if conflicting else "extra.txt"
+        path = self.work / filename
         path.write_text("base side\n")
         self._git("add", ".", cwd=self.work)
         self._git(
@@ -155,13 +182,21 @@ class RefreshBaseAndWorktreesRealGitTest(unittest.TestCase):
     def _is_clean(self) -> bool:
         return self._git("status", "--porcelain", cwd=self.wt).strip() == ""
 
+
+    def _refresh(self) -> None:
+        with patch.object(
+            workflow.config,
+            "WORKTREES_DIR",
+            self.tmpdir / "worktrees",
+        ):
+            workflow._refresh_base_and_worktrees(self.gh, self.spec)
+
+
+class RefreshPrePrRealGitTest(_RefreshBaseRealGitFixture, unittest.TestCase):
     def test_clean_advance_rebases_worktree(self) -> None:
         self._advance_base(conflicting=False)
         head_before = self._wt_head()
-        with patch.object(
-            workflow.config, "WORKTREES_DIR", self.tmpdir / "worktrees",
-        ):
-            workflow._refresh_base_and_worktrees(self.gh, self.spec)
+        self._refresh()
         head_after = self._wt_head()
         self.assertNotEqual(head_before, head_after)
         # The base file landed in the worktree's tree.
@@ -174,20 +209,14 @@ class RefreshBaseAndWorktreesRealGitTest(unittest.TestCase):
 
     def test_no_op_when_already_up_to_date(self) -> None:
         head_before = self._wt_head()
-        with patch.object(
-            workflow.config, "WORKTREES_DIR", self.tmpdir / "worktrees",
-        ):
-            workflow._refresh_base_and_worktrees(self.gh, self.spec)
+        self._refresh()
         self.assertEqual(head_before, self._wt_head())
         self.assertTrue(self._is_clean())
 
     def test_conflict_aborts_leaving_worktree_clean(self) -> None:
         self._advance_base(conflicting=True)
         head_before = self._wt_head()
-        with patch.object(
-            workflow.config, "WORKTREES_DIR", self.tmpdir / "worktrees",
-        ):
-            workflow._refresh_base_and_worktrees(self.gh, self.spec)
+        self._refresh()
         # HEAD did NOT move (rebase aborted) and worktree is clean again --
         # the conflict surfaces later via the resolving_conflict stage.
         self.assertEqual(head_before, self._wt_head())
@@ -199,15 +228,14 @@ class RefreshBaseAndWorktreesRealGitTest(unittest.TestCase):
         # agent edit. The base rebase must NOT run.
         (self.wt / "scratch.py").write_text("scratch\n")
         head_before = self._wt_head()
-        with patch.object(
-            workflow.config, "WORKTREES_DIR", self.tmpdir / "worktrees",
-        ):
-            workflow._refresh_base_and_worktrees(self.gh, self.spec)
+        self._refresh()
         self.assertEqual(head_before, self._wt_head())
         # Untracked file still present, nothing else was added.
         self.assertTrue((self.wt / "scratch.py").exists())
         self.assertFalse((self.wt / "extra.txt").exists())
 
+
+class RefreshPrRealGitTest(_RefreshBaseRealGitFixture, unittest.TestCase):
     def test_clean_base_advance_routes_to_validating(
         self,
     ) -> None:
@@ -240,22 +268,9 @@ class RefreshBaseAndWorktreesRealGitTest(unittest.TestCase):
         # bare remote we set up in setUp -- and so we can verify the
         # force-with-lease value the caller pinned. The signature mirrors
         # the production helper.
-        captured: dict[str, str] = {}
+        pusher = _LocalBranchPusher()
 
-        def fake_push(spec, worktree, branch, *, force_with_lease=None):
-            captured["branch"] = branch
-            captured["force_with_lease"] = force_with_lease or ""
-            r = subprocess.run(
-                ["git", "push",
-                 f"--force-with-lease=refs/heads/{branch}:{force_with_lease or ''}",
-                 "origin", f"HEAD:refs/heads/{branch}"],
-                cwd=str(worktree),
-                capture_output=True, text=True,
-                env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
-            )
-            return r.returncode == 0
-
-        with patch.object(base_sync, "_push_branch", side_effect=fake_push), \
+        with patch.object(base_sync, "_push_branch", side_effect=pusher), \
              patch.object(
                 workflow.config, "WORKTREES_DIR", self.tmpdir / "worktrees",
              ):
@@ -270,8 +285,8 @@ class RefreshBaseAndWorktreesRealGitTest(unittest.TestCase):
         self.assertTrue(self._is_clean())
         # The push was issued with force-with-lease pinned to the
         # pre-rebase SHA (= the remote PR head at the time).
-        self.assertEqual(captured.get("branch"), PR_BRANCH)
-        self.assertEqual(captured.get("force_with_lease"), head_before)
+        self.assertEqual(pusher.branch, PR_BRANCH)
+        self.assertEqual(pusher.force_with_lease, head_before)
         # Label flipped to `validating`, NOT `resolving_conflict`.
         self.assertIn((7, LABEL_VALIDATING), self.gh.label_history)
         self.assertNotIn((7, LABEL_RESOLVING_CONFLICT), self.gh.label_history)
