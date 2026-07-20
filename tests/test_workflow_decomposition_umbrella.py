@@ -20,37 +20,46 @@ from tests.workflow_helpers import (
 )
 
 
-class HandleUmbrellaTest(unittest.TestCase, _PatchedWorkflowMixin):
-    """Umbrella parents have no implementation of their own; the only
-    terminal path is "every child resolved -> close the umbrella as
-    `done`". The rejected/manually-closed/dep-graph-walk branches mirror
-    `_handle_blocked`."""
+def _seed_umbrella_with_children(
+    *,
+    parent_number: int,
+    child_labels: list[Optional[str]],
+    dep_graph: Optional[dict] = None,
+    **extra_state,
+) -> tuple[FakeGitHubClient, FakeIssue, list[FakeIssue]]:
+    gh = FakeGitHubClient()
+    parent = make_issue(parent_number, label="umbrella")
+    gh.add_issue(parent)
+    children = [
+        make_issue(parent_number * 10 + index + 1, label=label)
+        for index, label in enumerate(child_labels)
+    ]
+    seed = {
+        "children": [seeded_child.number for seeded_child in children],
+        "umbrella": True,
+    }
+    for child in children:
+        gh.add_issue(child)
+    if dep_graph is not None:
+        seed["dep_graph"] = dep_graph
+    seed.update(extra_state)
+    gh.seed_state(parent_number, **seed)
+    return gh, parent, children
 
-    def _seed_umbrella_with_children(
-        self,
-        *,
-        parent_number: int,
-        child_labels: list[Optional[str]],
-        dep_graph: Optional[dict] = None,
-        **extra_state,
-    ) -> tuple[FakeGitHubClient, FakeIssue, list[FakeIssue]]:
-        gh = FakeGitHubClient()
-        parent = make_issue(parent_number, label="umbrella")
-        gh.add_issue(parent)
-        children: list[FakeIssue] = []
-        for i, lbl in enumerate(child_labels):
-            child = make_issue(parent_number * 10 + i + 1, label=lbl)
-            gh.add_issue(child)
-            children.append(child)
-        seed = {
-            "children": [c.number for c in children],
-            "umbrella": True,
-        }
-        if dep_graph is not None:
-            seed["dep_graph"] = dep_graph
-        seed.update(extra_state)
-        gh.seed_state(parent_number, **seed)
-        return gh, parent, children
+
+def _run_umbrella(
+    case: _PatchedWorkflowMixin,
+    gh: FakeGitHubClient,
+    parent: FakeIssue,
+) -> None:
+    case._run(
+        lambda: workflow._handle_umbrella(gh, _TEST_SPEC, parent),
+        run_agent=_agent(),
+    )
+
+
+class HandleUmbrellaResolutionTest(unittest.TestCase, _PatchedWorkflowMixin):
+    """Umbrella parents close only after every child resolves."""
 
     def test_dispatcher_routes_umbrella_to_handler(self) -> None:
         gh = FakeGitHubClient()
@@ -63,14 +72,11 @@ class HandleUmbrellaTest(unittest.TestCase, _PatchedWorkflowMixin):
         handler.assert_called_once_with(gh, _TEST_SPEC, issue)
 
     def test_all_children_done_closes_as_done(self) -> None:
-        gh, parent, children = self._seed_umbrella_with_children(
+        gh, parent, children = _seed_umbrella_with_children(
             parent_number=61, child_labels=["done", "done"],
         )
 
-        self._run(
-            lambda: workflow._handle_umbrella(gh, _TEST_SPEC, parent),
-            run_agent=_agent(),
-        )
+        _run_umbrella(self, gh, parent)
 
         # Terminal `done` label and the issue is closed -- mirrors how
         # the merged path finalizes a regular issue.
@@ -88,16 +94,13 @@ class HandleUmbrellaTest(unittest.TestCase, _PatchedWorkflowMixin):
         # The decomposer runs accrue on the umbrella parent, so its close
         # comment carries the cumulative verdict appended to the existing
         # "all children resolved" line (one comment, not two).
-        gh, parent, children = self._seed_umbrella_with_children(
+        gh, parent, children = _seed_umbrella_with_children(
             parent_number=63, child_labels=["done", "done"],
             issue_agent_runs=2, issue_total_tokens=12000,
             issue_total_cost_usd=0.42, issue_cost_sources=["estimated"],
         )
 
-        self._run(
-            lambda: workflow._handle_umbrella(gh, _TEST_SPEC, parent),
-            run_agent=_agent(),
-        )
+        _run_umbrella(self, gh, parent)
 
         close_comments = [
             body for n, body in gh.posted_comments
@@ -114,14 +117,11 @@ class HandleUmbrellaTest(unittest.TestCase, _PatchedWorkflowMixin):
     def test_close_omits_verdict_without_counters(self) -> None:
         # An umbrella that never accrued a counted run closes with the bare
         # resolution line -- no zero receipt appended.
-        gh, parent, children = self._seed_umbrella_with_children(
+        gh, parent, children = _seed_umbrella_with_children(
             parent_number=64, child_labels=["done", "done"],
         )
 
-        self._run(
-            lambda: workflow._handle_umbrella(gh, _TEST_SPEC, parent),
-            run_agent=_agent(),
-        )
+        _run_umbrella(self, gh, parent)
 
         close_comments = [
             body for n, body in gh.posted_comments
@@ -131,14 +131,11 @@ class HandleUmbrellaTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertNotIn(":receipt:", close_comments[0])
 
     def test_some_children_in_progress_no_op(self) -> None:
-        gh, parent, children = self._seed_umbrella_with_children(
+        gh, parent, children = _seed_umbrella_with_children(
             parent_number=62, child_labels=["done", "implementing"],
         )
 
-        self._run(
-            lambda: workflow._handle_umbrella(gh, _TEST_SPEC, parent),
-            run_agent=_agent(),
-        )
+        _run_umbrella(self, gh, parent)
 
         self.assertNotIn((62, "done"), gh.label_history)
         self.assertFalse(parent.closed)
@@ -146,15 +143,15 @@ class HandleUmbrellaTest(unittest.TestCase, _PatchedWorkflowMixin):
             [body for n, body in gh.posted_comments if n == 62], [],
         )
 
+class HandleUmbrellaChildStateTest(unittest.TestCase, _PatchedWorkflowMixin):
+    """Rejected, closed, and dependency-gated children keep the parent open."""
+
     def test_rejected_child_parks_umbrella(self) -> None:
-        gh, parent, children = self._seed_umbrella_with_children(
+        gh, parent, children = _seed_umbrella_with_children(
             parent_number=63, child_labels=["done", "rejected"],
         )
 
-        self._run(
-            lambda: workflow._handle_umbrella(gh, _TEST_SPEC, parent),
-            run_agent=_agent(),
-        )
+        _run_umbrella(self, gh, parent)
 
         state = gh.pinned_data(63)
         self.assertTrue(state.get("awaiting_human"))
@@ -176,10 +173,7 @@ class HandleUmbrellaTest(unittest.TestCase, _PatchedWorkflowMixin):
         gh.add_issue(closed_child)
         gh.seed_state(64, children=[641, 642], umbrella=True)
 
-        self._run(
-            lambda: workflow._handle_umbrella(gh, _TEST_SPEC, parent),
-            run_agent=_agent(),
-        )
+        _run_umbrella(self, gh, parent)
 
         state = gh.pinned_data(64)
         self.assertTrue(state.get("awaiting_human"))
@@ -193,16 +187,13 @@ class HandleUmbrellaTest(unittest.TestCase, _PatchedWorkflowMixin):
         # A child stuck `blocked` on a dep that's now `done` should be
         # flipped to `ready` exactly as `_handle_blocked` does -- an
         # umbrella's children can still depend on each other.
-        gh, parent, children = self._seed_umbrella_with_children(
+        gh, parent, children = _seed_umbrella_with_children(
             parent_number=65,
             child_labels=["done", "blocked"],
             dep_graph={"1": [0]},
         )
 
-        self._run(
-            lambda: workflow._handle_umbrella(gh, _TEST_SPEC, parent),
-            run_agent=_agent(),
-        )
+        _run_umbrella(self, gh, parent)
 
         flipped = [
             new for issue_n, new in gh.label_history
@@ -219,17 +210,14 @@ class HandleUmbrellaTest(unittest.TestCase, _PatchedWorkflowMixin):
         # tick log so an operator can see why the umbrella is not yet
         # closing. children[0] is in-flight (not done), so children[1]
         # (depends on [0]) stays held.
-        gh, parent, children = self._seed_umbrella_with_children(
+        gh, parent, children = _seed_umbrella_with_children(
             parent_number=66,
             child_labels=["implementing", "blocked"],
             dep_graph={"1": [0]},
         )
 
         with self.assertLogs("orchestrator.workflow", level="INFO") as cm:
-            self._run(
-                lambda: workflow._handle_umbrella(gh, _TEST_SPEC, parent),
-                run_agent=_agent(),
-            )
+            _run_umbrella(self, gh, parent)
 
         self.assertTrue(
             any(
@@ -247,16 +235,13 @@ class HandleUmbrellaTest(unittest.TestCase, _PatchedWorkflowMixin):
         # When every child is either done or already running (none still
         # `blocked` on a sibling), nothing is held and the visibility log
         # stays silent -- a healthy umbrella must not spam the tick log.
-        gh, parent, _children = self._seed_umbrella_with_children(
+        gh, parent, _children = _seed_umbrella_with_children(
             parent_number=67,
             child_labels=["done", "implementing"],
         )
 
         with self.assertNoLogs("orchestrator.workflow", level="INFO"):
-            self._run(
-                lambda: workflow._handle_umbrella(gh, _TEST_SPEC, parent),
-                run_agent=_agent(),
-            )
+            _run_umbrella(self, gh, parent)
 
     def test_umbrella_with_no_recorded_children_parks(self) -> None:
         gh = FakeGitHubClient()
@@ -264,10 +249,7 @@ class HandleUmbrellaTest(unittest.TestCase, _PatchedWorkflowMixin):
         gh.add_issue(parent)
         gh.seed_state(66, umbrella=True)
 
-        self._run(
-            lambda: workflow._handle_umbrella(gh, _TEST_SPEC, parent),
-            run_agent=_agent(),
-        )
+        _run_umbrella(self, gh, parent)
 
         state = gh.pinned_data(66)
         self.assertTrue(state.get("awaiting_human"))

@@ -78,6 +78,35 @@ def _branch(issue_number: int) -> str:
     return f"orchestrator/geserdugarov__agent-orchestrator/issue-{issue_number}"
 
 
+class _DocumentingWorkflowMixin(_PatchedWorkflowMixin):
+    def _run_documenting(self, gh, issue, **run_options):
+        return self._run(
+            lambda: workflow._handle_documenting(gh, _TEST_SPEC, issue),
+            **run_options,
+        )
+
+
+class _BasicDocumentingFixture(_DocumentingWorkflowMixin):
+    def _seeded(self, **state):
+        gh = FakeGitHubClient()
+        issue = make_issue(self.ISSUE, label=DOCUMENTING)
+        gh.add_issue(issue)
+        defaults = dict(
+            pr_number=self.PR_NUMBER,
+            branch=_branch(self.ISSUE),
+            dev_agent=DEV_AGENT,
+            dev_session_id=DEV_SESSION,
+        )
+        defaults.update(state)
+        gh.seed_state(self.ISSUE, **defaults)
+        return gh, issue
+
+
+class _FreshDocumentingFixture(_BasicDocumentingFixture):
+    ISSUE = 201
+    PR_NUMBER = 21
+
+
 class HandleDocumentingMissingPrNumberTest(unittest.TestCase):
     """Without a pinned `pr_number` the handler cannot anchor on the
     dev's PR branch; park awaiting human and stay idempotent on repeat
@@ -109,30 +138,17 @@ class HandleDocumentingMissingPrNumberTest(unittest.TestCase):
         self.assertEqual(gh.write_state_calls, 0)
 
 
-class HandleDocumentingFreshRunTest(unittest.TestCase, _PatchedWorkflowMixin):
+class HandleDocumentingFreshOutcomeTest(
+    unittest.TestCase,
+    _FreshDocumentingFixture,
+):
     """A docs agent run on a PR that already has commits."""
-
-    ISSUE = 201
-    PR_NUMBER = 21
-
-    def _seeded(self, **state):
-        gh = FakeGitHubClient()
-        issue = make_issue(self.ISSUE, label=DOCUMENTING)
-        gh.add_issue(issue)
-        defaults = dict(
-            pr_number=self.PR_NUMBER,
-            branch=_branch(self.ISSUE),
-            dev_agent=DEV_AGENT,
-            dev_session_id=DEV_SESSION,
-        )
-        defaults.update(state)
-        gh.seed_state(self.ISSUE, **defaults)
-        return gh, issue
 
     def test_docs_commit_pushed_advances_to_in_review(self) -> None:
         gh, issue = self._seeded()
-        mocks = self._run(
-            lambda: workflow._handle_documenting(gh, _TEST_SPEC, issue),
+        mocks = self._run_documenting(
+            gh,
+            issue,
             run_agent=_agent(
                 session_id=DEV_SESSION,
                 last_message="docs: updated README",
@@ -158,8 +174,9 @@ class HandleDocumentingFreshRunTest(unittest.TestCase, _PatchedWorkflowMixin):
         # analytics record), so a downstream consumer can tell which
         # reviewer round the docs pass belonged to.
         gh, issue = self._seeded(review_round=2)
-        self._run(
-            lambda: workflow._handle_documenting(gh, _TEST_SPEC, issue),
+        self._run_documenting(
+            gh,
+            issue,
             run_agent=_agent(
                 session_id=DEV_SESSION,
                 last_message="docs: updated README",
@@ -189,8 +206,9 @@ class HandleDocumentingFreshRunTest(unittest.TestCase, _PatchedWorkflowMixin):
 
     def test_no_change_marker_advances_without_push(self) -> None:
         gh, issue = self._seeded()
-        mocks = self._run(
-            lambda: workflow._handle_documenting(gh, _TEST_SPEC, issue),
+        mocks = self._run_documenting(
+            gh,
+            issue,
             run_agent=_agent(
                 session_id=DEV_SESSION,
                 last_message=(
@@ -215,8 +233,9 @@ class HandleDocumentingFreshRunTest(unittest.TestCase, _PatchedWorkflowMixin):
 
     def test_no_commit_or_marker_parks_as_question(self) -> None:
         gh, issue = self._seeded()
-        mocks = self._run(
-            lambda: workflow._handle_documenting(gh, _TEST_SPEC, issue),
+        mocks = self._run_documenting(
+            gh,
+            issue,
             run_agent=_agent(
                 session_id=DEV_SESSION,
                 last_message="should I touch docs/architecture.md too?",
@@ -241,8 +260,9 @@ class HandleDocumentingFreshRunTest(unittest.TestCase, _PatchedWorkflowMixin):
         # No commits, no message -- treat as a poisoned-session silent
         # crash like the implementing/validating handlers do.
         gh, issue = self._seeded()
-        self._run(
-            lambda: workflow._handle_documenting(gh, _TEST_SPEC, issue),
+        self._run_documenting(
+            gh,
+            issue,
             run_agent=_agent(
                 session_id=DEV_SESSION, last_message="", exit_code=2,
             ),
@@ -259,8 +279,9 @@ class HandleDocumentingFreshRunTest(unittest.TestCase, _PatchedWorkflowMixin):
 
     def test_timeout_parks_with_agent_timeout(self) -> None:
         gh, issue = self._seeded()
-        mocks = self._run(
-            lambda: workflow._handle_documenting(gh, _TEST_SPEC, issue),
+        mocks = self._run_documenting(
+            gh,
+            issue,
             run_agent=_agent(session_id=DEV_SESSION, timed_out=True),
             push_branch=True,
             head_shas=[SHA_BEFORE],
@@ -275,10 +296,15 @@ class HandleDocumentingFreshRunTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertEqual(state.get(PARK_REASON), PARK_AGENT_TIMEOUT)
         self.assertIn("agent timed out", gh.posted_comments[-1][1])
 
+class HandleDocumentingFreshSafetyTest(
+    unittest.TestCase,
+    _FreshDocumentingFixture,
+):
     def test_dirty_worktree_parks_without_push(self) -> None:
         gh, issue = self._seeded()
-        mocks = self._run(
-            lambda: workflow._handle_documenting(gh, _TEST_SPEC, issue),
+        mocks = self._run_documenting(
+            gh,
+            issue,
             run_agent=_agent(
                 session_id=DEV_SESSION,
                 last_message="docs: partial",
@@ -307,8 +333,9 @@ class HandleDocumentingFreshRunTest(unittest.TestCase, _PatchedWorkflowMixin):
         # agent (and any later push) would silently drop them. The
         # dirty check must run BEFORE the verdict parse.
         gh, issue = self._seeded()
-        mocks = self._run(
-            lambda: workflow._handle_documenting(gh, _TEST_SPEC, issue),
+        mocks = self._run_documenting(
+            gh,
+            issue,
             run_agent=_agent(
                 session_id=DEV_SESSION,
                 last_message="Tweaked README in place.\nDOCS: NO_CHANGE",
@@ -335,8 +362,9 @@ class HandleDocumentingFreshRunTest(unittest.TestCase, _PatchedWorkflowMixin):
         # before `_on_question`, otherwise an "agent needs your input"
         # park would silently abandon the uncommitted edits.
         gh, issue = self._seeded()
-        mocks = self._run(
-            lambda: workflow._handle_documenting(gh, _TEST_SPEC, issue),
+        mocks = self._run_documenting(
+            gh,
+            issue,
             run_agent=_agent(
                 session_id=DEV_SESSION,
                 last_message="What about docs/state-machine.md?",
@@ -365,8 +393,9 @@ class HandleDocumentingFreshRunTest(unittest.TestCase, _PatchedWorkflowMixin):
         # `agent_silent` reason) would fire and the dirty files
         # would be invisible to the operator.
         gh, issue = self._seeded()
-        self._run(
-            lambda: workflow._handle_documenting(gh, _TEST_SPEC, issue),
+        self._run_documenting(
+            gh,
+            issue,
             run_agent=_agent(
                 session_id=DEV_SESSION, last_message="", exit_code=2,
             ),
@@ -389,8 +418,9 @@ class HandleDocumentingFreshRunTest(unittest.TestCase, _PatchedWorkflowMixin):
         # advanced the PR head. Pushing would clobber commits we
         # never saw, so refuse to spawn the agent at all.
         gh, issue = self._seeded()
-        mocks = self._run(
-            lambda: workflow._handle_documenting(gh, _TEST_SPEC, issue),
+        mocks = self._run_documenting(
+            gh,
+            issue,
             run_agent=_agent(),
             push_branch=True,
             head_shas=[],
@@ -413,8 +443,9 @@ class HandleDocumentingFreshRunTest(unittest.TestCase, _PatchedWorkflowMixin):
         # ahead/behind, and a force-push under a stale lease could
         # clobber the real remote head. Park rather than guess.
         gh, issue = self._seeded()
-        mocks = self._run(
-            lambda: workflow._handle_documenting(gh, _TEST_SPEC, issue),
+        mocks = self._run_documenting(
+            gh,
+            issue,
             run_agent=_agent(),
             push_branch=True,
             head_shas=[],
@@ -434,8 +465,9 @@ class HandleDocumentingFreshRunTest(unittest.TestCase, _PatchedWorkflowMixin):
 
     def test_push_failure_parks_with_push_failed(self) -> None:
         gh, issue = self._seeded()
-        self._run(
-            lambda: workflow._handle_documenting(gh, _TEST_SPEC, issue),
+        self._run_documenting(
+            gh,
+            issue,
             run_agent=_agent(
                 session_id=DEV_SESSION,
                 last_message="docs: README tweak",
@@ -452,31 +484,18 @@ class HandleDocumentingFreshRunTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertNotIn((self.ISSUE, VALIDATING), gh.label_history)
 
 
-class HandleDocumentingRecoveryTest(unittest.TestCase, _PatchedWorkflowMixin):
+class HandleDocumentingRecoveryTest(unittest.TestCase, _BasicDocumentingFixture):
     """Restart recovery: a previous tick committed docs but crashed
     before the push lands."""
 
     ISSUE = 301
     PR_NUMBER = 31
 
-    def _seeded(self, **state):
-        gh = FakeGitHubClient()
-        issue = make_issue(self.ISSUE, label=DOCUMENTING)
-        gh.add_issue(issue)
-        defaults = dict(
-            pr_number=self.PR_NUMBER,
-            branch=_branch(self.ISSUE),
-            dev_agent=DEV_AGENT,
-            dev_session_id=DEV_SESSION,
-        )
-        defaults.update(state)
-        gh.seed_state(self.ISSUE, **defaults)
-        return gh, issue
-
     def test_recovered_commits_push_without_spawn(self) -> None:
         gh, issue = self._seeded()
-        mocks = self._run(
-            lambda: workflow._handle_documenting(gh, _TEST_SPEC, issue),
+        mocks = self._run_documenting(
+            gh,
+            issue,
             run_agent=_agent(),
             push_branch=True,
             # _head_sha is called once to record docs_checked_sha after
@@ -500,8 +519,9 @@ class HandleDocumentingRecoveryTest(unittest.TestCase, _PatchedWorkflowMixin):
 
     def test_recovery_push_failure_parks_push_failed(self) -> None:
         gh, issue = self._seeded()
-        mocks = self._run(
-            lambda: workflow._handle_documenting(gh, _TEST_SPEC, issue),
+        mocks = self._run_documenting(
+            gh,
+            issue,
             run_agent=_agent(),
             push_branch=False,
             # The recovery branch falls through to the unified
@@ -523,8 +543,9 @@ class HandleDocumentingRecoveryTest(unittest.TestCase, _PatchedWorkflowMixin):
         # the push would publish an incomplete branch (the dirty files
         # would silently disappear from what the reviewer agent sees).
         gh, issue = self._seeded()
-        mocks = self._run(
-            lambda: workflow._handle_documenting(gh, _TEST_SPEC, issue),
+        mocks = self._run_documenting(
+            gh,
+            issue,
             run_agent=_agent(),
             push_branch=True,
             dirty_files=["docs/dirty.md"],
@@ -544,7 +565,7 @@ class HandleDocumentingRecoveryTest(unittest.TestCase, _PatchedWorkflowMixin):
 
 
 class HandleDocumentingAwaitingHumanResumeTest(
-    unittest.TestCase, _PatchedWorkflowMixin
+    unittest.TestCase, _DocumentingWorkflowMixin
 ):
     """Awaiting-human resume: a human reply re-runs the full
     documentation prompt (NOT the short human-reply followup that
@@ -573,8 +594,9 @@ class HandleDocumentingAwaitingHumanResumeTest(
             dev_session_id=DEV_SESSION,
         )
 
-        mocks = self._run(
-            lambda: workflow._handle_documenting(gh, _TEST_SPEC, issue),
+        mocks = self._run_documenting(
+            gh,
+            issue,
             run_agent=_agent(
                 session_id=DEV_SESSION,
                 last_message="docs: flag X explained",
@@ -630,8 +652,9 @@ class HandleDocumentingAwaitingHumanResumeTest(
             # `before_sha` from the PR worktree at this tick.
         )
 
-        mocks = self._run(
-            lambda: workflow._handle_documenting(gh, _TEST_SPEC, issue),
+        mocks = self._run_documenting(
+            gh,
+            issue,
             run_agent=_agent(
                 session_id=DEV_SESSION,
                 last_message="should I also update README?",
@@ -681,8 +704,9 @@ class HandleDocumentingAwaitingHumanResumeTest(
             park_reason=PARK_PUSH_FAILED,
         )
 
-        mocks = self._run(
-            lambda: workflow._handle_documenting(gh, _TEST_SPEC, issue),
+        mocks = self._run_documenting(
+            gh,
+            issue,
             run_agent=_agent(
                 session_id=DEV_SESSION,
                 last_message="No further docs needed.\nDOCS: NO_CHANGE",
@@ -729,8 +753,9 @@ class HandleDocumentingAwaitingHumanResumeTest(
             dev_session_id=DEV_SESSION,
         )
 
-        mocks = self._run(
-            lambda: workflow._handle_documenting(gh, _TEST_SPEC, issue),
+        mocks = self._run_documenting(
+            gh,
+            issue,
             run_agent=_agent(
                 session_id=DEV_SESSION,
                 last_message="Reviewed; no change.\nDOCS: NO_CHANGE",
@@ -761,8 +786,9 @@ class HandleDocumentingAwaitingHumanResumeTest(
             dev_session_id=DEV_SESSION,
         )
 
-        mocks = self._run(
-            lambda: workflow._handle_documenting(gh, _TEST_SPEC, issue),
+        mocks = self._run_documenting(
+            gh,
+            issue,
             run_agent=_agent(),
             push_branch=True,
             head_shas=[SHA_BEFORE],
@@ -807,8 +833,9 @@ class HandleDocumentingAwaitingHumanResumeTest(
             park_reason=PARK_AGENT_TIMEOUT,
         )
 
-        mocks = self._run(
-            lambda: workflow._handle_documenting(gh, _TEST_SPEC, issue),
+        mocks = self._run_documenting(
+            gh,
+            issue,
             run_agent=_agent(
                 session_id=DEV_SESSION,
                 last_message="docs: documented helpful_function",
@@ -865,8 +892,9 @@ class HandleDocumentingAwaitingHumanResumeTest(
             # successful no-change for this issue.
         )
 
-        mocks = self._run(
-            lambda: workflow._handle_documenting(gh, _TEST_SPEC, issue),
+        mocks = self._run_documenting(
+            gh,
+            issue,
             run_agent=_agent(
                 session_id=DEV_SESSION,
                 last_message="Reviewed; no change.\nDOCS: NO_CHANGE",
@@ -885,15 +913,7 @@ class HandleDocumentingAwaitingHumanResumeTest(
         self.assertEqual(state.get(DOCS_CHECKED_SHA), SHA_PR_HEAD)
 
 
-class HandleDocumentingContinueCommandTest(
-    unittest.TestCase, _PatchedWorkflowMixin
-):
-    """`/orchestrator continue` on a parked `documenting` issue is an operator
-    command, not requirements drift (issue #729, the #717 shape). A retryable
-    session-failure park reruns the docs pass without the spurious "issue body
-    changed; routing back to `validating`" notice; a park needing a real answer
-    refuses."""
-
+class _ContinueDocumentingFixture(_DocumentingWorkflowMixin):
     def _seed(self, number: int, *, park_reason, body="/orchestrator continue"):
         gh = FakeGitHubClient()
         issue = make_issue(number, label=DOCUMENTING, body="the requirements")
@@ -901,9 +921,8 @@ class HandleDocumentingContinueCommandTest(
             FakeComment(id=9000, body=body, user=FakeUser("dave"))
         )
         gh.add_issue(issue)
-        # The current content hash (a bare continue does not shift it), so
-        # drift is a no-op and cannot fire on its own -- proving the retry
-        # reruns the docs pass rather than routing back to `validating`.
+        # A bare continue does not shift the current content hash, so the
+        # retry reruns documenting without taking the drift detour.
         gh.seed_state(
             number,
             pr_number=47,
@@ -918,6 +937,16 @@ class HandleDocumentingContinueCommandTest(
         )
         return gh, issue
 
+
+class HandleDocumentingContinueCommandTest(
+    unittest.TestCase, _ContinueDocumentingFixture
+):
+    """`/orchestrator continue` on a parked `documenting` issue is an operator
+    command, not requirements drift (issue #729, the #717 shape). A retryable
+    session-failure park reruns the docs pass without the spurious "issue body
+    changed; routing back to `validating`" notice; a park needing a real answer
+    refuses."""
+
     def test_bare_continue_reruns_without_drift(self) -> None:
         # The #717 shape: parked `agent_silent` docs pass, human posts exactly
         # `/orchestrator continue`. The docs pass reruns (full documentation
@@ -925,8 +954,9 @@ class HandleDocumentingContinueCommandTest(
         # notice, and the issue is NOT rerouted to `validating`.
         gh, issue = self._seed(730, park_reason=PARK_AGENT_SILENT)
 
-        mocks = self._run(
-            lambda: workflow._handle_documenting(gh, _TEST_SPEC, issue),
+        mocks = self._run_documenting(
+            gh,
+            issue,
             run_agent=_agent(
                 session_id=DEV_SESSION,
                 last_message="docs: documented the flag",
@@ -959,8 +989,9 @@ class HandleDocumentingContinueCommandTest(
         # -- no docs rerun, no reroute.
         gh, issue = self._seed(731, park_reason=None)
 
-        mocks = self._run(
-            lambda: workflow._handle_documenting(gh, _TEST_SPEC, issue),
+        mocks = self._run_documenting(
+            gh,
+            issue,
             run_agent=_agent(),
             branch_ahead_behind=(0, 0),
         )
@@ -976,7 +1007,7 @@ class HandleDocumentingContinueCommandTest(
 
 
 class HandleDocumentingInterruptedTest(
-    unittest.TestCase, _PatchedWorkflowMixin
+    unittest.TestCase, _DocumentingWorkflowMixin
 ):
     """A docs run the shutdown sweep killed mid-flight
     (`AgentResult.interrupted`) must be ignored: the handler returns WITHOUT
@@ -1001,8 +1032,9 @@ class HandleDocumentingInterruptedTest(
         )
         before_writes = gh.write_state_calls
 
-        mocks = self._run(
-            lambda: workflow._handle_documenting(gh, _TEST_SPEC, issue),
+        mocks = self._run_documenting(
+            gh,
+            issue,
             run_agent=_agent(session_id=DEV_SESSION, interrupted=True),
             # Only `before_sha` is read -- the guard fires before the
             # post-spawn `after_sha` probe.
@@ -1046,8 +1078,9 @@ class HandleDocumentingInterruptedTest(
         )
         before_writes = gh.write_state_calls
 
-        mocks = self._run(
-            lambda: workflow._handle_documenting(gh, _TEST_SPEC, issue),
+        mocks = self._run_documenting(
+            gh,
+            issue,
             run_agent=_agent(session_id=DEV_SESSION, interrupted=True),
             head_shas=[SHA_BEFORE],
             branch_ahead_behind=(0, 0),
@@ -1065,14 +1098,7 @@ class HandleDocumentingInterruptedTest(
         self.assertNotIn(DOCS_VERDICT, state)
 
 
-class HandleDocumentingParkedSilenceTest(
-    unittest.TestCase, _PatchedWorkflowMixin
-):
-    """Already-parked issues must not re-post the park comment on
-    every poll. The fetch + behind branches in particular would
-    otherwise spam the issue with `fetch_failed` / `diverged_branch`
-    notices each tick while the operator drafts a reply."""
-
+class _ParkedDocumentingFixture(_DocumentingWorkflowMixin):
     ISSUE = 601
     PR_NUMBER = 61
 
@@ -1087,25 +1113,33 @@ class HandleDocumentingParkedSilenceTest(
             dev_session_id=DEV_SESSION,
             awaiting_human=True,
             last_action_comment_id=6000,
-            # Seed the drift baseline so the drift detector is a
-            # no-op for this test class -- otherwise its
-            # first-encounter persistence would itself trip a
-            # state write and confuse the "silent on re-tick"
-            # assertions below.
+            # The seeded baseline keeps first-encounter drift persistence
+            # out of tests that assert an already-parked tick writes nothing.
             user_content_hash=workflow._compute_user_content_hash(
-                issue, set(),
+                issue,
+                set(),
             ),
         )
         defaults.update(state)
         gh.seed_state(self.ISSUE, **defaults)
         return gh, issue
 
+
+class HandleDocumentingParkedSilenceTest(
+    unittest.TestCase, _ParkedDocumentingFixture
+):
+    """Already-parked issues must not re-post the park comment on
+    every poll. The fetch + behind branches in particular would
+    otherwise spam the issue with `fetch_failed` / `diverged_branch`
+    notices each tick while the operator drafts a reply."""
+
     def test_no_comments_skip_fetch(
         self,
     ) -> None:
         gh, issue = self._seeded(park_reason=PARK_AGENT_QUESTION)
-        mocks = self._run(
-            lambda: workflow._handle_documenting(gh, _TEST_SPEC, issue),
+        mocks = self._run_documenting(
+            gh,
+            issue,
             run_agent=_agent(),
             push_branch=True,
             head_shas=[],
@@ -1128,8 +1162,9 @@ class HandleDocumentingParkedSilenceTest(
         # issue must still stay silent -- the fetch call must not
         # even fire.
         gh, issue = self._seeded(park_reason=PARK_AGENT_QUESTION)
-        mocks = self._run(
-            lambda: workflow._handle_documenting(gh, _TEST_SPEC, issue),
+        mocks = self._run_documenting(
+            gh,
+            issue,
             run_agent=_agent(),
             push_branch=True,
             head_shas=[],
@@ -1151,8 +1186,9 @@ class HandleDocumentingParkedSilenceTest(
     ) -> None:
         # Same shape for a behind-remote tick.
         gh, issue = self._seeded(park_reason=PARK_DIRTY)
-        mocks = self._run(
-            lambda: workflow._handle_documenting(gh, _TEST_SPEC, issue),
+        mocks = self._run_documenting(
+            gh,
+            issue,
             run_agent=_agent(),
             push_branch=True,
             head_shas=[],
@@ -1168,13 +1204,7 @@ class HandleDocumentingParkedSilenceTest(
         )
 
 
-class HandleDocumentingDriftTest(
-    unittest.TestCase, _PatchedWorkflowMixin
-):
-    """A user-content drift mid-final-docs-hop posts a notice and
-    relabels back to `validating` for re-review -- no docs spawn,
-    no push."""
-
+class _DocumentingDriftFixture(_DocumentingWorkflowMixin):
     ISSUE = 701
     PR_NUMBER = 71
 
@@ -1196,6 +1226,14 @@ class HandleDocumentingDriftTest(
         gh.seed_state(self.ISSUE, **defaults)
         return gh, issue
 
+
+class HandleDocumentingDriftRouteTest(
+    unittest.TestCase, _DocumentingDriftFixture
+):
+    """A user-content drift mid-final-docs-hop posts a notice and
+    relabels back to `validating` for re-review -- no docs spawn,
+    no push."""
+
     def test_body_edit_routes_to_validating_no_spawn(self) -> None:
         # A body edit during the final-docs hop must reset
         # `review_round=0`, post the notice, and relabel to
@@ -1207,8 +1245,9 @@ class HandleDocumentingDriftTest(
         )
         issue.body = "updated body with new docs requirements"
 
-        mocks = self._run(
-            lambda: workflow._handle_documenting(gh, _TEST_SPEC, issue),
+        mocks = self._run_documenting(
+            gh,
+            issue,
             run_agent=_agent(),
             push_branch=True,
             head_shas=[],
@@ -1244,8 +1283,9 @@ class HandleDocumentingDriftTest(
         gh, issue = self._seeded()
         issue.body = "in-flight body edit"
 
-        mocks = self._run(
-            lambda: workflow._handle_documenting(gh, _TEST_SPEC, issue),
+        mocks = self._run_documenting(
+            gh,
+            issue,
             run_agent=_agent(),
             push_branch=True,
             head_shas=[],
@@ -1282,8 +1322,9 @@ class HandleDocumentingDriftTest(
         gh, issue = self._seeded(park_reason=PARK_PUSH_FAILED)
         issue.body = "updated body after prior docs commit"
 
-        mocks = self._run(
-            lambda: workflow._handle_documenting(gh, _TEST_SPEC, issue),
+        mocks = self._run_documenting(
+            gh,
+            issue,
             run_agent=_agent(),
             push_branch=True,
             head_shas=[],
@@ -1330,10 +1371,9 @@ class HandleDocumentingDriftTest(
             wt_path_mock = MagicMock(return_value=wt_path)
             with patch.object(workflow, "_worktree_path", wt_path_mock), \
                  patch.object(workflow, "_git_hardened", git_hardened_mock):
-                mocks = self._run(
-                    lambda: workflow._handle_documenting(
-                        gh, _TEST_SPEC, issue,
-                    ),
+                mocks = self._run_documenting(
+                    gh,
+                    issue,
                     run_agent=_agent(),
                     push_branch=True,
                     head_shas=[],
@@ -1394,10 +1434,9 @@ class HandleDocumentingDriftTest(
             wt_path_mock = MagicMock(return_value=wt_path)
             with patch.object(workflow, "_worktree_path", wt_path_mock), \
                  patch.object(workflow, "_git_hardened", git_hardened_mock):
-                mocks = self._run(
-                    lambda: workflow._handle_documenting(
-                        gh, _TEST_SPEC, issue,
-                    ),
+                mocks = self._run_documenting(
+                    gh,
+                    issue,
                     run_agent=_agent(),
                     push_branch=True,
                     head_shas=[],
@@ -1454,10 +1493,9 @@ class HandleDocumentingDriftTest(
             wt_path_mock = MagicMock(return_value=wt_path)
             with patch.object(workflow, "_worktree_path", wt_path_mock), \
                  patch.object(workflow, "_git_hardened", git_hardened_mock):
-                mocks = self._run(
-                    lambda: workflow._handle_documenting(
-                        gh, _TEST_SPEC, issue,
-                    ),
+                mocks = self._run_documenting(
+                    gh,
+                    issue,
                     run_agent=_agent(),
                     push_branch=True,
                     head_shas=[],
@@ -1485,6 +1523,9 @@ class HandleDocumentingDriftTest(
         state = gh.pinned_data(self.ISSUE)
         self.assertEqual(state.get(REVIEW_ROUND), 0)
 
+class HandleDocumentingDriftRecoveryTest(
+    unittest.TestCase, _DocumentingDriftFixture
+):
     def test_body_edit_parks_on_clean_failure(self) -> None:
         # Regression: `git clean -fd` is the final step of the drift
         # reconcile (after `reset --hard`) and removes untracked
@@ -1511,10 +1552,9 @@ class HandleDocumentingDriftTest(
             wt_path_mock = MagicMock(return_value=wt_path)
             with patch.object(workflow, "_worktree_path", wt_path_mock), \
                  patch.object(workflow, "_git_hardened", git_hardened_mock):
-                mocks = self._run(
-                    lambda: workflow._handle_documenting(
-                        gh, _TEST_SPEC, issue,
-                    ),
+                mocks = self._run_documenting(
+                    gh,
+                    issue,
                     run_agent=_agent(),
                     push_branch=True,
                     head_shas=[],
@@ -1562,10 +1602,9 @@ class HandleDocumentingDriftTest(
             wt_path_mock = MagicMock(return_value=wt_path)
             with patch.object(workflow, "_worktree_path", wt_path_mock), \
                  patch.object(workflow, "_git_hardened", git_hardened_mock):
-                mocks = self._run(
-                    lambda: workflow._handle_documenting(
-                        gh, _TEST_SPEC, issue,
-                    ),
+                mocks = self._run_documenting(
+                    gh,
+                    issue,
                     run_agent=_agent(),
                     push_branch=True,
                     head_shas=[],
@@ -1614,10 +1653,9 @@ class HandleDocumentingDriftTest(
             wt_path_mock = MagicMock(return_value=wt_path)
             with patch.object(workflow, "_worktree_path", wt_path_mock), \
                  patch.object(workflow, "_git_hardened", git_hardened_mock):
-                mocks = self._run(
-                    lambda: workflow._handle_documenting(
-                        gh, _TEST_SPEC, issue,
-                    ),
+                mocks = self._run_documenting(
+                    gh,
+                    issue,
                     run_agent=_agent(),
                     push_branch=True,
                     head_shas=[],
@@ -1691,10 +1729,9 @@ class HandleDocumentingDriftTest(
             wt_path_mock = MagicMock(return_value=wt_path)
             with patch.object(workflow, "_worktree_path", wt_path_mock), \
                  patch.object(workflow, "_git_hardened", git_hardened_mock):
-                mocks = self._run(
-                    lambda: workflow._handle_documenting(
-                        gh, _TEST_SPEC, issue,
-                    ),
+                mocks = self._run_documenting(
+                    gh,
+                    issue,
                     run_agent=_agent(),
                     push_branch=True,
                     head_shas=[],
@@ -1759,10 +1796,9 @@ class HandleDocumentingDriftTest(
             wt_path_mock = MagicMock(return_value=wt_path)
             with patch.object(workflow, "_worktree_path", wt_path_mock), \
                  patch.object(workflow, "_git_hardened", git_hardened_mock):
-                mocks = self._run(
-                    lambda: workflow._handle_documenting(
-                        gh, _TEST_SPEC, issue,
-                    ),
+                mocks = self._run_documenting(
+                    gh,
+                    issue,
                     run_agent=_agent(),
                     push_branch=True,
                     head_shas=[],
@@ -1803,10 +1839,9 @@ class HandleDocumentingDriftTest(
             git_hardened_mock = MagicMock()
             with patch.object(workflow, "_worktree_path", wt_path_mock), \
                  patch.object(workflow, "_git_hardened", git_hardened_mock):
-                mocks = self._run(
-                    lambda: workflow._handle_documenting(
-                        gh, _TEST_SPEC, issue,
-                    ),
+                mocks = self._run_documenting(
+                    gh,
+                    issue,
                     run_agent=_agent(),
                     push_branch=True,
                     head_shas=[],
@@ -1833,7 +1868,7 @@ class HandleDocumentingDriftTest(
 
 
 class HandleDocumentingExternalMergeTest(
-    unittest.TestCase, _PatchedWorkflowMixin
+    unittest.TestCase, _DocumentingWorkflowMixin
 ):
     """A human merged the PR before the docs pass ran. The handler must
     short-circuit to `done` without fetching the branch or spawning the
@@ -1857,8 +1892,9 @@ class HandleDocumentingExternalMergeTest(
             dev_agent="claude", dev_session_id=DEV_SESSION,
         )
 
-        mocks = self._run(
-            lambda: workflow._handle_documenting(gh, _TEST_SPEC, issue),
+        mocks = self._run_documenting(
+            gh,
+            issue,
             run_agent=_agent(),
         )
 
@@ -1873,7 +1909,7 @@ class HandleDocumentingExternalMergeTest(
 
 
 class HandleDocumentingClosedIssueTest(
-    unittest.TestCase, _PatchedWorkflowMixin
+    unittest.TestCase, _DocumentingWorkflowMixin
 ):
     """Closed `documenting` issues yielded by the new closed-issue sweep
     must NOT spawn the docs agent. The handler flips to `rejected`
@@ -1899,8 +1935,9 @@ class HandleDocumentingClosedIssueTest(
             dev_agent="claude", dev_session_id=DEV_SESSION,
         )
 
-        mocks = self._run(
-            lambda: workflow._handle_documenting(gh, _TEST_SPEC, issue),
+        mocks = self._run_documenting(
+            gh,
+            issue,
             run_agent=_agent(),
         )
 
@@ -1913,14 +1950,7 @@ class HandleDocumentingClosedIssueTest(
         )
 
 
-class HandleDocumentingFinalDocsHandoffTest(
-    unittest.TestCase, _PatchedWorkflowMixin
-):
-    """Issue #266: when `_handle_validating` approves and relabels to
-    `documenting`, the next `_handle_documenting` tick must advance to
-    `in_review` (NOT back to `validating`) on every success exit.
-    """
-
+class _FinalDocsFixture(_DocumentingWorkflowMixin):
     ISSUE = 707
     PR_NUMBER = 71
     BRANCH = _branch(ISSUE)
@@ -1941,12 +1971,22 @@ class HandleDocumentingFinalDocsHandoffTest(
         gh.seed_state(self.ISSUE, **defaults)
         return gh, issue
 
+
+class HandleDocumentingFinalDocsHandoffTest(
+    unittest.TestCase, _FinalDocsFixture
+):
+    """Issue #266: when `_handle_validating` approves and relabels to
+    `documenting`, the next `_handle_documenting` tick must advance to
+    `in_review` (NOT back to `validating`) on every success exit.
+    """
+
     def test_no_change_verdict_advances_to_in_review(
         self,
     ) -> None:
         gh, issue = self._seeded()
-        mocks = self._run(
-            lambda: workflow._handle_documenting(gh, _TEST_SPEC, issue),
+        mocks = self._run_documenting(
+            gh,
+            issue,
             run_agent=_agent(
                 session_id=DEV_SESSION,
                 last_message=(
@@ -1978,8 +2018,9 @@ class HandleDocumentingFinalDocsHandoffTest(
             FakeComment(id=2000, body="retry please", user=FakeUser("alice")),
         )
 
-        mocks = self._run(
-            lambda: workflow._handle_documenting(gh, _TEST_SPEC, issue),
+        mocks = self._run_documenting(
+            gh,
+            issue,
             run_agent=_agent(
                 session_id=DEV_SESSION,
                 last_message=(
@@ -2009,8 +2050,9 @@ class HandleDocumentingFinalDocsHandoffTest(
         # any impl change).
         gh, issue = self._seeded(user_content_hash="oldhash")
 
-        mocks = self._run(
-            lambda: workflow._handle_documenting(gh, _TEST_SPEC, issue),
+        mocks = self._run_documenting(
+            gh,
+            issue,
             run_agent=_agent(),
             push_branch=True,
             head_shas=[],
@@ -2087,8 +2129,9 @@ class HandleDocumentingFinalDocsHandoffTest(
 
         # Documenting tick: awaiting-human resume consumes id=1100,
         # docs commit lands, advance to in_review.
-        self._run(
-            lambda: workflow._handle_documenting(gh, _TEST_SPEC, issue),
+        self._run_documenting(
+            gh,
+            issue,
             run_agent=_agent(
                 session_id=DEV_SESSION,
                 last_message="docs: cover edge case X",

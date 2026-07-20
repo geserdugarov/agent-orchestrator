@@ -19,41 +19,51 @@ from tests.workflow_helpers import (
 )
 
 
-class HandleBlockedTest(unittest.TestCase, _PatchedWorkflowMixin):
-    def _seed_parent_with_children(
-        self,
-        *,
-        parent_number: int,
-        child_labels: list[Optional[str]],
-        dep_graph: Optional[dict] = None,
-    ) -> tuple[FakeGitHubClient, FakeIssue, list[FakeIssue]]:
-        gh = FakeGitHubClient()
-        parent = make_issue(parent_number, label="blocked")
-        gh.add_issue(parent)
-        children: list[FakeIssue] = []
-        for i, lbl in enumerate(child_labels):
-            child = make_issue(parent_number * 10 + i + 1, label=lbl)
-            gh.add_issue(child)
-            children.append(child)
-        seed = {
-            "children": [c.number for c in children],
-            "decomposer_agent": "claude",
-            "decomposer_session_id": "dec-sess",
-        }
-        if dep_graph is not None:
-            seed["dep_graph"] = dep_graph
-        gh.seed_state(parent_number, **seed)
-        return gh, parent, children
+def _seed_parent_with_children(
+    *,
+    parent_number: int,
+    child_labels: list[Optional[str]],
+    dep_graph: Optional[dict] = None,
+) -> tuple[FakeGitHubClient, FakeIssue, list[FakeIssue]]:
+    gh = FakeGitHubClient()
+    parent = make_issue(parent_number, label="blocked")
+    gh.add_issue(parent)
+    children = [
+        make_issue(parent_number * 10 + index + 1, label=label)
+        for index, label in enumerate(child_labels)
+    ]
+    seed = {
+        "children": [seeded_child.number for seeded_child in children],
+        "decomposer_agent": "claude",
+        "decomposer_session_id": "dec-sess",
+    }
+    for child in children:
+        gh.add_issue(child)
+    if dep_graph is not None:
+        seed["dep_graph"] = dep_graph
+    gh.seed_state(parent_number, **seed)
+    return gh, parent, children
+
+
+def _run_blocked(
+    case: _PatchedWorkflowMixin,
+    gh: FakeGitHubClient,
+    parent: FakeIssue,
+) -> None:
+    case._run(
+        lambda: workflow._handle_blocked(gh, _TEST_SPEC, parent),
+        run_agent=_agent(),
+    )
+
+
+class HandleBlockedResolutionTest(unittest.TestCase, _PatchedWorkflowMixin):
 
     def test_all_children_done_flips_parent_to_ready(self) -> None:
-        gh, parent, children = self._seed_parent_with_children(
+        gh, parent, children = _seed_parent_with_children(
             parent_number=30, child_labels=["done", "done"],
         )
 
-        self._run(
-            lambda: workflow._handle_blocked(gh, _TEST_SPEC, parent),
-            run_agent=_agent(),
-        )
+        _run_blocked(self, gh, parent)
 
         self.assertIn((30, "ready"), gh.label_history)
         self.assertTrue(any(
@@ -62,15 +72,12 @@ class HandleBlockedTest(unittest.TestCase, _PatchedWorkflowMixin):
         ))
 
     def test_some_children_in_progress_no_op(self) -> None:
-        gh, parent, children = self._seed_parent_with_children(
+        gh, parent, children = _seed_parent_with_children(
             parent_number=31,
             child_labels=["done", "implementing"],
         )
 
-        self._run(
-            lambda: workflow._handle_blocked(gh, _TEST_SPEC, parent),
-            run_agent=_agent(),
-        )
+        _run_blocked(self, gh, parent)
 
         # No label flip on parent and no comment posted on the parent.
         self.assertNotIn((31, "ready"), gh.label_history)
@@ -79,15 +86,12 @@ class HandleBlockedTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
 
     def test_rejected_child_parks_parent(self) -> None:
-        gh, parent, children = self._seed_parent_with_children(
+        gh, parent, children = _seed_parent_with_children(
             parent_number=32,
             child_labels=["done", "rejected"],
         )
 
-        self._run(
-            lambda: workflow._handle_blocked(gh, _TEST_SPEC, parent),
-            run_agent=_agent(),
-        )
+        _run_blocked(self, gh, parent)
 
         state = gh.pinned_data(32)
         self.assertTrue(state.get("awaiting_human"))
@@ -118,10 +122,7 @@ class HandleBlockedTest(unittest.TestCase, _PatchedWorkflowMixin):
         gh.add_issue(closed_child)
         gh.seed_state(40, children=[401, 402])
 
-        self._run(
-            lambda: workflow._handle_blocked(gh, _TEST_SPEC, parent),
-            run_agent=_agent(),
-        )
+        _run_blocked(self, gh, parent)
 
         state = gh.pinned_data(40)
         self.assertTrue(state.get("awaiting_human"))
@@ -155,10 +156,7 @@ class HandleBlockedTest(unittest.TestCase, _PatchedWorkflowMixin):
         gh.add_issue(other_child)
         gh.seed_state(41, children=[411, 412])
 
-        self._run(
-            lambda: workflow._handle_blocked(gh, _TEST_SPEC, parent),
-            run_agent=_agent(),
-        )
+        _run_blocked(self, gh, parent)
 
         state = gh.pinned_data(41)
         self.assertFalse(state.get("awaiting_human"))
@@ -184,10 +182,7 @@ class HandleBlockedTest(unittest.TestCase, _PatchedWorkflowMixin):
         gh.add_issue(unlabeled_closed)
         gh.seed_state(42, children=[421])
 
-        self._run(
-            lambda: workflow._handle_blocked(gh, _TEST_SPEC, parent),
-            run_agent=_agent(),
-        )
+        _run_blocked(self, gh, parent)
 
         state = gh.pinned_data(42)
         self.assertTrue(state.get("awaiting_human"))
@@ -196,19 +191,17 @@ class HandleBlockedTest(unittest.TestCase, _PatchedWorkflowMixin):
             for _, body in gh.posted_comments
         ))
 
+class HandleBlockedDependencyTest(unittest.TestCase, _PatchedWorkflowMixin):
     def test_unblocks_middle_child_when_dep_done(self) -> None:
         # children[0] is done; children[1] depends on [0] and is currently
         # blocked. Next blocked tick must relabel children[1] to `ready`.
-        gh, parent, children = self._seed_parent_with_children(
+        gh, parent, children = _seed_parent_with_children(
             parent_number=33,
             child_labels=["done", "blocked"],
             dep_graph={"1": [0]},
         )
 
-        self._run(
-            lambda: workflow._handle_blocked(gh, _TEST_SPEC, parent),
-            run_agent=_agent(),
-        )
+        _run_blocked(self, gh, parent)
 
         # children[1] flipped to ready by the dep-graph walk; parent
         # stays blocked because children[1] is not yet done.
@@ -225,17 +218,14 @@ class HandleBlockedTest(unittest.TestCase, _PatchedWorkflowMixin):
         # exact dependency gating it -- on the tick log so an operator can
         # see why a decomposed parent is not advancing. children[0] is
         # in-flight (not done), so children[1] (depends on [0]) stays held.
-        gh, parent, children = self._seed_parent_with_children(
+        gh, parent, children = _seed_parent_with_children(
             parent_number=34,
             child_labels=["implementing", "blocked"],
             dep_graph={"1": [0]},
         )
 
         with self.assertLogs("orchestrator.workflow", level="INFO") as cm:
-            self._run(
-                lambda: workflow._handle_blocked(gh, _TEST_SPEC, parent),
-                run_agent=_agent(),
-            )
+            _run_blocked(self, gh, parent)
 
         self.assertTrue(
             any(
@@ -253,17 +243,15 @@ class HandleBlockedTest(unittest.TestCase, _PatchedWorkflowMixin):
         # When every child is either done or already running (none still
         # `blocked` on a sibling), nothing is held and the visibility log
         # stays silent -- a healthy parent must not spam the tick log.
-        gh, parent, _children = self._seed_parent_with_children(
+        gh, parent, _children = _seed_parent_with_children(
             parent_number=35,
             child_labels=["done", "implementing"],
         )
 
         with self.assertNoLogs("orchestrator.workflow", level="INFO"):
-            self._run(
-                lambda: workflow._handle_blocked(gh, _TEST_SPEC, parent),
-                run_agent=_agent(),
-            )
+            _run_blocked(self, gh, parent)
 
+class HandleBlockedRecoveryTest(unittest.TestCase, _PatchedWorkflowMixin):
     def test_blocked_with_no_recorded_children_parks(self) -> None:
         gh = FakeGitHubClient()
         parent = make_issue(34, label="blocked")
@@ -271,10 +259,7 @@ class HandleBlockedTest(unittest.TestCase, _PatchedWorkflowMixin):
         # No children pinned.
         gh.seed_state(34, decomposer_agent="claude")
 
-        self._run(
-            lambda: workflow._handle_blocked(gh, _TEST_SPEC, parent),
-            run_agent=_agent(),
-        )
+        _run_blocked(self, gh, parent)
 
         state = gh.pinned_data(34)
         self.assertTrue(state.get("awaiting_human"))
@@ -296,10 +281,7 @@ class HandleBlockedTest(unittest.TestCase, _PatchedWorkflowMixin):
         before_comments = list(gh.posted_comments)
         before_labels = list(gh.label_history)
 
-        self._run(
-            lambda: workflow._handle_blocked(gh, _TEST_SPEC, child),
-            run_agent=_agent(),
-        )
+        _run_blocked(self, gh, child)
 
         state = gh.pinned_data(35)
         self.assertFalse(state.get("awaiting_human"))
@@ -312,16 +294,13 @@ class HandleBlockedTest(unittest.TestCase, _PatchedWorkflowMixin):
         # (network blip etc.). The parent's `_handle_blocked` walk must
         # treat empty deps as deps-satisfied and flip the child to
         # `ready` so implementation can start.
-        gh, parent, children = self._seed_parent_with_children(
+        gh, parent, children = _seed_parent_with_children(
             parent_number=36,
             child_labels=["blocked", "blocked"],
             # No dep_graph -- both children have no recorded deps.
         )
 
-        self._run(
-            lambda: workflow._handle_blocked(gh, _TEST_SPEC, parent),
-            run_agent=_agent(),
-        )
+        _run_blocked(self, gh, parent)
 
         # Both children flipped to `ready`. Parent stays `blocked`
         # because no children are `done` yet.
@@ -356,10 +335,7 @@ class HandleBlockedTest(unittest.TestCase, _PatchedWorkflowMixin):
             last_action_comment_id=999,
         )
 
-        self._run(
-            lambda: workflow._handle_blocked(gh, _TEST_SPEC, parent),
-            run_agent=_agent(),
-        )
+        _run_blocked(self, gh, parent)
 
         self.assertIn((38, "ready"), gh.label_history)
         state = gh.pinned_data(38)

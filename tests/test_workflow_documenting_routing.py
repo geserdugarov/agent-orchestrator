@@ -15,7 +15,7 @@ from tests.fakes import FakeGitHubClient, make_issue
 from tests.workflow_helpers import _TEST_SPEC
 
 
-class DocumentingLabelRoutingTest(unittest.TestCase):
+class DocumentingLabelRegistrationTest(unittest.TestCase):
     """`documenting` is registered as a workflow label so the dispatcher
     routes it to the stub stage handler instead of falling through to
     pickup or implementation. The implementing stage does not auto-apply
@@ -80,6 +80,9 @@ class DocumentingLabelRoutingTest(unittest.TestCase):
         from orchestrator.worktrees import _PR_REFRESH_DETOUR_LABELS
 
         self.assertIn("documenting", _PR_REFRESH_DETOUR_LABELS)
+
+class DocumentingLabelRoutingTest(unittest.TestCase):
+    """Dispatcher routing and the missing-PR park remain stable."""
 
     def test_dispatcher_routes_documenting_to_handler(self) -> None:
         gh = FakeGitHubClient()
