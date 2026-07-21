@@ -45,7 +45,7 @@ Do not mark a stage complete until its completion gate is satisfied.
 | 4 | Remaining production style and structure | 5/5 | [x] |
 | 5 | Test structure and complexity | 7/7 | [x] |
 | 6 | Test literals and naming | 7/7 | [x] |
-| 7 | Long-tail cleanup and final verification | 0/5 | [ ] |
+| 7 | Long-tail cleanup and final verification | 1/5 | [ ] |
 
 ## Finding-count progress
 
@@ -54,12 +54,12 @@ signal between scans.
 
 | Metric | Initial | Current | Target |
 |---|---:|---:|---:|
-| Parsed findings | 7,683 | 7,683 | 0 |
-| Unique findings | 7,660 | 7,660 | 0 |
-| Production findings | 1,468 | 1,468 | 0 |
-| Test findings | 6,215 | 6,215 | 0 |
-| Affected files | 172 | 172 | 0 |
-| Standard `E...` findings | 29 | 29 | 0 |
+| Parsed findings | 7,683 | 1,968 | 0 |
+| Unique findings | 7,660 | 1,943 | 0 |
+| Production findings | 1,468 | 347 | 0 |
+| Test findings | 6,215 | 1,621 | 0 |
+| Affected files | 172 | 168 | 0 |
+| Standard `E...` findings | 29 | 53 | 0 |
 
 Minimum acceptable fallback: reduce the total by at least 90%, leave no production correctness or formatting
 findings, and explain every retained finding in the accepted-remainder register.
@@ -409,24 +409,42 @@ Completion gate: high-volume test rules are cleared while individual test scenar
 
 ### Package 7.1 — Refresh the inventory
 
-- [ ] Run a fresh full scan against the completed branch when the same scanning environment is available.
-- [ ] Update the finding-count progress table and add newly exposed findings to the appropriate package.
+- [x] Run a fresh full scan against the completed branch when the same scanning environment is available.
+- [x] Update the finding-count progress table and add newly exposed findings to the appropriate package.
+
+The 2026-07-21 refresh used the original scan command and thresholds with Flake8 7.3.0,
+wemake-python-styleguide 1.6.2, and Python 3.12.3:
+
+```sh
+uvx --no-cache --from wemake-python-styleguide flake8 orchestrator tests \
+  --max-line-length=120 --extend-ignore=E741
+```
+
+The 1,968 parsed findings contain 25 duplicate plugin reports, leaving 1,943 unique findings. Production accounts for
+347 findings across 63 files; tests account for 1,621 findings across 105 files. The refreshed standard findings and
+newly exposed WPS families are assigned below; the other findings belong to the existing production/test remainder
+packages and accepted-remainder review.
 
 ### Package 7.2 — Clear production remainder
 
 - [ ] Resolve every remaining production finding that can be fixed without changing a public contract.
 - [ ] Add focused tests for any late behavioral refactor.
+- [ ] Resolve the refreshed production findings not present in the initial inventory: `E302` (3), `F401` (43),
+  `WPS322` (1), and `WPS462` (1).
 
 ### Package 7.3 — Clear test remainder
 
 - [ ] Resolve remaining test findings file by file.
 - [ ] Recheck that cleanup did not merge tests with materially different behavior.
+- [ ] Resolve the refreshed test formatting and naming findings: `E124` (3), `E127` (4), `E128` (4), `E203` (2),
+  `E302` (34), `E303` (3), and `WPS118` (17).
 
 ### Package 7.4 — Review accepted remainder
 
 - [ ] Challenge every entry in the accepted-remainder register and remove it if a clear implementation is now
   available.
 - [ ] Confirm each retained entry protects readability or a documented compatibility contract rather than convenience.
+- [ ] Revalidate the refreshed `WPS402` facade finding with the registered compatibility remainders.
 
 ### Package 7.5 — Final repository validation
 
@@ -1227,6 +1245,7 @@ Add one row for every implementation session, including partial sessions.
 | 2026-07-21 | 6.5 | Complete | WPS 560->130; target 430->0; 234f; 2204p/3s | None | Start 6.6 |
 | 2026-07-21 | 6.6 | Complete | WPS 1161->227; target 933->0; 282f; 2204p/3s | None | Start 6.7 |
 | 2026-07-21 | 6.7 | Complete | WPS 650->138; target 508->0; 353f; 2204p/3s | None | Start 7.1 |
+| 2026-07-21 | 7.1 | Complete | Scan 1968/1943; Ruff/diff; tracked gate 2204p/3s | Not committed | Start 7.2 |
 
 Package 6.7 is **complete**. The pass covered the shared GitHub fake and workflow harness plus the remaining
 state-machine, metadata, trust, routing, analytics, drift, lifecycle, terminal, prompt, and parallel-tick tests.
