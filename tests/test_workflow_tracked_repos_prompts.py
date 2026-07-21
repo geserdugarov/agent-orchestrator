@@ -16,17 +16,17 @@ from __future__ import annotations
 import contextlib
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from orchestrator import config, workflow
 
 from tests.fakes import FakeComment, FakeGitHubClient, FakeUser, make_issue
 from tests.workflow_helpers import (
     REVIEW_APPROVED_MESSAGE,
-    _FAKE_WT,
     _PatchedWorkflowMixin,
     _TEST_SPEC,
     _agent,
+    _fake_worktree,
 )
 
 # Distinctive lead-in of `_build_tracked_repos_context`; its presence (and
@@ -42,6 +42,12 @@ _OTHER_SPEC = config.RepoSpec(
     base_branch="develop",
 )
 _MULTI_SPECS = [_TEST_SPEC, _OTHER_SPEC]
+_DECOMPOSITION_MANIFEST = (
+    "fits one context\n\n"
+    "```orchestrator-manifest\n"
+    '{"decision": "single", "rationale": "small"}\n'
+    "```\n"
+)
 
 
 @contextlib.contextmanager
@@ -62,25 +68,105 @@ def _prompt_of(run_agent_mock) -> str:
     return call.kwargs.get("prompt") or call.args[1]
 
 
+def _implementer_prompt(case) -> str:
+    gh = FakeGitHubClient()
+    issue = make_issue(701, label="implementing")
+    gh.add_issue(issue)
+    mocks = case._run(
+        lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
+        run_agent=_agent(session_id="sess-1", last_message="done"),
+        has_new_commits=[False, True],
+        push_branch=True,
+    )
+    return _prompt_of(mocks["run_agent"])
+
+
+def _documentation_seed(**state):
+    gh = FakeGitHubClient()
+    issue = make_issue(702, label="documenting")
+    gh.add_issue(issue)
+    defaults = dict(
+        pr_number=72,
+        branch="orchestrator/geserdugarov__agent-orchestrator/issue-702",
+        dev_agent="codex",
+        dev_session_id="dev-sess",
+    )
+    defaults.update(state)
+    gh.seed_state(702, **defaults)
+    return gh, issue
+
+
+def _resume_seed(*, resume_count: int):
+    gh = FakeGitHubClient()
+    issue = make_issue(703, label="in_review", body="implement the thing")
+    gh.add_issue(issue)
+    gh.seed_state(
+        703,
+        dev_agent="claude",
+        dev_session_id="live-sess",
+        silent_park_count=0,
+        dev_resume_count=resume_count,
+    )
+    return gh, issue
+
+
+def _resume_prompt(gh, issue, *, threshold: int) -> str:
+    run_mock = MagicMock(
+        return_value=_agent(session_id="fresh-sess", last_message="ok"),
+    )
+    state = gh.read_pinned_state(issue)
+    with _multi_repo(), \
+         patch.object(config, "DEV_SESSION_MAX_RESUMES", threshold), \
+         patch.object(workflow, "_ensure_worktree", _fake_worktree), \
+         patch.object(workflow, "run_agent", run_mock):
+        workflow._resume_dev_with_text(gh, _TEST_SPEC, issue, state, "fix it")
+    return _prompt_of(run_mock)
+
+
+def _decomposer_prompt(case) -> str:
+    gh = FakeGitHubClient()
+    issue = make_issue(710, label="decomposing")
+    gh.add_issue(issue)
+    mocks = case._run(
+        lambda: workflow._handle_decomposing(gh, _TEST_SPEC, issue),
+        run_agent=_agent(
+            session_id="dec-1",
+            last_message=_DECOMPOSITION_MANIFEST,
+        ),
+    )
+    return _prompt_of(mocks["run_agent"])
+
+
+def _review_seed():
+    gh = FakeGitHubClient()
+    issue = make_issue(711, label="validating")
+    gh.add_issue(issue)
+    gh.seed_state(
+        711,
+        pr_number=11,
+        branch="orchestrator/geserdugarov__agent-orchestrator/issue-711",
+        codex_session_id="dev-sess",
+        review_round=0,
+    )
+    return gh, issue
+
+
+def _review_prompt(case) -> str:
+    gh, issue = _review_seed()
+    mocks = case._run(
+        lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+        run_agent=_agent(last_message=REVIEW_APPROVED_MESSAGE),
+    )
+    return _prompt_of(mocks["run_agent"])
+
+
 class ImplementerSpawnTrackedReposTest(unittest.TestCase, _PatchedWorkflowMixin):
     """The initial implementer spawn carries the block in a multi-repo
     deployment and stays block-free in the single-repo default."""
 
-    def _spawn_prompt(self) -> str:
-        gh = FakeGitHubClient()
-        issue = make_issue(701, label="implementing")
-        gh.add_issue(issue)
-        mocks = self._run(
-            lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
-            run_agent=_agent(session_id="sess-1", last_message="done"),
-            has_new_commits=[False, True],
-            push_branch=True,
-        )
-        return _prompt_of(mocks["run_agent"])
-
     def test_multi_repo_spawn_carries_block(self) -> None:
         with _multi_repo():
-            prompt = self._spawn_prompt()
+            prompt = _implementer_prompt(self)
         self.assertIn(_BLOCK_MARKER, prompt)
         # The sibling's slug and durable checkout path are surfaced; the
         # current repo is not listed as a reference checkout.
@@ -93,7 +179,7 @@ class ImplementerSpawnTrackedReposTest(unittest.TestCase, _PatchedWorkflowMixin)
         # The default single-repo deployment must see zero added tokens.
         with patch.object(config, "EXPOSE_TRACKED_REPOS", True), \
              patch.object(config, "default_repo_specs", lambda: [_TEST_SPEC]):
-            prompt = self._spawn_prompt()
+            prompt = _implementer_prompt(self)
         self.assertNotIn(_BLOCK_MARKER, prompt)
 
 
@@ -103,22 +189,8 @@ class DocumentationSpawnTrackedReposTest(
     """Both documentation-prompt paths -- the initial final-docs pass and the
     awaiting-human resume -- thread the full specs list into the prompt."""
 
-    def _seeded(self, **state):
-        gh = FakeGitHubClient()
-        issue = make_issue(702, label="documenting")
-        gh.add_issue(issue)
-        defaults = dict(
-            pr_number=72,
-            branch="orchestrator/geserdugarov__agent-orchestrator/issue-702",
-            dev_agent="codex",
-            dev_session_id="dev-sess",
-        )
-        defaults.update(state)
-        gh.seed_state(702, **defaults)
-        return gh, issue
-
     def test_initial_docs_pass_carries_block(self) -> None:
-        gh, issue = self._seeded()
+        gh, issue = _documentation_seed()
         with _multi_repo():
             mocks = self._run(
                 lambda: workflow._handle_documenting(gh, _TEST_SPEC, issue),
@@ -136,7 +208,7 @@ class DocumentationSpawnTrackedReposTest(
         self.assertIn("documentation pass", prompt)
 
     def test_human_reply_resume_carries_block(self) -> None:
-        gh, issue = self._seeded(
+        gh, issue = _documentation_seed(
             awaiting_human=True,
             last_action_comment_id=6000,
             park_reason="agent_timeout",
@@ -164,7 +236,7 @@ class DocumentationSpawnTrackedReposTest(
         # transcript-less fresh-spawn path, which prepends the re-grounding
         # preamble. The preamble must suppress its own copy of the block so
         # the composed prompt lists the tracked repos exactly once.
-        gh, issue = self._seeded(dev_session_id=None)
+        gh, issue = _documentation_seed(dev_session_id=None)
         with _multi_repo():
             mocks = self._run(
                 lambda: workflow._handle_documenting(gh, _TEST_SPEC, issue),
@@ -182,7 +254,7 @@ class DocumentationSpawnTrackedReposTest(
         self.assertIn("documentation pass", prompt)
 
     def test_single_repo_docs_pass_has_no_block(self) -> None:
-        gh, issue = self._seeded()
+        gh, issue = _documentation_seed()
         with patch.object(config, "EXPOSE_TRACKED_REPOS", True), \
              patch.object(config, "default_repo_specs", lambda: [_TEST_SPEC]):
             mocks = self._run(
@@ -202,40 +274,12 @@ class FreshRespawnTrackedReposTest(unittest.TestCase):
     carries the block exactly once; a true in-place resume sends the bare
     stage followup and stays block-free (no duplication on the live session)."""
 
-    def _seeded_issue(self, *, resume_count: int):
-        gh = FakeGitHubClient()
-        issue = make_issue(703, label="in_review", body="implement the thing")
-        gh.add_issue(issue)
-        gh.seed_state(
-            703,
-            dev_agent="claude",
-            dev_session_id="live-sess",
-            silent_park_count=0,
-            dev_resume_count=resume_count,
-        )
-        return gh, issue
-
-    def _resume(self, gh, issue, *, threshold):
-        prompts: list[str] = []
-
-        def fake_run(agent, prompt, wt, *, resume_session_id=None, extra_args=()):
-            prompts.append(prompt)
-            return _agent(session_id="fresh-sess", last_message="ok")
-
-        state = gh.read_pinned_state(issue)
-        with _multi_repo(), \
-             patch.object(config, "DEV_SESSION_MAX_RESUMES", threshold), \
-             patch.object(workflow, "_ensure_worktree", lambda spec, n, **_: _FAKE_WT), \
-             patch.object(workflow, "run_agent", fake_run):
-            workflow._resume_dev_with_text(gh, _TEST_SPEC, issue, state, "fix it")
-        return prompts[0]
-
     def test_fresh_respawn_carries_block_exactly_once(self) -> None:
         # Budget reached -> rotation fresh-spawns; the preamble re-grounds the
         # transcript-less agent AND carries the block. Exactly once: the bare
         # followup ("fix it") contributes no second copy.
-        gh, issue = self._seeded_issue(resume_count=10)
-        prompt = self._resume(gh, issue, threshold=10)
+        gh, issue = _resume_seed(resume_count=10)
+        prompt = _resume_prompt(gh, issue, threshold=10)
         self.assertEqual(prompt.count(_BLOCK_MARKER), 1)
         self.assertIn("acme/sibling", prompt)
         # The preamble and the appended stage followup both survive.
@@ -246,8 +290,8 @@ class FreshRespawnTrackedReposTest(unittest.TestCase):
         # Below budget -> resume in place. The live session already carries the
         # issue context in its transcript, so the bare followup is sent with no
         # re-grounding and -- crucially -- no tracked-repos block.
-        gh, issue = self._seeded_issue(resume_count=1)
-        prompt = self._resume(gh, issue, threshold=10)
+        gh, issue = _resume_seed(resume_count=1)
+        prompt = _resume_prompt(gh, issue, threshold=10)
         self.assertEqual(prompt, "fix it")
         self.assertNotIn(_BLOCK_MARKER, prompt)
 
@@ -259,26 +303,9 @@ class DecomposerSpawnTrackedReposTest(
     and stays block-free in the single-repo default. The decomposer is
     read-only -- the block is additive and must not override that contract."""
 
-    _MANIFEST = (
-        "fits one context\n\n"
-        "```orchestrator-manifest\n"
-        '{"decision": "single", "rationale": "small"}\n'
-        "```\n"
-    )
-
-    def _spawn_prompt(self) -> str:
-        gh = FakeGitHubClient()
-        issue = make_issue(710, label="decomposing")
-        gh.add_issue(issue)
-        mocks = self._run(
-            lambda: workflow._handle_decomposing(gh, _TEST_SPEC, issue),
-            run_agent=_agent(session_id="dec-1", last_message=self._MANIFEST),
-        )
-        return _prompt_of(mocks["run_agent"])
-
     def test_multi_repo_spawn_carries_block(self) -> None:
         with _multi_repo():
-            prompt = self._spawn_prompt()
+            prompt = _decomposer_prompt(self)
         self.assertIn(_BLOCK_MARKER, prompt)
         self.assertIn("acme/sibling", prompt)
         self.assertIn("/srv/sibling-checkout", prompt)
@@ -289,7 +316,7 @@ class DecomposerSpawnTrackedReposTest(
     def test_single_repo_spawn_has_no_block(self) -> None:
         with patch.object(config, "EXPOSE_TRACKED_REPOS", True), \
              patch.object(config, "default_repo_specs", lambda: [_TEST_SPEC]):
-            prompt = self._spawn_prompt()
+            prompt = _decomposer_prompt(self)
         self.assertNotIn(_BLOCK_MARKER, prompt)
 
 
@@ -300,32 +327,9 @@ class ReviewerSpawnTrackedReposTest(
     stays block-free in the single-repo default. The block must not soften
     the reviewer-only no-edit contract."""
 
-    def _seeded(self):
-        gh = FakeGitHubClient()
-        issue = make_issue(711, label="validating")
-        gh.add_issue(issue)
-        gh.seed_state(
-            711,
-            pr_number=11,
-            branch="orchestrator/geserdugarov__agent-orchestrator/issue-711",
-            codex_session_id="dev-sess",
-            review_round=0,
-        )
-        return gh, issue
-
-    def _spawn_prompt(self) -> str:
-        gh, issue = self._seeded()
-        # APPROVED keeps the reviewer the only agent spawned this tick, so the
-        # captured prompt is unambiguously the review prompt.
-        mocks = self._run(
-            lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
-            run_agent=_agent(last_message=REVIEW_APPROVED_MESSAGE),
-        )
-        return _prompt_of(mocks["run_agent"])
-
     def test_multi_repo_spawn_carries_block(self) -> None:
         with _multi_repo():
-            prompt = self._spawn_prompt()
+            prompt = _review_prompt(self)
         self.assertIn(_BLOCK_MARKER, prompt)
         self.assertIn("acme/sibling", prompt)
         # Still the reviewer prompt with the reviewer-only contract intact.
@@ -335,7 +339,7 @@ class ReviewerSpawnTrackedReposTest(
     def test_single_repo_spawn_has_no_block(self) -> None:
         with patch.object(config, "EXPOSE_TRACKED_REPOS", True), \
              patch.object(config, "default_repo_specs", lambda: [_TEST_SPEC]):
-            prompt = self._spawn_prompt()
+            prompt = _review_prompt(self)
         self.assertNotIn(_BLOCK_MARKER, prompt)
 
 

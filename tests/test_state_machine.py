@@ -6,7 +6,7 @@ import json
 import pathlib
 import re
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from orchestrator import base_sync, config, github, workflow
 from orchestrator.state_machine import (
@@ -21,6 +21,21 @@ from orchestrator.state_machine import (
 )
 
 from tests.fakes import FakeGitHubClient, make_issue
+
+
+def _guarded_issue():
+    gh = FakeGitHubClient()
+    issue = make_issue(1, label="validating")
+    gh.add_issue(issue)
+    return gh, issue
+
+
+def _coerce_error(value: str) -> ValueError:
+    try:
+        coerce_workflow_label(value)
+    except ValueError as error:
+        return error
+    raise AssertionError("coerce_workflow_label did not reject the value")
 
 
 class WorkflowLabelEnumTest(unittest.TestCase):
@@ -88,9 +103,7 @@ class CoerceWorkflowLabelTest(unittest.TestCase):
         )
 
     def test_typo_raises_with_helpful_message(self) -> None:
-        with self.assertRaises(ValueError) as ctx:
-            coerce_workflow_label("validatign")
-        msg = str(ctx.exception)
+        msg = str(_coerce_error("validatign"))
         self.assertIn("validatign", msg)
         self.assertIn("valid workflow label", msg)
 
@@ -179,6 +192,10 @@ class TransitionTableTest(unittest.TestCase):
             _DETOUR_TO_RESOLVING, base_sync._PR_REFRESH_DETOUR_LABELS,
         )
 
+
+class TransitionGraphReachabilityTest(unittest.TestCase):
+    """Every declared state participates in the live workflow graph."""
+
     def test_every_emitted_target_is_reachable(self) -> None:
         # Drift meta-test: every `set_workflow_label(..., WorkflowLabel.X)`
         # target in the package must be an allowed target somewhere in the
@@ -262,6 +279,34 @@ class IsAllowedTransitionTest(unittest.TestCase):
         ]:
             self.assertFalse(is_allowed_transition(cur, nxt), (cur, nxt))
 
+    def test_conflict_only_from_detour_sources(self) -> None:
+        self.assertTrue(
+            is_allowed_transition(
+                WorkflowLabel.VALIDATING, WorkflowLabel.RESOLVING_CONFLICT,
+            )
+        )
+        # `ready` is not a PR-having detour source.
+        self.assertFalse(
+            is_allowed_transition(
+                WorkflowLabel.READY, WorkflowLabel.RESOLVING_CONFLICT,
+            )
+        )
+
+    def test_same_label_is_allowed(self) -> None:
+        # Idempotent re-set, even on a terminal.
+        self.assertTrue(
+            is_allowed_transition(WorkflowLabel.DONE, WorkflowLabel.DONE)
+        )
+        self.assertTrue(
+            is_allowed_transition(
+                WorkflowLabel.VALIDATING, WorkflowLabel.VALIDATING,
+            )
+        )
+
+
+class TerminalTransitionTest(unittest.TestCase):
+    """Terminal transitions are limited to their exact workflow sources."""
+
     def test_done_allowed_only_from_its_exact_sources(self) -> None:
         # External-merge / drain sources, plus umbrella/question whose own
         # forward completion is `-> done`. NOT the pre-PR states.
@@ -315,31 +360,6 @@ class IsAllowedTransitionTest(unittest.TestCase):
                 is_allowed_transition(state, WorkflowLabel.REJECTED), state,
             )
 
-    def test_conflict_only_from_detour_sources(self) -> None:
-        self.assertTrue(
-            is_allowed_transition(
-                WorkflowLabel.VALIDATING, WorkflowLabel.RESOLVING_CONFLICT,
-            )
-        )
-        # `ready` is not a PR-having detour source.
-        self.assertFalse(
-            is_allowed_transition(
-                WorkflowLabel.READY, WorkflowLabel.RESOLVING_CONFLICT,
-            )
-        )
-
-    def test_same_label_is_allowed(self) -> None:
-        # Idempotent re-set, even on a terminal.
-        self.assertTrue(
-            is_allowed_transition(WorkflowLabel.DONE, WorkflowLabel.DONE)
-        )
-        self.assertTrue(
-            is_allowed_transition(
-                WorkflowLabel.VALIDATING, WorkflowLabel.VALIDATING,
-            )
-        )
-
-
 class GuardModeTest(unittest.TestCase):
     """`guard_transition` is the mode-aware wrapper `set_workflow_label`
     calls. `off` no-ops, `warn` logs+proceeds, `enforce` raises."""
@@ -351,12 +371,19 @@ class GuardModeTest(unittest.TestCase):
             )
 
     def test_warn_logs_but_proceeds(self) -> None:
-        with self.assertLogs("orchestrator.state_machine", level="WARNING") as cm:
+        warning_mock = MagicMock()
+        with patch(
+            "orchestrator.state_machine.log.warning",
+            warning_mock,
+        ):
             guard_transition(
                 WorkflowLabel.VALIDATING, WorkflowLabel.IN_REVIEW, "warn",
             )
-        self.assertTrue(
-            any("illegal workflow transition" in m for m in cm.output), cm.output,
+        warning_mock.assert_called_once()
+        message, *args = warning_mock.call_args.args
+        self.assertIn(
+            "illegal workflow transition",
+            message % tuple(args),
         )
 
     def test_enforce_raises_on_illegal(self) -> None:
@@ -380,14 +407,8 @@ class SetWorkflowLabelGuardWiringTest(unittest.TestCase):
     """The guard is wired through `set_workflow_label` (the single
     chokepoint), driven by `config.WORKFLOW_TRANSITION_GUARD`."""
 
-    def _issue(self):
-        gh = FakeGitHubClient()
-        issue = make_issue(1, label="validating")
-        gh.add_issue(issue)
-        return gh, issue
-
     def test_enforce_blocks_illegal_relabel(self) -> None:
-        gh, issue = self._issue()
+        gh, issue = _guarded_issue()
         with patch.object(config, "WORKFLOW_TRANSITION_GUARD", "enforce"):
             with self.assertRaises(IllegalTransition):
                 gh.set_workflow_label(issue, WorkflowLabel.IN_REVIEW)
@@ -395,20 +416,20 @@ class SetWorkflowLabelGuardWiringTest(unittest.TestCase):
         self.assertEqual(gh.workflow_label(issue), WorkflowLabel.VALIDATING)
 
     def test_warn_allows_illegal_relabel(self) -> None:
-        gh, issue = self._issue()
+        gh, issue = _guarded_issue()
         with patch.object(config, "WORKFLOW_TRANSITION_GUARD", "warn"):
             with self.assertLogs("orchestrator.state_machine", level="WARNING"):
                 gh.set_workflow_label(issue, WorkflowLabel.IN_REVIEW)
         self.assertEqual(gh.workflow_label(issue), WorkflowLabel.IN_REVIEW)
 
     def test_enforce_allows_legal_relabel(self) -> None:
-        gh, issue = self._issue()
+        gh, issue = _guarded_issue()
         with patch.object(config, "WORKFLOW_TRANSITION_GUARD", "enforce"):
             gh.set_workflow_label(issue, WorkflowLabel.DOCUMENTING)
         self.assertEqual(gh.workflow_label(issue), WorkflowLabel.DOCUMENTING)
 
     def test_enforce_allows_validation_fix_loop(self) -> None:
-        gh, issue = self._issue()
+        gh, issue = _guarded_issue()
         with patch.object(config, "WORKFLOW_TRANSITION_GUARD", "enforce"):
             gh.set_workflow_label(issue, WorkflowLabel.FIXING)
         self.assertEqual(gh.workflow_label(issue), WorkflowLabel.FIXING)

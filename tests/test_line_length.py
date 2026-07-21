@@ -13,6 +13,7 @@ import subprocess
 import tomllib
 import unittest
 from pathlib import Path
+from typing import Iterator
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -23,6 +24,7 @@ _RUFF_OWNED = {".py"}
 _BINARY_EXT = {".png"}
 # Machine-generated / verbatim content that is never hand-wrapped.
 _IGNORED_NAMES = {"uv.lock", "LICENSE"}
+_LineRuleCases = dict[str, tuple[str, list[int]]]
 
 
 def _load_limit() -> int:
@@ -42,18 +44,36 @@ def _tracked_text_files() -> list[tuple[str, Path]]:
         text=True,
         check=True,
     ).stdout
-    files = []
-    for rel in filter(None, out.split("\0")):
-        path = _REPO_ROOT / rel
-        if path.suffix in _RUFF_OWNED or path.suffix in _BINARY_EXT:
-            continue
-        if path.name in _IGNORED_NAMES:
-            continue
-        files.append((rel, path))
-    return files
+    tracked_paths = (
+        (relative_path, _REPO_ROOT / relative_path)
+        for relative_path in filter(None, out.split("\0"))
+    )
+    return [
+        (relative_path, path)
+        for relative_path, path in tracked_paths
+        if path.suffix not in _RUFF_OWNED | _BINARY_EXT
+        and path.name not in _IGNORED_NAMES
+    ]
 
 
-def over_limit_lines(text: str, limit: int = LIMIT):
+def _line_is_exempt(line: str, limit: int) -> bool:
+    longest_token = max(map(len, line.split()), default=0)
+    return len(line) <= limit or longest_token > limit
+
+
+def _unfenced_lines(text: str) -> Iterator[tuple[int, str]]:
+    in_fence = False
+    for line_number, raw_line in enumerate(text.splitlines(), 1):
+        if raw_line.lstrip().startswith(("```", "~~~")):
+            in_fence = not in_fence
+        elif not in_fence:
+            yield line_number, raw_line
+
+
+def over_limit_lines(
+    text: str,
+    limit: int = LIMIT,
+) -> Iterator[tuple[int, int]]:
     """Yield (lineno, length) for wrappable lines longer than `limit`.
 
     Length is counted in Unicode code points, so multi-byte box-drawing
@@ -62,31 +82,50 @@ def over_limit_lines(text: str, limit: int = LIMIT):
     unbreakable token (e.g. a long URL) is exempt because no wrapping can
     bring it under the limit.
     """
-    in_fence = False
-    for lineno, raw in enumerate(text.splitlines(), 1):
-        if raw.lstrip().startswith(("```", "~~~")):
-            in_fence = not in_fence
+    for line_number, raw_line in _unfenced_lines(text):
+        line = raw_line.rstrip()
+        if _line_is_exempt(line, limit):
             continue
-        if in_fence:
-            continue
-        line = raw.rstrip()
-        if len(line) <= limit:
-            continue
-        if max((len(token) for token in line.split()), default=0) > limit:
-            continue
-        yield lineno, len(line)
+        yield line_number, len(line)
+
+
+def _file_violations(relative_path: str, path: Path) -> list[str]:
+    data = path.read_bytes()
+    if b"\x00" in data:
+        return []
+    return [
+        f"{relative_path}:{line_number} ({length} > {LIMIT} chars)"
+        for line_number, length in over_limit_lines(data.decode("utf-8"))
+    ]
+
+
+def _flagged_lines(text: str) -> list[int]:
+    return [line_number for line_number, _ in over_limit_lines(text, limit=120)]
+
+
+def _line_rule_cases() -> _LineRuleCases:
+    long_prose = "word " * 40
+    long_url = "https://example.com/" + "a" * 200
+    wide_divider = "─" * 75
+    return {
+        "short line": ("plain short line", []),
+        "wrappable prose": (long_prose.rstrip(), [1]),
+        "fenced block": (f"```\n{long_prose}\n```", []),
+        "tilde fence": (f"~~~\n{long_prose}\n~~~", []),
+        "unbreakable url": (long_url, []),
+        "wide box drawing": (wide_divider, []),
+        "exactly at limit": ("a" * 120, []),
+        "one over limit": ("a " + "a" * 119, [1]),
+    }
 
 
 class TrackedFilesWithinLimitTest(unittest.TestCase):
     def test_no_tracked_text_file_exceeds_limit(self) -> None:
-        violations = []
-        for rel, path in _tracked_text_files():
-            data = path.read_bytes()
-            if b"\x00" in data:  # binary without a flagged extension
-                continue
-            text = data.decode("utf-8")
-            for lineno, length in over_limit_lines(text):
-                violations.append(f"{rel}:{lineno} ({length} > {LIMIT} chars)")
+        violations = [
+            violation
+            for relative_path, path in _tracked_text_files()
+            for violation in _file_violations(relative_path, path)
+        ]
         self.assertEqual(
             violations,
             [],
@@ -95,26 +134,10 @@ class TrackedFilesWithinLimitTest(unittest.TestCase):
 
 
 class OverLimitRuleTest(unittest.TestCase):
-    def _flagged(self, text: str) -> list[int]:
-        return [lineno for lineno, _ in over_limit_lines(text, limit=120)]
-
     def test_rule_cases(self) -> None:
-        long_prose = "word " * 40  # ~200 chars, all short tokens: wrappable
-        long_url = "https://example.com/" + "a" * 200  # one unbreakable token
-        wide_divider = "─" * 75  # 75 code points, 225 bytes: under limit
-        cases = {
-            "short line": ("plain short line", []),
-            "wrappable prose": (long_prose.rstrip(), [1]),
-            "fenced block": (f"```\n{long_prose}\n```", []),
-            "tilde fence": (f"~~~\n{long_prose}\n~~~", []),
-            "unbreakable url": (long_url, []),
-            "wide box drawing": (wide_divider, []),
-            "exactly at limit": ("a" * 120, []),
-            "one over limit": ("a " + "a" * 119, [1]),
-        }
-        for name, (text, expected) in cases.items():
+        for name, (text, expected) in _line_rule_cases().items():
             with self.subTest(case=name):
-                self.assertEqual(self._flagged(text), expected)
+                self.assertEqual(_flagged_lines(text), expected)
 
 
 if __name__ == "__main__":

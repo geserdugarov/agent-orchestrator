@@ -28,6 +28,29 @@ from orchestrator.state_machine import (
 )
 
 
+_LabelHistory = list[tuple[int, Optional[str]]]
+_CLOSED_SWEEP_LABELS = frozenset({
+    "implementing",
+    "documenting",
+    "validating",
+    "in_review",
+    "fixing",
+    "resolving_conflict",
+    "question",
+})
+
+
+def _has_closed_sweep_label(issue: "FakeIssue") -> bool:
+    return any(label.name in _CLOSED_SWEEP_LABELS for label in issue.labels)
+
+
+def _review_has_feedback(review: "FakePRReview") -> bool:
+    return (
+        (review.state or "").upper() in {"CHANGES_REQUESTED", "COMMENTED"}
+        and bool((review.body or "").strip())
+    )
+
+
 @dataclass
 class FakeUser:
     login: str = "human"
@@ -196,19 +219,21 @@ class FakeGitHubClient:
         # public "closed issues may be omitted on N-1 of every N calls"
         # contract is exercisable through the fake.
         self._pollable_calls = 0
-        self._issues: dict[int, FakeIssue] = {i.number: i for i in issues}
+        self._issues: dict[int, FakeIssue] = {
+            issue.number: issue for issue in issues
+        }
         self._pinned: dict[int, PinnedState] = {}
         self._comment_id = count(start=1000)
         self._pr_id = count(start=1)
         # New issues created via `create_child_issue` get sequential numbers
         # well above any number the test seeded so collisions are impossible.
         self._next_issue_number = count(
-            start=max((i.number for i in self._issues.values()), default=0) + 100
+            start=max(self._issues, default=0) + 100
         )
         # Recorders for assertions.
         self.posted_comments: list[tuple[int, str]] = []
         self.posted_pr_comments: list[tuple[int, str]] = []
-        self.label_history: list[tuple[int, Optional[str]]] = []
+        self.label_history: _LabelHistory = []
         self.opened_prs: list[FakePR] = []
         self.created_child_issues: list[FakeIssue] = []
         self.write_state_calls: int = 0
@@ -224,20 +249,6 @@ class FakeGitHubClient:
         # actually fires.
         self.deleted_remote_branches: list[str] = []
         self.delete_remote_branch_returns_ok: bool = True
-
-    def _for_worker_thread(self) -> "FakeGitHubClient":
-        """Mirror `GitHubClient._for_worker_thread`.
-
-        The real client returns a fresh PyGithub-backed instance for
-        thread-isolation of `Requester` state; the fake's state lives in
-        plain dicts that tests inspect directly, so returning `self`
-        preserves the existing test ergonomics (one fake, one source of
-        truth for assertions) while letting the production parallel path
-        call this method unconditionally. Tests that specifically need to
-        verify the worker-clone contract patch this method to count calls
-        or hand out distinct instances.
-        """
-        return self
 
     def seed_state(self, issue_number: int, **data: Any) -> None:
         """Pre-populate pinned state for an issue. The next read_pinned_state
@@ -278,14 +289,10 @@ class FakeGitHubClient:
         if every > 1 and (self._pollable_calls - 1) % every != 0:
             return out
         for issue in self._issues.values():
-            if not issue.closed or issue.number in seen:
-                continue
-            if any(
-                l.name in (
-                    "implementing", "documenting", "validating",
-                    "in_review", "fixing", "resolving_conflict", "question",
-                )
-                for l in issue.labels
+            if (
+                issue.closed
+                and issue.number not in seen
+                and _has_closed_sweep_label(issue)
             ):
                 seen.add(issue.number)
                 out.append(issue)
@@ -420,18 +427,18 @@ class FakeGitHubClient:
         self, issue: FakeIssue, after_id: Optional[int]
     ) -> list[FakeComment]:
         out: list[FakeComment] = []
-        for c in issue.comments:
-            if PINNED_STATE_MARKER in (c.body or ""):
+        for comment in issue.comments:
+            if PINNED_STATE_MARKER in (comment.body or ""):
                 continue
-            if after_id is None or c.id > after_id:
-                out.append(c)
+            if after_id is None or comment.id > after_id:
+                out.append(comment)
         return out
 
     def latest_comment_id(self, issue: FakeIssue) -> Optional[int]:
         latest: Optional[int] = None
-        for c in issue.comments:
-            if latest is None or c.id > latest:
-                latest = c.id
+        for comment in issue.comments:
+            if latest is None or comment.id > latest:
+                latest = comment.id
         return latest
 
     def open_pr(
@@ -546,12 +553,12 @@ class FakeGitHubClient:
         """PR conversation comments only (shares id space with
         `comments_after(issue, ...)`)."""
         out: list[FakeComment] = []
-        for c in pr.issue_comments:
-            if PINNED_STATE_MARKER in (c.body or ""):
+        for comment in pr.issue_comments:
+            if PINNED_STATE_MARKER in (comment.body or ""):
                 continue
-            if after_id is None or c.id > after_id:
-                out.append(c)
-        out.sort(key=lambda c: c.id)
+            if after_id is None or comment.id > after_id:
+                out.append(comment)
+        out.sort(key=lambda item: item.id)
         return out
 
     def pr_inline_comments_after(
@@ -559,12 +566,12 @@ class FakeGitHubClient:
     ) -> list[FakeComment]:
         """Inline review comments only (separate id space)."""
         out: list[FakeComment] = []
-        for c in pr.review_comments:
-            if PINNED_STATE_MARKER in (c.body or ""):
+        for comment in pr.review_comments:
+            if PINNED_STATE_MARKER in (comment.body or ""):
                 continue
-            if after_id is None or c.id > after_id:
-                out.append(c)
-        out.sort(key=lambda c: c.id)
+            if after_id is None or comment.id > after_id:
+                out.append(comment)
+        out.sort(key=lambda item: item.id)
         return out
 
     def pr_reviews_after(
@@ -572,15 +579,23 @@ class FakeGitHubClient:
     ) -> list[FakePRReview]:
         """PR review summaries with non-empty body in CHANGES_REQUESTED or
         COMMENTED state, mirroring the real client's filter."""
-        out: list[FakePRReview] = []
-        for r in pr.reviews:
-            state = (r.state or "").upper()
-            if state not in ("CHANGES_REQUESTED", "COMMENTED"):
-                continue
-            body = (r.body or "").strip()
-            if not body:
-                continue
-            if after_id is None or r.id > after_id:
-                out.append(r)
-        out.sort(key=lambda r: r.id)
-        return out
+        return sorted(
+            (
+                review
+                for review in pr.reviews
+                if _review_has_feedback(review)
+                and (after_id is None or review.id > after_id)
+            ),
+            key=lambda review: review.id,
+        )
+
+    def _for_worker_thread(self) -> "FakeGitHubClient":
+        """Mirror `GitHubClient._for_worker_thread`.
+
+        The real client returns a fresh PyGithub-backed instance for
+        thread-isolation of `Requester` state; the fake's state lives in
+        plain dicts that tests inspect directly, so returning `self`
+        preserves one source of truth for assertions. Tests that verify
+        worker cloning patch this method to return distinct instances.
+        """
+        return self

@@ -43,6 +43,10 @@ EXISTING_WORK_MESSAGE = "existing work satisfies the edit"
 PARK_AGENT_SILENT = "agent_silent"
 
 
+def _continue_comment(body: str) -> FakeComment:
+    return FakeComment(id=1, body=body, user=FakeUser(TRUSTED_AUTHOR))
+
+
 class ComputeUserContentHashTest(unittest.TestCase):
     """The hash must include user-visible content (title, body, human
     comments) and exclude orchestrator-authored content (pinned-state
@@ -133,15 +137,12 @@ class ContinueCommandActionTest(unittest.TestCase):
     real answer refuse; anything else (no command, or a command carrying
     guidance) passes through to the normal resume / drift path."""
 
-    def _c(self, body: str) -> FakeComment:
-        return FakeComment(id=1, body=body, user=FakeUser(TRUSTED_AUTHOR))
-
     def test_retryable_park_bare_continue_retries(self) -> None:
         for reason in (PARK_AGENT_SILENT, "agent_timeout"):
             with self.subTest(reason=reason):
                 self.assertEqual(
                     workflow._continue_command_action(
-                        [self._c(CONTINUE_COMMAND)], reason,
+                        [_continue_comment(CONTINUE_COMMAND)], reason,
                     ),
                     "retry",
                 )
@@ -151,7 +152,7 @@ class ContinueCommandActionTest(unittest.TestCase):
             with self.subTest(reason=reason):
                 self.assertEqual(
                     workflow._continue_command_action(
-                        [self._c(CONTINUE_COMMAND)], reason,
+                        [_continue_comment(CONTINUE_COMMAND)], reason,
                     ),
                     "refuse",
                 )
@@ -161,7 +162,7 @@ class ContinueCommandActionTest(unittest.TestCase):
         # the normal resume/drift path should feed that guidance to the dev.
         self.assertEqual(
             workflow._continue_command_action(
-                [self._c("/orchestrator continue\nrename the flag")],
+                [_continue_comment("/orchestrator continue\nrename the flag")],
                 PARK_AGENT_SILENT,
             ),
             "passthrough",
@@ -170,7 +171,7 @@ class ContinueCommandActionTest(unittest.TestCase):
     def test_no_command_passes_through(self) -> None:
         self.assertEqual(
             workflow._continue_command_action(
-                [self._c("just a normal reply")], PARK_AGENT_SILENT,
+                [_continue_comment("just a normal reply")], PARK_AGENT_SILENT,
             ),
             "passthrough",
         )

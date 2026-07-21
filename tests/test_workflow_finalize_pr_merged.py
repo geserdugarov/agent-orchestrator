@@ -9,6 +9,7 @@ from __future__ import annotations
 import unittest
 
 from orchestrator import workflow
+from orchestrator.github import PinnedState
 
 from tests.fakes import (
     FakeGitHubClient,
@@ -21,6 +22,7 @@ from tests.workflow_helpers import (
     _PatchedWorkflowMixin,
     _TEST_SPEC,
     _agent,
+    _state_with_pr_number,
 )
 
 
@@ -35,22 +37,10 @@ class FinalizeIfPrMergedTest(unittest.TestCase, _PatchedWorkflowMixin):
     the per-handler smoke tests.
     """
 
-    def _state_with_pr_number(
-        self, gh, issue_number, pr_number, **extra,
-    ):
-        from orchestrator.github import PinnedState
-        seed = {"pr_number": pr_number, **extra}
-        gh.seed_state(issue_number, **seed)
-        # Mirror what handlers do: read pinned state and hand it to the helper.
-        state = PinnedState(comment_id=None, data=dict(seed))
-        return state
-
     def test_no_pr_number_returns_false(self) -> None:
         gh = FakeGitHubClient()
         issue = make_issue(200, label="validating")
         gh.add_issue(issue)
-        from orchestrator.github import PinnedState
-
         result = self._run(
             lambda: self.assertFalse(
                 workflow._finalize_if_pr_merged(
@@ -73,7 +63,7 @@ class FinalizeIfPrMergedTest(unittest.TestCase, _PatchedWorkflowMixin):
             merged=False, state="open",
         )
         gh.add_pr(pr)
-        state = self._state_with_pr_number(gh, 201, 20100)
+        state = _state_with_pr_number(gh, 201, 20100)
 
         result = self._run(
             lambda: self.assertFalse(
@@ -101,7 +91,7 @@ class FinalizeIfPrMergedTest(unittest.TestCase, _PatchedWorkflowMixin):
             merged=False, state="closed",
         )
         gh.add_pr(pr)
-        state = self._state_with_pr_number(gh, 202, 20200)
+        state = _state_with_pr_number(gh, 202, 20200)
 
         result = self._run(
             lambda: self.assertFalse(
@@ -115,6 +105,10 @@ class FinalizeIfPrMergedTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertFalse(issue.closed)
         result["_cleanup_terminal_branch"].assert_not_called()
 
+
+class FinalizeMergedPrTest(unittest.TestCase, _PatchedWorkflowMixin):
+    """Merged PRs finalize labels, cleanup branches, and post usage."""
+
     def test_merged_pr_finalizes_open_issue(self) -> None:
         gh = FakeGitHubClient()
         issue = make_issue(203, label="implementing")
@@ -125,7 +119,7 @@ class FinalizeIfPrMergedTest(unittest.TestCase, _PatchedWorkflowMixin):
             merged=True, state="closed",
         )
         gh.add_pr(pr)
-        state = self._state_with_pr_number(
+        state = _state_with_pr_number(
             gh, 203, 20300,
             branch="orchestrator/geserdugarov__agent-orchestrator/issue-203",
         )
@@ -170,7 +164,7 @@ class FinalizeIfPrMergedTest(unittest.TestCase, _PatchedWorkflowMixin):
             merged=True, state="closed",
         )
         gh.add_pr(pr)
-        state = self._state_with_pr_number(gh, 204, 20400)
+        state = _state_with_pr_number(gh, 204, 20400)
 
         self._run(
             lambda: self.assertTrue(
@@ -196,7 +190,7 @@ class FinalizeIfPrMergedTest(unittest.TestCase, _PatchedWorkflowMixin):
             merged=True, state="closed",
         )
         gh.add_pr(pr)
-        state = self._state_with_pr_number(
+        state = _state_with_pr_number(
             gh, 205, 20500,
             issue_agent_runs=3, issue_total_tokens=45200,
             issue_total_cost_usd=0.87, issue_cost_sources=["estimated"],
@@ -240,7 +234,7 @@ class FinalizeIfPrMergedTest(unittest.TestCase, _PatchedWorkflowMixin):
             merged=True, state="closed",
         )
         gh.add_pr(pr)
-        state = self._state_with_pr_number(gh, 206, 20600)
+        state = _state_with_pr_number(gh, 206, 20600)
 
         self._run(
             lambda: workflow._finalize_if_pr_merged(

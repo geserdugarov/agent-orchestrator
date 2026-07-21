@@ -10,6 +10,7 @@ patch surface stays in one place when a new helper is plumbed through.
 from __future__ import annotations
 
 import contextlib
+import json
 import subprocess
 import tempfile
 from datetime import datetime, timedelta, timezone
@@ -20,6 +21,7 @@ from unittest.mock import MagicMock, patch
 
 from orchestrator import analytics, config, workflow
 from orchestrator.agents import AgentResult
+from orchestrator.github import PinnedState
 
 from tests.fakes import FakeGitHubClient, FakePR, FakePRRef, make_issue
 
@@ -88,6 +90,33 @@ def _issue_branch(issue_number: int, slug: str = TEST_REPO_SLUG) -> str:
 
 
 _FAKE_WT = Path("/tmp/orchestrator-test-wt-doesnt-matter")
+
+
+def _fake_worktree(*_args, **_kwargs) -> Path:
+    return _FAKE_WT
+
+
+def _state_with_pr_number(
+    gh: FakeGitHubClient,
+    issue_number: int,
+    pr_number: int,
+    **extra,
+) -> PinnedState:
+    seed = {"pr_number": pr_number, **extra}
+    gh.seed_state(issue_number, **seed)
+    return PinnedState(comment_id=None, data=dict(seed))
+
+
+def _analytics_records(path: Path) -> list[dict]:
+    if not path.exists():
+        return []
+    return [
+        json.loads(line)
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+
 # Tests don't shell out (the worktree/git helpers are mocked), so the values
 # only need to be plausible -- the slug/base reach `_build_review_prompt`,
 # `_push_branch`, and the `find_open_pr` / `open_pr` call sites and are

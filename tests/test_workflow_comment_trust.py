@@ -44,6 +44,31 @@ def _issue_with_comments():
     )
 
 
+def _prompts(issue, comments_text: str) -> dict[str, str]:
+    specs = [_TEST_SPEC]
+    return {
+        "implement": workflow._build_implement_prompt(
+            _TEST_SPEC, issue, comments_text, specs,
+        ),
+        "review": workflow._build_review_prompt(
+            _TEST_SPEC, issue, comments_text, specs,
+        ),
+        "documentation": workflow._build_documentation_prompt(
+            _TEST_SPEC, issue, comments_text, specs,
+        ),
+        "decompose": workflow._build_decompose_prompt(
+            _TEST_SPEC, issue, comments_text, specs,
+        ),
+        "question": workflow._build_question_prompt(
+            _TEST_SPEC, issue, comments_text, specs,
+        ),
+    }
+
+
+def _content_hash(issue) -> str:
+    return workflow._compute_user_content_hash(issue, set())
+
+
 class RecentCommentsTrustFilterTest(unittest.TestCase):
     def test_outsider_dropped_allowed_kept(self) -> None:
         with patch.object(config, "ALLOWED_ISSUE_AUTHORS", (_ALLOWED_AUTHOR,)):
@@ -67,31 +92,11 @@ class PromptBuilderTrustFilterTest(unittest.TestCase):
     surface the outsider's URL or instructions, while the allowed comment
     still reaches every one of them."""
 
-    def _prompts(self, issue, comments_text) -> dict[str, str]:
-        specs = [_TEST_SPEC]
-        return {
-            "implement": workflow._build_implement_prompt(
-                _TEST_SPEC, issue, comments_text, specs
-            ),
-            "review": workflow._build_review_prompt(
-                _TEST_SPEC, issue, comments_text, specs
-            ),
-            "documentation": workflow._build_documentation_prompt(
-                _TEST_SPEC, issue, comments_text, specs
-            ),
-            "decompose": workflow._build_decompose_prompt(
-                _TEST_SPEC, issue, comments_text, specs
-            ),
-            "question": workflow._build_question_prompt(
-                _TEST_SPEC, issue, comments_text, specs
-            ),
-        }
-
     def test_only_allowed_content_reaches_prompts(self) -> None:
         issue = _issue_with_comments()
         with patch.object(config, "ALLOWED_ISSUE_AUTHORS", (_ALLOWED_AUTHOR,)):
             comments_text = workflow._recent_comments_text(issue)
-        for name, prompt in self._prompts(issue, comments_text).items():
+        for name, prompt in _prompts(issue, comments_text).items():
             with self.subTest(builder=name):
                 self.assertNotIn(_MALICIOUS_URL, prompt)
                 self.assertNotIn(_PATCH_INSTRUCTION, prompt)
@@ -99,9 +104,6 @@ class PromptBuilderTrustFilterTest(unittest.TestCase):
 
 
 class DriftHashTrustFilterTest(unittest.TestCase):
-    def _hash(self, issue) -> str:
-        return workflow._compute_user_content_hash(issue, set())
-
     def test_only_allowed_content_changes_hash(self) -> None:
         base = make_issue(736, title="t", body="b")
         outsider = make_issue(
@@ -113,14 +115,14 @@ class DriftHashTrustFilterTest(unittest.TestCase):
             comments=[FakeComment(2, _ALLOWED_BODY, FakeUser(_ALLOWED_AUTHOR))],
         )
         with patch.object(config, "ALLOWED_ISSUE_AUTHORS", (_ALLOWED_AUTHOR,)):
-            base_hash = self._hash(base)
-            self.assertEqual(self._hash(outsider), base_hash)
-            self.assertNotEqual(self._hash(allowed), base_hash)
+            base_hash = _content_hash(base)
+            self.assertEqual(_content_hash(outsider), base_hash)
+            self.assertNotEqual(_content_hash(allowed), base_hash)
         # The no-change above is the allowlist doing the work, not an inert
         # comment body: with no allowlist the same outsider comment shifts
         # the hash.
         with patch.object(config, "ALLOWED_ISSUE_AUTHORS", ()):
-            self.assertNotEqual(self._hash(outsider), self._hash(base))
+            self.assertNotEqual(_content_hash(outsider), _content_hash(base))
 
 
 class QuoteCommentLineTest(unittest.TestCase):

@@ -17,6 +17,19 @@ from tests.fakes import make_issue
 from tests.workflow_helpers import _TEST_SPEC
 
 
+def _documentation_prompt() -> str:
+    return workflow._build_documentation_prompt(
+        _TEST_SPEC,
+        make_issue(67100, title="add foo flag", body="users want a foo flag"),
+        comments_text="",
+        specs=[_TEST_SPEC],
+    )
+
+
+def _patched_env(**values: str):
+    return patch.dict(os.environ, values, clear=False)
+
+
 class BuildDocumentationPromptTest(unittest.TestCase):
     """The documentation prompt is what teaches the agent the contract
     the parser relies on. Verify the contract is actually communicated:
@@ -28,16 +41,8 @@ class BuildDocumentationPromptTest(unittest.TestCase):
     accept ambiguous phrasing.
     """
 
-    def _build(self) -> str:
-        return workflow._build_documentation_prompt(
-            _TEST_SPEC,
-            make_issue(67100, title="add foo flag", body="users want a foo flag"),
-            comments_text="",
-            specs=[_TEST_SPEC],
-        )
-
     def test_instructs_diff_against_readme_and_docs(self) -> None:
-        prompt = self._build()
+        prompt = _documentation_prompt()
         self.assertIn("README.md", prompt)
         self.assertIn("docs/", prompt)
         base_ref = f"{_TEST_SPEC.remote_name}/{_TEST_SPEC.base_branch}"
@@ -48,7 +53,7 @@ class BuildDocumentationPromptTest(unittest.TestCase):
         # humans -- the final-docs pass must not target them. The prompt
         # has to call that out explicitly so the agent does not infer
         # `plans/` from convention.
-        prompt = self._build()
+        prompt = _documentation_prompt()
         self.assertIn("plans/", prompt)
         self.assertIn("roadmap", prompt)
         self.assertIn("out of scope", prompt)
@@ -58,7 +63,7 @@ class BuildDocumentationPromptTest(unittest.TestCase):
         # type: the agent mirrors the repo's own recent commit style, so a
         # project-specific prefix (`event:`, `career:`, ...) is allowed for a
         # documentation update just as for any other commit.
-        prompt = self._build()
+        prompt = _documentation_prompt()
         self.assertNotIn("docs:", prompt)
         self.assertNotIn('git commit -m "docs: <subject>"', prompt)
         # Repo-local style is taught instead, and the subject-only rule is
@@ -68,18 +73,18 @@ class BuildDocumentationPromptTest(unittest.TestCase):
         self.assertIn("subject line only", prompt)
 
     def test_specifies_machine_no_change_marker(self) -> None:
-        prompt = self._build()
+        prompt = _documentation_prompt()
         self.assertIn("DOCS: NO_CHANGE", prompt)
 
     def test_warns_against_ambiguous_no_change_text(self) -> None:
         # The prompt itself must tell the agent that prose like
         # 'no changes needed' will be parked, mirroring the parser's
         # refusal to accept it.
-        prompt = self._build()
+        prompt = _documentation_prompt()
         self.assertIn("'no changes needed'", prompt)
 
     def test_includes_issue_title_and_number(self) -> None:
-        prompt = self._build()
+        prompt = _documentation_prompt()
         self.assertIn("#67100", prompt)
         self.assertIn("add foo flag", prompt)
 
@@ -91,11 +96,8 @@ class RedactSecretsTest(unittest.TestCase):
     that echoed its key onto stderr would leak it into a public issue.
     """
 
-    def _patched_env(self, **values: str):
-        return patch.dict(os.environ, values, clear=False)
-
     def test_redacts_provider_api_key(self) -> None:
-        with self._patched_env(ANTHROPIC_API_KEY="sk-ant-supersecretvalue123"):
+        with _patched_env(ANTHROPIC_API_KEY="sk-ant-supersecretvalue123"):
             out = workflow._redact_secrets(
                 "Traceback ...\n  401 sk-ant-supersecretvalue123 invalid"
             )
@@ -106,7 +108,7 @@ class RedactSecretsTest(unittest.TestCase):
         # GITHUB_TOKEN itself doesn't end in any of the suffixes we strip,
         # but it's the orchestrator's own creds for git/gh subprocesses --
         # cover it explicitly via _SECRET_KEY_NAMES.
-        with self._patched_env(GITHUB_TOKEN="ghp_thisisthetokenvalue"):
+        with _patched_env(GITHUB_TOKEN="ghp_thisisthetokenvalue"):
             out = workflow._redact_secrets("remote: bad credential ghp_thisisthetokenvalue")
         self.assertNotIn("ghp_thisisthetokenvalue", out)
 
@@ -119,7 +121,8 @@ class RedactSecretsTest(unittest.TestCase):
         # the credential into the park comment.
         token = "ghp_filebackedtokenvalue9876"
         # Ensure the env path wouldn't catch it on its own.
-        env_without_token = {name: value for name, value in os.environ.items() if name != "GITHUB_TOKEN"}
+        env_without_token = dict(os.environ)
+        env_without_token.pop("GITHUB_TOKEN", None)
         with patch.dict(os.environ, env_without_token, clear=True), \
                 patch.object(config, "GITHUB_TOKEN", token):
             out = workflow._redact_secrets(f"cat ran: {token} got captured")
@@ -129,7 +132,7 @@ class RedactSecretsTest(unittest.TestCase):
     def test_redacts_arbitrary_provider_via_suffix(self) -> None:
         # The suffix list is what catches the long tail (HF_TOKEN,
         # GEMINI_API_KEY, ...) without us enumerating every provider.
-        with self._patched_env(GEMINI_API_KEY="ya29.deadbeefdeadbeef"):
+        with _patched_env(GEMINI_API_KEY="ya29.deadbeefdeadbeef"):
             out = workflow._redact_secrets("got ya29.deadbeefdeadbeef back")
         self.assertNotIn("ya29.deadbeefdeadbeef", out)
 
@@ -138,22 +141,27 @@ class RedactSecretsTest(unittest.TestCase):
         # so the suffix predicate misses them. _agent_env only strips
         # GitHub-aliased tokens, so a bare $TOKEN passes through to the
         # agent and would leak unredacted if echoed to stderr.
-        with self._patched_env(TOKEN="ghp_barenametokenvalue123"):
+        with _patched_env(TOKEN="ghp_barenametokenvalue123"):
             out = workflow._redact_secrets("auth failed for ghp_barenametokenvalue123")
         self.assertNotIn("ghp_barenametokenvalue123", out)
-        with self._patched_env(PASSWORD="hunter2isthepasswordvalue"):
+        with _patched_env(PASSWORD="hunter2isthepasswordvalue"):
             out = workflow._redact_secrets("login: hunter2isthepasswordvalue rejected")
         self.assertNotIn("hunter2isthepasswordvalue", out)
+
+
+
+class RedactionBoundaryTest(unittest.TestCase):
+    """Redaction preserves harmless text and handles output boundaries."""
 
     def test_leaves_short_values_alone(self) -> None:
         # A 4-char throwaway value would mask incidental substrings. The
         # min-length floor protects regular english text in stderr.
-        with self._patched_env(DEV_KEY="true"):
+        with _patched_env(DEV_KEY="true"):
             out = workflow._redact_secrets("status was true and the build ran")
         self.assertEqual(out, "status was true and the build ran")
 
     def test_leaves_non_secret_keys_alone(self) -> None:
-        with self._patched_env(BUILD_NUMBER="this-string-is-long-enough"):
+        with _patched_env(BUILD_NUMBER="this-string-is-long-enough"):
             out = workflow._redact_secrets("BUILD this-string-is-long-enough done")
         self.assertIn("this-string-is-long-enough", out)
 
@@ -165,7 +173,7 @@ class RedactSecretsTest(unittest.TestCase):
         # slicing, a key that spans the cut would survive in the visible
         # tail. Pad noise so the secret would otherwise straddle the cap.
         secret = "sk-ant-spanningthecutboundary123"
-        with self._patched_env(ANTHROPIC_API_KEY=secret):
+        with _patched_env(ANTHROPIC_API_KEY=secret):
             stderr = ("X" * (workflow._STDERR_TAIL_BUDGET - 8)) + secret + " trailing"
             block = workflow._format_stderr_diagnostics(
                 AgentResult(
@@ -180,7 +188,7 @@ class RedactSecretsTest(unittest.TestCase):
         self.assertIn("trailing", block)
 
     def test_log_tail_redacts(self) -> None:
-        with self._patched_env(OPENAI_API_KEY="sk-proj-loglinevaluexyz"):
+        with _patched_env(OPENAI_API_KEY="sk-proj-loglinevaluexyz"):
             tail = workflow._stderr_log_tail(
                 AgentResult(
                     session_id="s", last_message="", exit_code=1,
@@ -198,7 +206,7 @@ class RedactSecretsTest(unittest.TestCase):
         # "***")` would no longer match the env value verbatim, leaking
         # the secret into the park comment.
         secret = "-----BEGIN PRIVATE KEY-----\nAAAABBBBCCCCDDDD\n-----END PRIVATE KEY-----\n"
-        with self._patched_env(SSH_PRIVATE_KEY=secret):
+        with _patched_env(SSH_PRIVATE_KEY=secret):
             block = workflow._format_stderr_diagnostics(
                 AgentResult(
                     session_id="s", last_message="", exit_code=1,
@@ -212,7 +220,7 @@ class RedactSecretsTest(unittest.TestCase):
 
     def test_log_tail_redacts_multiline_secret_at_eof(self) -> None:
         secret = "line1-of-secret-value\nline2-of-secret-value\n"
-        with self._patched_env(API_TOKEN=secret):
+        with _patched_env(API_TOKEN=secret):
             tail = workflow._stderr_log_tail(
                 AgentResult(
                     session_id="s", last_message="", exit_code=1,

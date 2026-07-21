@@ -11,7 +11,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from typing import Optional
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from orchestrator import analytics, config, usage, workflow
 from orchestrator.agents import AgentResult
@@ -34,6 +34,7 @@ from tests.workflow_helpers import (
     _FAKE_WT,
     _PatchedWorkflowMixin,
     _TEST_SPEC,
+    _analytics_records,
 )
 
 
@@ -66,10 +67,6 @@ def _claude_stdout(
     *,
     msg_id: str = "msg-1",
     model: str = "claude-sonnet-4-6",
-    input_tokens: int = 1234,
-    output_tokens: int = 567,
-    cache_read: int = 100,
-    cache_write_5m: int = 80,
     total_cost_usd: Optional[float] = None,
     num_turns: int = 2,
 ) -> str:
@@ -85,10 +82,10 @@ def _claude_stdout(
             "id": msg_id,
             "model": model,
             "usage": {
-                "input_tokens": input_tokens,
-                "output_tokens": output_tokens,
-                "cache_read_input_tokens": cache_read,
-                "cache_creation_input_tokens": cache_write_5m,
+                "input_tokens": 1234,
+                "output_tokens": 567,
+                "cache_read_input_tokens": 100,
+                "cache_creation_input_tokens": 80,
             },
         },
     }
@@ -129,6 +126,20 @@ def _claude_stdout_with_skills(
     return "\n".join([json.dumps(assistant), json.dumps(result_frame)])
 
 
+def _skill_events(gh: FakeGitHubClient) -> list[dict]:
+    return [
+        event for event in gh.recorded_events
+        if event["event"] == EVENT_SKILL_TRIGGERED
+    ]
+
+
+class _RaisingOnSkillGitHubClient(FakeGitHubClient):
+    def emit_event(self, event, **kwargs):
+        if event == EVENT_SKILL_TRIGGERED:
+            raise RuntimeError("emit boom")
+        return super().emit_event(event, **kwargs)
+
+
 class AgentAnalyticsTest(unittest.TestCase, _PatchedWorkflowMixin):
     """`_run_agent_tracked` appends a single analytics record per agent
     exit, carrying the configured spec, resume/session context, retry
@@ -137,16 +148,6 @@ class AgentAnalyticsTest(unittest.TestCase, _PatchedWorkflowMixin):
     raw stdout, stderr, or any auth header. The existing audit
     `agent_spawn` / `agent_exit` events must continue to fire unchanged.
     """
-
-    @staticmethod
-    def _exit_records(path: Path) -> list[dict]:
-        if not path.exists():
-            return []
-        return [
-            json.loads(line)
-            for line in path.read_text(encoding="utf-8").splitlines()
-            if line.strip()
-        ]
 
     def test_implementing_spawn_appends_record(self) -> None:
         # End-to-end: an implementing tick spawns the dev agent, the
@@ -174,7 +175,7 @@ class AgentAnalyticsTest(unittest.TestCase, _PatchedWorkflowMixin):
                 analytics_log_path=path,
             )
 
-            records = self._exit_records(path)
+            records = _analytics_records(path)
             self.assertEqual(len(records), 1)
             rec = records[0]
             # Audit context — same shape `agent_exit` uses, so an
@@ -241,7 +242,7 @@ class AgentAnalyticsTest(unittest.TestCase, _PatchedWorkflowMixin):
                 analytics_log_path=path,
             )
 
-            records = self._exit_records(path)
+            records = _analytics_records(path)
             self.assertEqual(len(records), 1)
             blob = json.dumps(records[0])
             # The configured token, the prompt body, the stderr tail, and
@@ -299,7 +300,7 @@ class AgentAnalyticsTest(unittest.TestCase, _PatchedWorkflowMixin):
                     analytics_log_path=path,
                 )
 
-            records = self._exit_records(path)
+            records = _analytics_records(path)
             reviewer = [
                 record for record in records
                 if record.get("agent_role") == ROLE_REVIEWER
@@ -344,7 +345,7 @@ class AgentAnalyticsTest(unittest.TestCase, _PatchedWorkflowMixin):
                 analytics_log_path=path,
             )
 
-            records = self._exit_records(path)
+            records = _analytics_records(path)
             self.assertEqual(len(records), 1)
             rec = records[0]
             self.assertEqual(rec["exit_code"], -1)
@@ -394,7 +395,7 @@ class AgentAnalyticsTest(unittest.TestCase, _PatchedWorkflowMixin):
             self.assertEqual(exits[0]["session_id"], "sess-x")
             self.assertEqual(exits[0]["exit_code"], 0)
             # And exactly one analytics record for the same invocation.
-            self.assertEqual(len(self._exit_records(path)), 1)
+            self.assertEqual(len(_analytics_records(path)), 1)
 
     def test_disabled_sink_writes_no_analytics_file(self) -> None:
         # `ANALYTICS_LOG_PATH=None` is the documented disable knob;
@@ -428,6 +429,13 @@ class AgentAnalyticsTest(unittest.TestCase, _PatchedWorkflowMixin):
                 EVENT_AGENT_EXIT,
                 {event["event"] for event in gh.recorded_events},
             )
+
+
+class AgentAnalyticsModelFallbackTest(
+    unittest.TestCase,
+    _PatchedWorkflowMixin,
+):
+    """Configured models fill only streams that omit their model."""
 
     def test_codex_no_model_uses_spec_fallback(self) -> None:
         # Reviewer-flagged regression: a codex run whose stdout includes
@@ -464,7 +472,7 @@ class AgentAnalyticsTest(unittest.TestCase, _PatchedWorkflowMixin):
                     retry_count=1,
                 )
 
-            records = self._exit_records(path)
+            records = _analytics_records(path)
             self.assertEqual(len(records), 1)
             rec = records[0]
             self.assertEqual(rec["backend"], BACKEND_CODEX)
@@ -512,9 +520,45 @@ class AgentAnalyticsTest(unittest.TestCase, _PatchedWorkflowMixin):
                     retry_count=1,
                 )
 
-            records = self._exit_records(path)
+            records = _analytics_records(path)
             self.assertEqual(len(records), 1)
             self.assertEqual(records[0]["models"], ["claude-sonnet-4-6"])
+
+
+def _run_usage(
+    *,
+    stdout: str,
+    backend: str = BACKEND_CLAUDE,
+    track: bool = False,
+    analytics_path: Optional[Path] = None,
+    extra_args: tuple[str, ...] = (),
+) -> tuple[FakeGitHubClient, AgentResult]:
+    gh = FakeGitHubClient()
+    with patch.object(analytics, "ANALYTICS_LOG_PATH", analytics_path), \
+            patch.object(analytics, "TRAJECTORY_LOG_PATH", None), \
+            patch.object(analytics, "TRACK_SKILL_TRIGGERS", track), \
+            patch.object(workflow, "run_agent") as run_mock:
+        run_mock.return_value = AgentResult(
+            session_id="sess-usage",
+            last_message="",
+            exit_code=0,
+            timed_out=False,
+            stdout=stdout,
+            stderr="",
+        )
+        result = workflow._run_agent_tracked(
+            gh, 401,
+            agent_role=ROLE_DEVELOPER,
+            stage=LABEL_IMPLEMENTING,
+            backend=backend,
+            prompt="ignored",
+            cwd=_FAKE_WT,
+            agent_spec=backend,
+            extra_args=extra_args,
+            review_round=2,
+            retry_count=1,
+        )
+    return gh, result
 
 
 class RunUsageSurfacedTest(unittest.TestCase):
@@ -523,52 +567,6 @@ class RunUsageSurfacedTest(unittest.TestCase):
     parsed for the analytics record -- surfaced even when the sink is off,
     left `None` when the usage parse fails (fail-open), and never disturbing
     the analytics record or the `skill_triggered` audit events."""
-
-    @staticmethod
-    def _records(path: Path) -> list[dict]:
-        if not path.exists():
-            return []
-        return [
-            json.loads(line)
-            for line in path.read_text(encoding="utf-8").splitlines()
-            if line.strip()
-        ]
-
-    def _run(
-        self,
-        *,
-        stdout: str,
-        backend: str = BACKEND_CLAUDE,
-        track: bool = False,
-        analytics_path: Optional[Path] = None,
-        extra_args: tuple[str, ...] = (),
-    ) -> tuple[FakeGitHubClient, AgentResult]:
-        gh = FakeGitHubClient()
-        with patch.object(analytics, "ANALYTICS_LOG_PATH", analytics_path), \
-                patch.object(analytics, "TRAJECTORY_LOG_PATH", None), \
-                patch.object(analytics, "TRACK_SKILL_TRIGGERS", track), \
-                patch.object(workflow, "run_agent") as run_mock:
-            run_mock.return_value = AgentResult(
-                session_id="sess-usage",
-                last_message="",
-                exit_code=0,
-                timed_out=False,
-                stdout=stdout,
-                stderr="",
-            )
-            result = workflow._run_agent_tracked(
-                gh, 401,
-                agent_role=ROLE_DEVELOPER,
-                stage=LABEL_IMPLEMENTING,
-                backend=backend,
-                prompt="ignored",
-                cwd=_FAKE_WT,
-                agent_spec=backend,
-                extra_args=extra_args,
-                review_round=2,
-                retry_count=1,
-            )
-        return gh, result
 
     def test_agent_result_usage_defaults_to_none(self) -> None:
         # The new field is defaulted so every existing construction stays
@@ -582,7 +580,7 @@ class RunUsageSurfacedTest(unittest.TestCase):
     def test_result_carries_usage_without_sink(self) -> None:
         # Sink OFF: the parsed metrics still reach the caller off `.usage`,
         # proving the plumbing is independent of the observability sink.
-        gh, result = self._run(
+        gh, result = _run_usage(
             stdout=_claude_stdout(total_cost_usd=0.0123),
             analytics_path=None,
         )
@@ -605,7 +603,7 @@ class RunUsageSurfacedTest(unittest.TestCase):
         # The surfaced metrics are the SAME object the record used, so the
         # codex spec-fallback model path (extra_args -> `_configured_model`
         # -> `fallback_model`) is visible on `.usage` too.
-        _, result = self._run(
+        _, result = _run_usage(
             stdout=_codex_stdout_no_model(),
             backend=BACKEND_CODEX,
             extra_args=("-m", "gpt-5-codex"),
@@ -625,14 +623,14 @@ class RunUsageSurfacedTest(unittest.TestCase):
                 analytics.usage, "parse_agent_usage",
                 side_effect=RuntimeError("boom"),
             ), self.assertLogs(analytics.log, level="ERROR"):
-                gh, result = self._run(
+                gh, result = _run_usage(
                     stdout=_claude_stdout(),
                     analytics_path=path,
                 )
             self.assertEqual(result.session_id, "sess-usage")
             self.assertIsNone(result.usage)
             # Parse failure drops the whole record, so nothing is written.
-            self.assertEqual(self._records(path), [])
+            self.assertEqual(_analytics_records(path), [])
             # Lifecycle audit events fired before the analytics parse ran.
             self.assertIn(
                 EVENT_AGENT_EXIT, {event["event"] for event in gh.recorded_events},
@@ -648,12 +646,12 @@ class RunUsageSurfacedTest(unittest.TestCase):
         # carries the same metrics.
         with tempfile.TemporaryDirectory(prefix="usage-unchanged-") as td:
             path = Path(td) / "analytics.jsonl"
-            gh, agent_result = self._run(
+            gh, agent_result = _run_usage(
                 stdout=_claude_stdout_with_skills(skills=("develop", "review")),
                 track=True,
                 analytics_path=path,
             )
-            records = self._records(path)
+            records = _analytics_records(path)
             self.assertEqual(len(records), 1)
             exit_record = records[0]
             self.assertEqual(exit_record["event"], EVENT_AGENT_EXIT)
@@ -710,64 +708,53 @@ def _claude_trajectory_stdout(
     return "\n".join(json.dumps(frame) for frame in frames)
 
 
+def _run_trajectory(
+    *,
+    stdout: str,
+    prompt: str,
+    trajectory_path: Optional[Path],
+    analytics_path: Optional[Path] = None,
+) -> AgentResult:
+    gh = FakeGitHubClient()
+    with patch.object(analytics, "ANALYTICS_LOG_PATH", analytics_path), \
+            patch.object(analytics, "TRAJECTORY_LOG_PATH", trajectory_path), \
+            patch.object(analytics, "TRACK_SKILL_TRIGGERS", False), \
+            patch.object(workflow, "run_agent") as run_mock:
+        run_mock.return_value = AgentResult(
+            session_id="sess-traj",
+            last_message="",
+            exit_code=0,
+            timed_out=False,
+            stdout=stdout,
+            stderr="",
+        )
+        return workflow._run_agent_tracked(
+            gh, 301,
+            agent_role=ROLE_DEVELOPER,
+            stage=LABEL_IMPLEMENTING,
+            backend=BACKEND_CLAUDE,
+            prompt=prompt,
+            cwd=_FAKE_WT,
+            agent_spec=BACKEND_CLAUDE,
+            review_round=2,
+            retry_count=1,
+        )
+
+
 class TrajectoryRecordingTest(unittest.TestCase):
     """`_run_agent_tracked` forwards its prompt to `record_agent_exit`, which
     writes one redacted `agent_trajectory` record only when
     `TRAJECTORY_LOG_PATH` is enabled -- never disturbing the baseline
     `agent_exit` analytics record or the `skill_triggered` audit events."""
 
-    @staticmethod
-    def _records(path: Path) -> list[dict]:
-        if not path.exists():
-            return []
-        return [
-            json.loads(line)
-            for line in path.read_text(encoding="utf-8").splitlines()
-            if line.strip()
-        ]
-
-    def _run(
-        self,
-        *,
-        stdout: str,
-        prompt: str,
-        traj_path: Optional[Path],
-        analytics_path: Optional[Path] = None,
-        backend: str = BACKEND_CLAUDE,
-        track: bool = False,
-    ) -> AgentResult:
-        gh = FakeGitHubClient()
-        with patch.object(analytics, "ANALYTICS_LOG_PATH", analytics_path), \
-                patch.object(analytics, "TRAJECTORY_LOG_PATH", traj_path), \
-                patch.object(analytics, "TRACK_SKILL_TRIGGERS", track), \
-                patch.object(workflow, "run_agent") as run_mock:
-            run_mock.return_value = AgentResult(
-                session_id="sess-traj",
-                last_message="",
-                exit_code=0,
-                timed_out=False,
-                stdout=stdout,
-                stderr="",
-            )
-            return workflow._run_agent_tracked(
-                gh, 301,
-                agent_role=ROLE_DEVELOPER,
-                stage=LABEL_IMPLEMENTING,
-                backend=backend,
-                prompt=prompt,
-                cwd=_FAKE_WT,
-                agent_spec=backend,
-                review_round=2,
-                retry_count=1,
-            )
-
     def test_prompt_is_forwarded_to_record_agent_exit(self) -> None:
         # The orchestrator-built prompt reaches `record_agent_exit` as the
         # `prompt` kwarg -- the seam that lets it become `user_input`.
         gh = FakeGitHubClient()
+        record_mock = MagicMock(return_value=None)
         with patch.object(
-            analytics, "record_agent_exit", return_value=None,
-        ) as rec_mock, patch.object(workflow, "run_agent") as run_mock:
+            analytics, "record_agent_exit", record_mock,
+        ), patch.object(workflow, "run_agent") as run_mock:
             run_mock.return_value = AgentResult(
                 session_id="s", last_message="", exit_code=0,
                 timed_out=False, stdout="", stderr="",
@@ -780,22 +767,25 @@ class TrajectoryRecordingTest(unittest.TestCase):
                 prompt="PROMPT-MARKER-XYZ",
                 cwd=_FAKE_WT,
             )
-        self.assertEqual(rec_mock.call_count, 1)
-        self.assertEqual(rec_mock.call_args.kwargs["prompt"], "PROMPT-MARKER-XYZ")
+        self.assertEqual(record_mock.call_count, 1)
+        self.assertEqual(
+            record_mock.call_args.kwargs["prompt"],
+            "PROMPT-MARKER-XYZ",
+        )
 
     def test_redacts_user_input(self) -> None:
         with tempfile.TemporaryDirectory(prefix="traj-on-") as td:
             t_path = Path(td) / "trajectory.jsonl"
             a_path = Path(td) / "analytics.jsonl"
-            self._run(
+            _run_trajectory(
                 stdout=_claude_trajectory_stdout(
                     tool_result="hi", final_output="implemented",
                 ),
                 prompt="implement the widget",
-                traj_path=t_path,
+                trajectory_path=t_path,
                 analytics_path=a_path,
             )
-            traj = self._records(t_path)
+            traj = _analytics_records(t_path)
             self.assertEqual(len(traj), 1)
             rec = traj[0]
             self.assertEqual(rec["event"], EVENT_AGENT_TRAJECTORY)
@@ -809,7 +799,7 @@ class TrajectoryRecordingTest(unittest.TestCase):
                 ["tool_call", "tool_result"],
             )
             # Baseline agent_exit analytics record still written, sans prompt.
-            base = self._records(a_path)
+            base = _analytics_records(a_path)
             self.assertEqual(len(base), 1)
             self.assertEqual(base[0]["event"], EVENT_AGENT_EXIT)
             self.assertNotIn("user_input", base[0])
@@ -819,17 +809,17 @@ class TrajectoryRecordingTest(unittest.TestCase):
         # the baseline agent_exit record is still written.
         with tempfile.TemporaryDirectory(prefix="traj-off-") as td:
             a_path = Path(td) / "analytics.jsonl"
-            self._run(
+            _run_trajectory(
                 stdout=_claude_trajectory_stdout(),
                 prompt="implement the widget",
-                traj_path=None,
+                trajectory_path=None,
                 analytics_path=a_path,
             )
             self.assertEqual(
                 sorted(p.name for p in Path(td).iterdir()),
                 ["analytics.jsonl"],
             )
-            base = self._records(a_path)
+            base = _analytics_records(a_path)
             self.assertEqual(len(base), 1)
             self.assertNotIn("user_input", base[0])
 
@@ -872,33 +862,38 @@ class TrajectoryRecordingTest(unittest.TestCase):
             self.assertFalse(t_path.exists())
 
 
+def _drive_trajectory_sink(
+    gh: FakeGitHubClient,
+    *,
+    analytics_path: Path,
+) -> None:
+    with patch.object(analytics, "ANALYTICS_LOG_PATH", analytics_path), \
+            patch.object(workflow, "run_agent") as run_mock:
+        run_mock.return_value = AgentResult(
+            session_id="sess-traj-guard",
+            last_message="",
+            exit_code=0,
+            timed_out=False,
+            stdout=_claude_trajectory_stdout(
+                tool_result="hi", final_output="done",
+            ),
+            stderr="",
+        )
+        workflow._run_agent_tracked(
+            gh, 562,
+            agent_role=ROLE_DEVELOPER,
+            stage=LABEL_IMPLEMENTING,
+            backend=BACKEND_CLAUDE,
+            prompt="implement the widget",
+            cwd=_FAKE_WT,
+        )
+
+
 class TrajectorySinkHermeticityTest(unittest.TestCase):
     """Regression guard for the hermetic test default: the global conftest
     fixture pins `TRAJECTORY_LOG_PATH` to None so a workflow analytics path
     can never write to an operator-configured trajectory sink -- even though
     the same synthetic run writes one record when the sink is left on."""
-
-    def _drive(self, gh: FakeGitHubClient, *, analytics_path: Path) -> None:
-        with patch.object(analytics, "ANALYTICS_LOG_PATH", analytics_path), \
-                patch.object(workflow, "run_agent") as run_mock:
-            run_mock.return_value = AgentResult(
-                session_id="sess-traj-guard",
-                last_message="",
-                exit_code=0,
-                timed_out=False,
-                stdout=_claude_trajectory_stdout(
-                    tool_result="hi", final_output="done",
-                ),
-                stderr="",
-            )
-            workflow._run_agent_tracked(
-                gh, 562,
-                agent_role=ROLE_DEVELOPER,
-                stage=LABEL_IMPLEMENTING,
-                backend=BACKEND_CLAUDE,
-                prompt="implement the widget",
-                cwd=_FAKE_WT,
-            )
 
     def test_global_fixture_pins_trajectory_sink_off(self) -> None:
         # The autouse conftest fixture neutralizes any operator-exported
@@ -918,7 +913,10 @@ class TrajectorySinkHermeticityTest(unittest.TestCase):
             with patch.object(analytics, "TRAJECTORY_LOG_PATH", configured):
                 # Control: the configured sink genuinely captures the synthetic
                 # run, so the suppression asserted below is a real effect.
-                self._drive(FakeGitHubClient(), analytics_path=a_path)
+                _drive_trajectory_sink(
+                    FakeGitHubClient(),
+                    analytics_path=a_path,
+                )
                 self.assertTrue(configured.exists())
                 configured.unlink()
 
@@ -929,7 +927,10 @@ class TrajectorySinkHermeticityTest(unittest.TestCase):
                 # record is still produced.
                 with patch.object(analytics, "TRAJECTORY_LOG_PATH", None):
                     # (a) not created: an absent sink stays absent.
-                    self._drive(FakeGitHubClient(), analytics_path=a_path)
+                    _drive_trajectory_sink(
+                        FakeGitHubClient(),
+                        analytics_path=a_path,
+                    )
                     self.assertFalse(
                         configured.exists(),
                         "trajectory sink created the operator-configured "
@@ -939,7 +940,10 @@ class TrajectorySinkHermeticityTest(unittest.TestCase):
                     # byte unchanged.
                     sentinel = '{"event": "pre-existing"}\n'
                     configured.write_text(sentinel, encoding="utf-8")
-                    self._drive(FakeGitHubClient(), analytics_path=a_path)
+                    _drive_trajectory_sink(
+                        FakeGitHubClient(),
+                        analytics_path=a_path,
+                    )
                     self.assertEqual(
                         configured.read_text(encoding="utf-8"), sentinel,
                         "trajectory sink appended to the operator-configured "
@@ -948,70 +952,56 @@ class TrajectorySinkHermeticityTest(unittest.TestCase):
                 self.assertTrue(a_path.exists())
 
 
+def _run_skill_agent(
+    gh: FakeGitHubClient,
+    *,
+    stdout: str,
+    track: bool,
+    backend: str = BACKEND_CLAUDE,
+) -> AgentResult:
+    with patch.object(analytics, "ANALYTICS_LOG_PATH", None), \
+            patch.object(analytics, "TRAJECTORY_LOG_PATH", None), \
+            patch.object(analytics, "TRACK_SKILL_TRIGGERS", track), \
+            patch.object(workflow, "run_agent") as run_mock:
+        run_mock.return_value = AgentResult(
+            session_id="sess-skill",
+            last_message="",
+            exit_code=0,
+            timed_out=False,
+            stdout=stdout,
+            stderr="",
+        )
+        return workflow._run_agent_tracked(
+            gh, 201,
+            agent_role=ROLE_DEVELOPER,
+            stage=LABEL_IMPLEMENTING,
+            backend=backend,
+            prompt="ignored",
+            cwd=_FAKE_WT,
+            agent_spec=backend,
+            review_round=2,
+            retry_count=1,
+        )
+
+
 class SkillTriggeredEventTest(unittest.TestCase):
     """`_run_agent_tracked` emits one `skill_triggered` audit event per
     distinct triggered skill, gated on `TRACK_SKILL_TRIGGERS` and reusing the
     list `record_agent_exit` already parsed -- never re-reading stdout, never
     leaking the `Skill` args, and never breaking a run if the emit raises."""
 
-    @staticmethod
-    def _skill_events(gh: FakeGitHubClient) -> list[dict]:
-        return [
-            event for event in gh.recorded_events
-            if event["event"] == EVENT_SKILL_TRIGGERED
-        ]
-
-    def _run(
-        self,
-        gh: FakeGitHubClient,
-        *,
-        stdout: str,
-        track: bool,
-        backend: str = BACKEND_CLAUDE,
-        review_round: Optional[int] = 2,
-        retry_count: Optional[int] = 1,
-    ) -> AgentResult:
-        # Both sinks pinned off: the analytics + trajectory records are
-        # no-ops, but the skill parse + return (which drives the audit
-        # emission) still runs. Pinning the trajectory sink here keeps the
-        # test hermetic even under `python -m unittest`, which never loads
-        # the conftest autouse fixture.
-        with patch.object(analytics, "ANALYTICS_LOG_PATH", None), \
-                patch.object(analytics, "TRAJECTORY_LOG_PATH", None), \
-                patch.object(analytics, "TRACK_SKILL_TRIGGERS", track), \
-                patch.object(workflow, "run_agent") as run_mock:
-            run_mock.return_value = AgentResult(
-                session_id="sess-skill",
-                last_message="",
-                exit_code=0,
-                timed_out=False,
-                stdout=stdout,
-                stderr="",
-            )
-            return workflow._run_agent_tracked(
-                gh, 201,
-                agent_role=ROLE_DEVELOPER,
-                stage=LABEL_IMPLEMENTING,
-                backend=backend,
-                prompt="ignored",
-                cwd=_FAKE_WT,
-                agent_spec=backend,
-                review_round=review_round,
-                retry_count=retry_count,
-            )
-
     def test_emits_once_per_distinct_skill(self) -> None:
         # develop fires twice, review once: two events in first-seen order,
         # one per DISTINCT skill (the repeat does not double-emit).
         gh = FakeGitHubClient()
-        self._run(
+        _run_skill_agent(
             gh,
             stdout=_claude_stdout_with_skills(
                 skills=("develop", "develop", "review"),
             ),
             track=True,
         )
-        events = self._skill_events(gh)
+        events = _skill_events(gh)
         self.assertEqual([event["skill"] for event in events], ["develop", "review"])
         for event in events:
             self.assertEqual(event["agent"], BACKEND_CLAUDE)
@@ -1020,7 +1010,10 @@ class SkillTriggeredEventTest(unittest.TestCase):
             self.assertEqual(event["review_round"], 2)
             self.assertEqual(event["retry_count"], 1)
         # The baseline audit lifecycle events still fire alongside.
-        kinds = {event["event"] for event in gh.recorded_events}
+        kinds = {
+            recorded_event["event"]
+            for recorded_event in gh.recorded_events
+        }
         self.assertIn(EVENT_AGENT_SPAWN, kinds)
         self.assertIn(EVENT_AGENT_EXIT, kinds)
 
@@ -1029,12 +1022,12 @@ class SkillTriggeredEventTest(unittest.TestCase):
         # but no `skill_triggered` at all -- gating is inherited from the
         # analytics layer returning an empty list.
         gh = FakeGitHubClient()
-        self._run(
+        _run_skill_agent(
             gh,
             stdout=_claude_stdout_with_skills(skills=("develop", "review")),
             track=False,
         )
-        self.assertEqual(self._skill_events(gh), [])
+        self.assertEqual(_skill_events(gh), [])
         self.assertIn(
             EVENT_AGENT_EXIT, {event["event"] for event in gh.recorded_events},
         )
@@ -1042,21 +1035,21 @@ class SkillTriggeredEventTest(unittest.TestCase):
     def test_no_triggers_emits_no_skill_events(self) -> None:
         # Switch on but the stream triggered nothing: no events emitted.
         gh = FakeGitHubClient()
-        self._run(gh, stdout=_claude_stdout(), track=True)
-        self.assertEqual(self._skill_events(gh), [])
+        _run_skill_agent(gh, stdout=_claude_stdout(), track=True)
+        self.assertEqual(_skill_events(gh), [])
 
     def test_skill_args_never_reach_the_event(self) -> None:
         # Privacy: the `Skill` args payload must never land in an event.
         gh = FakeGitHubClient()
         marker = "ghp_LEAKED_SKILL_ARG_DO_NOT_EMIT"
-        self._run(
+        _run_skill_agent(
             gh,
             stdout=_claude_stdout_with_skills(
                 skills=("develop",), args_marker=marker,
             ),
             track=True,
         )
-        events = self._skill_events(gh)
+        events = _skill_events(gh)
         self.assertEqual([event["skill"] for event in events], ["develop"])
         blob = json.dumps(events)
         self.assertNotIn(marker, blob)
@@ -1085,7 +1078,7 @@ class SkillTriggeredEventTest(unittest.TestCase):
                 cwd=_FAKE_WT,
             )
         self.assertEqual(
-            [event["skill"] for event in self._skill_events(gh)],
+            [event["skill"] for event in _skill_events(gh)],
             ["alpha", "beta"],
         )
 
@@ -1093,15 +1086,9 @@ class SkillTriggeredEventTest(unittest.TestCase):
         # A bug in the skill emit must NOT break a run whose baseline audit
         # events already fired: the loop's own guard logs and falls through,
         # and `_run_agent_tracked` still returns the AgentResult.
-        class _RaisingOnSkillGH(FakeGitHubClient):
-            def emit_event(self, event, **kwargs):
-                if event == EVENT_SKILL_TRIGGERED:
-                    raise RuntimeError("emit boom")
-                return super().emit_event(event, **kwargs)
-
-        gh = _RaisingOnSkillGH()
+        gh = _RaisingOnSkillGitHubClient()
         with self.assertLogs(workflow.log, level="ERROR"):
-            result = self._run(
+            result = _run_skill_agent(
                 gh,
                 stdout=_claude_stdout_with_skills(skills=("develop",)),
                 track=True,
@@ -1109,5 +1096,5 @@ class SkillTriggeredEventTest(unittest.TestCase):
         self.assertEqual(result.session_id, "sess-skill")
         # The raising path emitted no skill event, but the lifecycle events
         # (which do not raise) still landed.
-        self.assertEqual(self._skill_events(gh), [])
+        self.assertEqual(_skill_events(gh), [])
         self.assertIn(EVENT_AGENT_EXIT, {event["event"] for event in gh.recorded_events})

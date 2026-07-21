@@ -43,7 +43,7 @@ Do not mark a stage complete until its completion gate is satisfied.
 | 2 | Extreme production complexity hotspots | 8/8 | [x] |
 | 3 | Remaining production complexity | 5/6 | [ ] |
 | 4 | Remaining production style and structure | 5/5 | [x] |
-| 5 | Test structure and complexity | 6/7 | [ ] |
+| 5 | Test structure and complexity | 7/7 | [x] |
 | 6 | Test literals and naming | 1/7 | [ ] |
 | 7 | Long-tail cleanup and final verification | 0/5 | [ ] |
 
@@ -353,8 +353,8 @@ For every package:
 
 ### Package 5.7 — Shared and remaining tests
 
-- [ ] Refactor `tests/fakes.py`, `tests/workflow_helpers.py`, and remaining small modules not covered above.
-- [ ] Re-run the redundancy pass across helpers introduced by Packages 5.1–5.6.
+- [x] Refactor `tests/fakes.py`, `tests/workflow_helpers.py`, and remaining small modules not covered above.
+- [x] Re-run the redundancy pass across helpers introduced by Packages 5.1–5.6.
 
 Completion gate: test structure and complexity findings are removed without reducing behavior coverage or hiding
 assertions behind overly generic helpers.
@@ -1071,6 +1071,51 @@ considered.
 - Protected by: the 282 focused Package 5.6 tests and their 29 subtests.
 - Reviewed: [x]
 
+### Shared workflow test fakes and patch harness
+
+- File and symbols: `tests/fakes.py`: `make_issue` and `FakeGitHubClient`; `tests/workflow_helpers.py`:
+  `_agent`, `_PatchedWorkflowMixin`, and `_ResolvingConflictMixin`.
+- Rule: `WPS201`, `WPS202`, `WPS210`, `WPS211`, `WPS214`, `WPS230`, and `WPS602`.
+- Reason: The fake client deliberately mirrors the production GitHub client, including its static helper call shape,
+  while exposing public histories that scenarios assert. The workflow mixins own one cohesive patch boundary and
+  explicit stage controls. Splitting either surface or replacing its arguments with opaque option dictionaries would
+  scatter the contract and make tests harder to inspect.
+- Protected by: the 287 focused Package 5.7 tests and their 414 subtests.
+- Reviewed: [x]
+
+### Cohesive shared and cross-cutting test shapes
+
+- File and symbols: `tests/test_line_length.py`, `tests/test_run_sh.py`, `tests/test_skill_catalog.py`,
+  `tests/test_state_machine.py`, `tests/test_workflow_agent_analytics.py`, `tests/test_workflow_drain_terminals.py`,
+  `tests/test_workflow_drift.py`, `tests/test_workflow_event_emission.py`,
+  `tests/test_workflow_pr_lifecycle.py`, `tests/test_workflow_tick_parallel.py`,
+  `tests/test_workflow_tracked_repos_prompts.py`, and `tests/test_workflow_usage_accumulator.py`.
+- Rule: `WPS202` and `WPS235`.
+- Reason: Oversized classes were split by behavior and repeated setup moved into named builders, recorders, and shared
+  helpers. The remaining module members describe distinct parsers, concurrency probes, or workflow fixtures. Splitting
+  at the seven-member threshold would duplicate their context, while the direct helper imports keep state, event, and
+  backend contracts visible at each use site.
+- Protected by: the 287 focused Package 5.7 tests and their 414 subtests.
+- Reviewed: [x]
+
+### Shared and cross-cutting workflow scenario density
+
+- File and symbols: scenario tests in `tests/test_github_pinned_state.py`, `tests/test_skill_catalog.py`,
+  `tests/test_state_machine.py`, `tests/test_workflow_agent_analytics.py`,
+  `tests/test_workflow_community_contribution.py`, `tests/test_workflow_drain_terminals.py`,
+  `tests/test_workflow_drift.py`, `tests/test_workflow_event_emission.py`,
+  `tests/test_workflow_finalize_pr_merged.py`, `tests/test_workflow_list_pollable.py`,
+  `tests/test_workflow_paused_agent_guard.py`, `tests/test_workflow_pr_lifecycle.py`,
+  `tests/test_workflow_stage_analytics.py`, `tests/test_workflow_tick_parallel.py`, and
+  `tests/test_workflow_tracked_repos_prompts.py`.
+- Rule: `WPS204`, `WPS210`, and `WPS213`.
+- Reason: Shared state builders, analytics readers, callable probes, patch runners, and event selectors remove the
+  duplicated plumbing. The remaining expressions and locals describe distinct pinned-state inputs, analytics fields,
+  terminal outcomes, concurrency gates, or per-field assertions. Further extraction would hide scenario order or
+  replace meaningful values with a generic mapping.
+- Protected by: the 287 focused Package 5.7 tests and their 414 subtests.
+- Reviewed: [x]
+
 ## Session log
 
 Add one row for every implementation session, including partial sessions.
@@ -1144,6 +1189,33 @@ Add one row for every implementation session, including partial sessions.
 | 2026-07-20 | 5.4 | Complete | WPS 748->697; 225 focused; gate 2150p/3s | Not committed | Start Package 5.5 |
 | 2026-07-20 | 5.5 | Complete | WPS 680->560; 234 focused; gate 2149p/3s | Not committed | Start Package 5.6 |
 | 2026-07-20 | 5.6 | Complete | WPS 1272->1161; 282 focused; gate 2149p/3s | Not committed | Start Package 5.7 |
+| 2026-07-21 | 5.7 | Complete | WPS 851->650; 287 focused; gate 2161p/3s | Not committed | Start Package 6.2 |
+
+Package 5.7 is **complete**. The pass covered the shared GitHub fake and workflow patch harness plus the remaining
+state-machine, metadata, routing, analytics, PR-lifecycle, prompt, and parallel-tick tests. Closed-sweep and review
+filtering moved into named fake helpers; duplicate pinned-state, worktree, and analytics-record helpers were
+consolidated in `workflow_helpers.py`; oversized classes were split by behavior; and nested callbacks became named
+callable probes or inspectable mocks. The collected set of 287 focused tests and 414 subtests is unchanged, and every
+scenario retains its original assertions.
+
+The scoped `--select=WPS` count over the 32 Package 5.7 modules fell from 851 to 650. The structural subset fell from
+273 to 113: `WPS220` (8), `WPS221` (6), `WPS229` (1), `WPS231` (9), `WPS232` (1), `WPS234` (1), `WPS338` (32),
+`WPS420` (7), `WPS426` (1), `WPS430` (23), `WPS431` (1), `WPS441` (26), `WPS458` (1), and `WPS501` (4) were
+cleared. `WPS214` fell from 12 to 1, `WPS602` from 17 to 7, `WPS204` from 31 to 27, `WPS210` from 47 to 37,
+`WPS211` from 8 to 5, and `WPS213` from 21 to 16. The 113 retained structural findings are `WPS201` (1), `WPS202`
+(12), `WPS204` (27), `WPS210` (37), `WPS211` (5), `WPS213` (16), `WPS214` (1), `WPS230` (1), `WPS235` (6),
+and `WPS602` (7), covered by the three reviewed remainder entries above.
+
+The other 537 findings are naming, repeated-string, numeric-literal, and long-tail format findings assigned to
+Package 6.7 or Stage 7: `WPS110` (38), `WPS111` (15), `WPS115` (6), `WPS118` (1), `WPS226` (103), `WPS237` (1),
+`WPS335` (2), `WPS336` (7), `WPS342` (1), `WPS407` (4), `WPS432` (345), `WPS435` (1), `WPS504` (8), `WPS509`
+(1), `WPS527` (3), and `WPS615` (1).
+
+All 287 focused tests, 414 focused subtests, and Ruff pass. The complete tracked suite passes with 2,161 tests and 3
+live-Postgres skips; both clean `HEAD` and the modified tree collect exactly 2,164 tests. Both committed-range and
+working-tree diff checks are clean. A bare repository-root run also sees the ignored, externally owned
+`analytics-db/data` volume and receives `PermissionError`; the complete tracked `tests/` tree is the recorded full gate
+for this session.
 
 Package 5.6 is **complete**. The pass covered the validating review, verify, squash, drift, handoff, watermark,
 paused, and terminal suites; in-review routing, feedback filtering, migration, drift, parks, checks, and watermarks;

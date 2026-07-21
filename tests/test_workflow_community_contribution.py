@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import unittest
+from functools import partial
 from unittest.mock import patch
 
 from orchestrator import config, workflow
@@ -20,6 +21,13 @@ def _pr(
         user=FakeUser(author, type=user_type),
         labels=[FakeLabel(name) for name in labels],
     )
+
+
+def _fail_first_label_write(calls, original, pr, label) -> None:
+    calls.append(pr.number)
+    if pr.number == 1:
+        raise RuntimeError("boom")
+    original(pr, label)
 
 
 class SweepCommunityContributionPRsTest(unittest.TestCase):
@@ -87,6 +95,10 @@ class SweepCommunityContributionPRsTest(unittest.TestCase):
         self.assertEqual(names.count(COMMUNITY_CONTRIBUTION_LABEL), 1)
         self.assertEqual(gh.posted_pr_comments, [])
 
+
+class SweepCommunityContributionFailuresTest(unittest.TestCase):
+    """One GitHub failure does not suppress later PRs or future retries."""
+
     def test_one_pr_failure_does_not_stop_sweep(self) -> None:
         gh = FakeGitHubClient()
         gh.add_pr(_pr(1, author="outsider-a"))
@@ -94,14 +106,12 @@ class SweepCommunityContributionPRsTest(unittest.TestCase):
         calls: list[int] = []
         original = gh.add_pr_label
 
-        def boom(pr, label):
-            calls.append(pr.number)
-            if pr.number == 1:
-                raise RuntimeError("boom")
-            original(pr, label)
-
         with patch.object(config, "ALLOWED_ISSUE_AUTHORS", ("geserdugarov",)), \
-             patch.object(gh, "add_pr_label", side_effect=boom):
+             patch.object(
+                 gh,
+                 "add_pr_label",
+                 side_effect=partial(_fail_first_label_write, calls, original),
+             ):
             workflow._sweep_community_contribution_prs(gh, _TEST_SPEC)
         # Both PRs were attempted (the failure on #1 must not abort the
         # sweep). Both got a HITL ping because the comment is posted

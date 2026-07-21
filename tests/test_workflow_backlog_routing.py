@@ -6,7 +6,7 @@ advancing the state machine until a human removes the label."""
 from __future__ import annotations
 
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from orchestrator import workflow
 from orchestrator.github import BACKLOG_LABEL
@@ -28,10 +28,11 @@ class BacklogLabelSkipsProcessingTest(unittest.TestCase):
         issue.labels.append(FakeLabel(BACKLOG_LABEL))
         gh.add_issue(issue)
 
-        with patch.object(workflow, "_handle_pickup") as pickup:
+        pickup_mock = MagicMock()
+        with patch.object(workflow, "_handle_pickup", pickup_mock):
             workflow._process_issue(gh, _TEST_SPEC, issue)
 
-        pickup.assert_not_called()
+        pickup_mock.assert_not_called()
         self.assertEqual(gh.posted_comments, [])
         self.assertEqual(gh.label_history, [])
 
@@ -41,10 +42,11 @@ class BacklogLabelSkipsProcessingTest(unittest.TestCase):
         issue.labels.append(FakeLabel(BACKLOG_LABEL))
         gh.add_issue(issue)
 
-        with patch.object(workflow, "_handle_implementing") as impl:
+        implementing_mock = MagicMock()
+        with patch.object(workflow, "_handle_implementing", implementing_mock):
             workflow._process_issue(gh, _TEST_SPEC, issue)
 
-        impl.assert_not_called()
+        implementing_mock.assert_not_called()
         self.assertEqual(gh.label_history, [])
 
     def test_removing_backlog_allows_pickup(self) -> None:
@@ -52,10 +54,11 @@ class BacklogLabelSkipsProcessingTest(unittest.TestCase):
         issue = make_issue(703)
         gh.add_issue(issue)
 
-        with patch.object(workflow, "_handle_pickup") as pickup:
+        pickup_mock = MagicMock()
+        with patch.object(workflow, "_handle_pickup", pickup_mock):
             workflow._process_issue(gh, _TEST_SPEC, issue)
 
-        pickup.assert_called_once_with(gh, _TEST_SPEC, issue)
+        pickup_mock.assert_called_once_with(gh, _TEST_SPEC, issue)
 
 
 if __name__ == "__main__":

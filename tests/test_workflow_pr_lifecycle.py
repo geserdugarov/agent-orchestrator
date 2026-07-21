@@ -51,6 +51,77 @@ KEY_VERDICT = "verdict"
 
 CHECK_SUCCESS = "success"
 LATEST_PR_COMMENT_IDS = "_latest_pr_comment_ids"
+PR_BRANCH = "orchestrator/geserdugarov__agent-orchestrator/issue-50"
+PR_NUMBER = 500
+
+
+def _seeded_verdict(last_message: str):
+    gh = FakeGitHubClient()
+    issue = make_issue(5, label=LABEL_VALIDATING)
+    gh.add_issue(issue)
+    pr = FakePR(
+        number=99,
+        head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-5",
+        base_branch=TEST_BASE_BRANCH,
+        mergeable=True,
+        check_state=CHECK_SUCCESS,
+    )
+    gh.add_pr(pr)
+    gh.seed_state(5, pr_number=99, review_round=0)
+    return gh, issue, pr, last_message
+
+
+def _run_verdict(case, gh, issue, pr, last_message: str) -> None:
+    with patch.object(
+        workflow,
+        LATEST_PR_COMMENT_IDS,
+        return_value=(None, None),
+    ):
+        case._run(
+            lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+            run_agent=_agent(
+                session_id="sess-review",
+                last_message=last_message,
+            ),
+            head_shas=[pr.head.sha] * 6,
+        )
+
+
+def _events_of(gh: FakeGitHubClient, event_name: str) -> list[dict]:
+    return [
+        event for event in gh.recorded_events
+        if event[KEY_EVENT] == event_name
+    ]
+
+
+def _open_pr(**kwargs) -> FakePR:
+    defaults = dict(
+        number=PR_NUMBER,
+        head_branch=PR_BRANCH,
+        head=FakePRRef(sha="abc12345"),
+    )
+    defaults.update(kwargs)
+    return FakePR(**defaults)
+
+
+def _seed_in_review(issue_number=50, *, pr=None, extra_state=None):
+    gh = FakeGitHubClient()
+    issue = make_issue(issue_number, label=LABEL_IN_REVIEW)
+    gh.add_issue(issue)
+    if pr is not None:
+        gh.add_pr(pr)
+    state = dict(
+        branch=PR_BRANCH,
+        dev_agent=BACKEND_CLAUDE,
+        dev_session_id="dev-sess",
+        review_round=1,
+    )
+    if pr is not None:
+        state[KEY_PR_NUMBER] = pr.number
+    if extra_state:
+        state.update(extra_state)
+    gh.seed_state(issue_number, **state)
+    return gh, issue
 
 
 class ReviewVerdictEventEmissionTest(unittest.TestCase, _PatchedWorkflowMixin):
@@ -60,40 +131,9 @@ class ReviewVerdictEventEmissionTest(unittest.TestCase, _PatchedWorkflowMixin):
     workflow trace.
     """
 
-    def _seeded(self, last_message: str):
-        gh = FakeGitHubClient()
-        issue = make_issue(5, label=LABEL_VALIDATING)
-        gh.add_issue(issue)
-        pr = FakePR(
-            number=99,
-            head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-5",
-            base_branch=TEST_BASE_BRANCH,
-            mergeable=True,
-            check_state=CHECK_SUCCESS,
-        )
-        gh.add_pr(pr)
-        gh.seed_state(5, pr_number=99, review_round=0)
-        return gh, issue, pr, last_message
-
-    def _run_validating(self, gh, issue, pr, last_message: str):
-        # Enough head_shas to cover both the approved branch (reviewed_sha +
-        # squash inputs) and the changes_requested branch (before/after the
-        # dev fix). Identical SHAs across the sequence mean the dev fix is
-        # treated as a no-op question (we only care about the verdict event).
-        with patch.object(
-            workflow, LATEST_PR_COMMENT_IDS, return_value=(None, None)
-        ):
-            self._run(
-                lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
-                run_agent=_agent(
-                    session_id="sess-review", last_message=last_message,
-                ),
-                head_shas=[pr.head.sha] * 6,
-            )
-
     def test_approved_verdict_emits_event(self) -> None:
-        gh, issue, pr, last = self._seeded(REVIEW_APPROVED_MESSAGE)
-        self._run_validating(gh, issue, pr, last)
+        gh, issue, pr, last = _seeded_verdict(REVIEW_APPROVED_MESSAGE)
+        _run_verdict(self, gh, issue, pr, last)
         verdicts = [event for event in gh.recorded_events if event[KEY_EVENT] == EVENT_REVIEW_VERDICT]
         self.assertEqual(len(verdicts), 1)
         verdict = verdicts[0]
@@ -104,17 +144,17 @@ class ReviewVerdictEventEmissionTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertEqual(verdict["session_id"], "sess-review")
 
     def test_changes_requested_verdict_emits_event(self) -> None:
-        gh, issue, pr, last = self._seeded(
+        gh, issue, pr, last = _seeded_verdict(
             "1. Add a test\n\nVERDICT: CHANGES_REQUESTED",
         )
-        self._run_validating(gh, issue, pr, last)
+        _run_verdict(self, gh, issue, pr, last)
         verdicts = [event for event in gh.recorded_events if event[KEY_EVENT] == EVENT_REVIEW_VERDICT]
         self.assertEqual(len(verdicts), 1)
         self.assertEqual(verdicts[0][KEY_VERDICT], VERDICT_CHANGES_REQUESTED)
 
     def test_unknown_verdict_emits_event(self) -> None:
-        gh, issue, pr, last = self._seeded("no marker here")
-        self._run_validating(gh, issue, pr, last)
+        gh, issue, pr, last = _seeded_verdict("no marker here")
+        _run_verdict(self, gh, issue, pr, last)
         verdicts = [event for event in gh.recorded_events if event[KEY_EVENT] == EVENT_REVIEW_VERDICT]
         self.assertEqual(len(verdicts), 1)
         self.assertEqual(verdicts[0][KEY_VERDICT], VERDICT_UNKNOWN)
@@ -128,10 +168,6 @@ class ParkAwaitingHumanEventEmissionTest(unittest.TestCase, _PatchedWorkflowMixi
     field for the operator.
     """
 
-    @staticmethod
-    def _parks(gh) -> list[dict]:
-        return [event for event in gh.recorded_events if event[KEY_EVENT] == EVENT_PARK_AWAITING_HUMAN]
-
     def test_question_park_has_reason_and_stage(self) -> None:
         gh = FakeGitHubClient()
         issue = make_issue(6, label=LABEL_IMPLEMENTING)
@@ -141,7 +177,7 @@ class ParkAwaitingHumanEventEmissionTest(unittest.TestCase, _PatchedWorkflowMixi
             run_agent=_agent(last_message="please clarify the scope"),
             has_new_commits=False,
         )
-        parks = self._parks(gh)
+        parks = _events_of(gh, EVENT_PARK_AWAITING_HUMAN)
         self.assertEqual(len(parks), 1)
         self.assertEqual(parks[0][KEY_STAGE], LABEL_IMPLEMENTING)
         self.assertEqual(parks[0][KEY_REASON], "agent_question")
@@ -155,7 +191,7 @@ class ParkAwaitingHumanEventEmissionTest(unittest.TestCase, _PatchedWorkflowMixi
             run_agent=_agent(last_message="", exit_code=1),
             has_new_commits=False,
         )
-        parks = self._parks(gh)
+        parks = _events_of(gh, EVENT_PARK_AWAITING_HUMAN)
         self.assertEqual(len(parks), 1)
         self.assertEqual(parks[0][KEY_REASON], "agent_silent")
 
@@ -179,7 +215,7 @@ class ParkAwaitingHumanEventEmissionTest(unittest.TestCase, _PatchedWorkflowMixi
                 run_agent=_agent(timed_out=True, last_message=""),
                 head_shas=[pr.head.sha],
             )
-        parks = self._parks(gh)
+        parks = _events_of(gh, EVENT_PARK_AWAITING_HUMAN)
         self.assertEqual(len(parks), 1)
         self.assertEqual(parks[0][KEY_STAGE], LABEL_VALIDATING)
         self.assertEqual(parks[0][KEY_REASON], "reviewer_timeout")
@@ -206,7 +242,7 @@ class ParkAwaitingHumanEventEmissionTest(unittest.TestCase, _PatchedWorkflowMixi
             lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
             run_agent=_agent(last_message="should not run"),
         )
-        parks = self._parks(gh)
+        parks = _events_of(gh, EVENT_PARK_AWAITING_HUMAN)
         self.assertEqual(len(parks), 1)
         self.assertEqual(parks[0][KEY_STAGE], LABEL_VALIDATING)
         self.assertEqual(parks[0][KEY_REASON], "review_cap")
@@ -225,7 +261,7 @@ class ParkAwaitingHumanEventEmissionTest(unittest.TestCase, _PatchedWorkflowMixi
             has_new_commits=True,
             push_branch=False,  # simulate push failure
         )
-        parks = self._parks(gh)
+        parks = _events_of(gh, EVENT_PARK_AWAITING_HUMAN)
         self.assertEqual(len(parks), 1)
         self.assertEqual(parks[0][KEY_STAGE], LABEL_IMPLEMENTING)
         self.assertEqual(parks[0][KEY_REASON], "push_failed")
@@ -252,7 +288,7 @@ class ParkAwaitingHumanEventEmissionTest(unittest.TestCase, _PatchedWorkflowMixi
                 ),
                 head_shas=[pr.head.sha, pr.head.sha],
             )
-        self.assertEqual(self._parks(gh), [])
+        self.assertEqual(_events_of(gh, EVENT_PARK_AWAITING_HUMAN), [])
 
 
 class PrLifecycleEventEmissionTest(unittest.TestCase, _PatchedWorkflowMixin):
@@ -265,41 +301,6 @@ class PrLifecycleEventEmissionTest(unittest.TestCase, _PatchedWorkflowMixin):
     `_handle_resolving_conflict` for the base rebase; the in_review
     handler is permanently manual-merge-only and never emits it.
     """
-
-    BRANCH = "orchestrator/geserdugarov__agent-orchestrator/issue-50"
-    PR_NUMBER = 500
-
-    @staticmethod
-    def _events_of(gh, event_name: str) -> list[dict]:
-        return [event for event in gh.recorded_events if event[KEY_EVENT] == event_name]
-
-    def _open_pr(self, **kwargs):
-        defaults = dict(
-            number=self.PR_NUMBER,
-            head_branch=self.BRANCH,
-            head=FakePRRef(sha="abc12345"),
-        )
-        defaults.update(kwargs)
-        return FakePR(**defaults)
-
-    def _seed_in_review(self, issue_number=50, *, pr=None, extra_state=None):
-        gh = FakeGitHubClient()
-        issue = make_issue(issue_number, label=LABEL_IN_REVIEW)
-        gh.add_issue(issue)
-        if pr is not None:
-            gh.add_pr(pr)
-        state = dict(
-            branch=self.BRANCH,
-            dev_agent=BACKEND_CLAUDE,
-            dev_session_id="dev-sess",
-            review_round=1,
-        )
-        if pr is not None:
-            state[KEY_PR_NUMBER] = pr.number
-        if extra_state:
-            state.update(extra_state)
-        gh.seed_state(issue_number, **state)
-        return gh, issue
 
     def test_pr_opened_on_fresh_open(self) -> None:
         # _handle_implementing -> _on_commits opens a new PR and emits
@@ -316,7 +317,7 @@ class PrLifecycleEventEmissionTest(unittest.TestCase, _PatchedWorkflowMixin):
             dirty_files=(),
             push_branch=True,
         )
-        opened = self._events_of(gh, EVENT_PR_OPENED)
+        opened = _events_of(gh, EVENT_PR_OPENED)
         self.assertEqual(len(opened), 1)
         event = opened[0]
         self.assertEqual(event[KEY_STAGE], LABEL_IMPLEMENTING)
@@ -342,22 +343,22 @@ class PrLifecycleEventEmissionTest(unittest.TestCase, _PatchedWorkflowMixin):
             has_new_commits=[False, True],
             push_branch=True,
         )
-        self.assertEqual(self._events_of(gh, EVENT_PR_OPENED), [])
+        self.assertEqual(_events_of(gh, EVENT_PR_OPENED), [])
 
     def test_mergeable_review_emits_no_merge_event(self) -> None:
         # The orchestrator is manual-merge-only: a mergeable PR in_review
         # never produces a `merge_attempt` or orchestrator-initiated
         # `pr_merged` event. The HITL ping is observable instead.
-        pr = self._open_pr(approved=True, mergeable=True, check_state=CHECK_SUCCESS)
-        gh, issue = self._seed_in_review(pr=pr)
+        pr = _open_pr(approved=True, mergeable=True, check_state=CHECK_SUCCESS)
+        gh, issue = _seed_in_review(pr=pr)
 
         self._run(
             lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
             run_agent=_agent(),
         )
 
-        self.assertEqual(self._events_of(gh, EVENT_MERGE_ATTEMPT), [])
-        self.assertEqual(self._events_of(gh, EVENT_PR_MERGED), [])
+        self.assertEqual(_events_of(gh, EVENT_MERGE_ATTEMPT), [])
+        self.assertEqual(_events_of(gh, EVENT_PR_MERGED), [])
         # And no orchestrator-driven label flip to `done`.
         self.assertNotIn((50, LABEL_DONE), gh.label_history)
 
@@ -365,18 +366,18 @@ class PrLifecycleEventEmissionTest(unittest.TestCase, _PatchedWorkflowMixin):
         # A human (or another bot) merged the PR while we were in_review.
         # The terminal handler stamps `merged_at` and emits `pr_merged`
         # with `merge_method=external`.
-        pr = self._open_pr(merged=True, state=STATE_CLOSED)
-        gh, issue = self._seed_in_review(
+        pr = _open_pr(merged=True, state=STATE_CLOSED)
+        gh, issue = _seed_in_review(
             pr=pr, extra_state={KEY_CONFLICT_ROUND: 2},
         )
         self._run(
             lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
             run_agent=_agent(),
         )
-        merged = self._events_of(gh, EVENT_PR_MERGED)
+        merged = _events_of(gh, EVENT_PR_MERGED)
         self.assertEqual(len(merged), 1)
         self.assertEqual(merged[0]["merge_method"], "external")
-        self.assertEqual(merged[0][KEY_PR_NUMBER], self.PR_NUMBER)
+        self.assertEqual(merged[0][KEY_PR_NUMBER], PR_NUMBER)
         self.assertEqual(merged[0]["sha"], "abc12345")
         # In-review terminals carry the round counters from state so an
         # operator tailing the sink can attribute merges to the round count
@@ -385,32 +386,32 @@ class PrLifecycleEventEmissionTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertEqual(merged[0][KEY_CONFLICT_ROUND], 2)
         # The orchestrator is permanently manual-merge-only and never
         # emits `merge_attempt` from in_review.
-        self.assertEqual(self._events_of(gh, EVENT_MERGE_ATTEMPT), [])
+        self.assertEqual(_events_of(gh, EVENT_MERGE_ATTEMPT), [])
 
     def test_pr_closed_without_merge_on_terminal(self) -> None:
-        pr = self._open_pr(merged=False, state=STATE_CLOSED)
-        gh, issue = self._seed_in_review(pr=pr)
+        pr = _open_pr(merged=False, state=STATE_CLOSED)
+        gh, issue = _seed_in_review(pr=pr)
         self._run(
             lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
             run_agent=_agent(),
         )
-        closed = self._events_of(gh, EVENT_PR_CLOSED_WITHOUT_MERGE)
+        closed = _events_of(gh, EVENT_PR_CLOSED_WITHOUT_MERGE)
         self.assertEqual(len(closed), 1)
         self.assertEqual(closed[0][KEY_STAGE], LABEL_IN_REVIEW)
-        self.assertEqual(closed[0][KEY_PR_NUMBER], self.PR_NUMBER)
+        self.assertEqual(closed[0][KEY_PR_NUMBER], PR_NUMBER)
 
     def test_unmergeable_review_emits_no_round(self) -> None:
         # The orchestrator no longer routes from in_review to
         # `resolving_conflict` on an unmergeable gate. An unmergeable PR
         # parks awaiting human, so no `conflict_round` event is emitted
         # from this stage.
-        pr = self._open_pr(approved=True, mergeable=False, check_state=CHECK_SUCCESS)
-        gh, issue = self._seed_in_review(pr=pr)
+        pr = _open_pr(approved=True, mergeable=False, check_state=CHECK_SUCCESS)
+        gh, issue = _seed_in_review(pr=pr)
         self._run(
             lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
             run_agent=_agent(),
         )
-        self.assertEqual(self._events_of(gh, EVENT_CONFLICT_ROUND), [])
+        self.assertEqual(_events_of(gh, EVENT_CONFLICT_ROUND), [])
         self.assertNotIn((50, LABEL_RESOLVING_CONFLICT), gh.label_history)
         self.assertTrue(gh.pinned_data(50).get("awaiting_human"))
 

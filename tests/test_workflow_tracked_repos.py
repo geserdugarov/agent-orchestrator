@@ -28,41 +28,45 @@ def _spec(
     )
 
 
-class BuildTrackedReposContextTest(unittest.TestCase):
-    def _build(
-        self,
-        current: config.RepoSpec,
-        specs: list[config.RepoSpec],
-        *,
-        expose: bool = True,
-    ) -> str:
-        # Patch the exact config module the builder reads so the result is
-        # deterministic regardless of ambient EXPOSE_TRACKED_REPOS / any
-        # prior test that reloaded orchestrator.config.
-        with patch.object(
-            workflow_messages.config, "EXPOSE_TRACKED_REPOS", expose
-        ):
-            return workflow._build_tracked_repos_context(current, specs)
+def _build_context(
+    current: config.RepoSpec,
+    specs: list[config.RepoSpec],
+    *,
+    expose: bool = True,
+) -> str:
+    # Patch the exact config module the builder reads so the result is
+    # deterministic regardless of ambient config reloads.
+    with patch.object(
+        workflow_messages.config, "EXPOSE_TRACKED_REPOS", expose,
+    ):
+        return workflow._build_tracked_repos_context(current, specs)
+
+
+class BuildTrackedReposContextGateTest(unittest.TestCase):
 
     def test_single_repo_is_no_op(self) -> None:
         # The default single-repo deployment must see zero added tokens.
         cur = _spec("owner/only", "/srv/only")
-        self.assertEqual(self._build(cur, [cur]), "")
+        self.assertEqual(_build_context(cur, [cur]), "")
 
     def test_empty_specs_is_no_op(self) -> None:
         cur = _spec("owner/only", "/srv/only")
-        self.assertEqual(self._build(cur, []), "")
+        self.assertEqual(_build_context(cur, []), "")
 
     def test_kill_switch_off_returns_empty(self) -> None:
         cur = _spec("owner/lance", "/srv/lance")
         other = _spec("owner/ray", "/srv/ray")
-        self.assertEqual(self._build(cur, [cur, other], expose=False), "")
+        self.assertEqual(_build_context(cur, [cur, other], expose=False), "")
+
+
+class BuildTrackedReposContextContentTest(unittest.TestCase):
+    """The enabled context renders only bounded, read-only repo metadata."""
 
     def test_lists_repo_slug_root_and_base(self) -> None:
         cur = _spec("owner/lance", "/srv/lance")
         ray = _spec("owner/ray", "/srv/repos/ray", base="main")
         arrow = _spec("owner/arrow", "/srv/repos/arrow", base="master")
-        out = self._build(cur, [cur, ray, arrow])
+        out = _build_context(cur, [cur, ray, arrow])
 
         # Each other repo contributes its slug, durable target_root, and base.
         self.assertIn("owner/ray", out)
@@ -77,7 +81,7 @@ class BuildTrackedReposContextTest(unittest.TestCase):
         # the "your task is on X" marker, not as a listed reference checkout.
         cur = _spec("owner/lance", "/srv/CURRENT-ROOT-MARKER")
         other = _spec("owner/ray", "/srv/ray")
-        out = self._build(cur, [cur, other])
+        out = _build_context(cur, [cur, other])
 
         self.assertIn("`owner/lance`", out)  # task marker
         self.assertNotIn("/srv/CURRENT-ROOT-MARKER", out)
@@ -87,7 +91,7 @@ class BuildTrackedReposContextTest(unittest.TestCase):
     def test_caps_listing_with_and_n_more(self) -> None:
         cur = _spec("owner/lance", "/srv/lance")
         others = [_spec(f"sib/{i}", f"/srv/{i}") for i in range(22)]
-        out = self._build(cur, [cur, *others])
+        out = _build_context(cur, [cur, *others])
 
         # First 20 listed inline, the remaining 2 collapsed into one line.
         for i in range(20):
@@ -104,7 +108,7 @@ class BuildTrackedReposContextTest(unittest.TestCase):
         other = _spec(
             "owner/ray", "/srv/ray", remote="SECRET-REMOTE-NAME"
         )
-        out = self._build(cur, [cur, other])
+        out = _build_context(cur, [cur, other])
 
         self.assertNotIn("SECRET-REMOTE-NAME", out)
         self.assertNotIn("git@", out)
@@ -117,7 +121,7 @@ class BuildTrackedReposContextTest(unittest.TestCase):
         # owned by the surrounding stage prompt).
         cur = _spec("owner/lance", "/srv/lance")
         other = _spec("owner/ray", "/srv/ray")
-        out = self._build(cur, [cur, other])
+        out = _build_context(cur, [cur, other])
 
         self.assertIn("read-only", out)
         # The block explicitly DEFERS the write decision to the surrounding
