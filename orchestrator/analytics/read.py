@@ -35,8 +35,8 @@ split into focused sibling modules:
   rollup cannot reconstruct (they need row-level detail or columns
   the rollup omits): `get_review_round_breakdown`,
   `get_skill_trigger_rates`, `get_skill_trigger_matrix`,
-  `get_cost_coverage`, `get_backend_daily_tokens`,
-  `get_hourly_heatmap`.
+  `get_skill_adoption`, `get_cost_coverage`,
+  `get_backend_daily_tokens`, `get_hourly_heatmap`.
 
 The supporting plumbing is split into further sibling modules and
 re-exported here as well:
@@ -114,6 +114,7 @@ from orchestrator.analytics.read_dashboard import (
     get_cost_coverage as get_cost_coverage,
     get_hourly_heatmap as get_hourly_heatmap,
     get_review_round_breakdown as get_review_round_breakdown,
+    get_skill_adoption as get_skill_adoption,
     get_skill_trigger_matrix as get_skill_trigger_matrix,
     get_skill_trigger_rates as get_skill_trigger_rates,
 )
@@ -134,6 +135,7 @@ from orchestrator.analytics.read_models import (
     ReviewRoundBucketRow as ReviewRoundBucketRow,
 )
 from orchestrator.analytics.read_models import (
+    SkillAdoptionRow as SkillAdoptionRow,
     SkillTriggerMatrixRow as SkillTriggerMatrixRow,
     SkillTriggerRateRow as SkillTriggerRateRow,
     StageBreakdown as StageBreakdown,
@@ -184,6 +186,7 @@ __all__ = [
     "ReviewRoundBucketRow",
     "SORT_BY_COST",
     "SORT_BY_LAST_SEEN",
+    "SkillAdoptionRow",
     "SkillTriggerMatrixRow",
     "SkillTriggerRateRow",
     "StageBreakdown",
@@ -210,6 +213,7 @@ __all__ = [
     "get_recent_agent_exits",
     "get_repo_breakdown",
     "get_review_round_breakdown",
+    "get_skill_adoption",
     "get_skill_trigger_matrix",
     "get_skill_trigger_rates",
     "get_stage_breakdown",

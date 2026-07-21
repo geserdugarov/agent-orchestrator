@@ -39,6 +39,17 @@ class _WindowFilters:
         """Return the date/repo subset valid for repo-level catalog rows."""
         return replace(self, events=None, stages=None, issue=None)
 
+    def historical_scope(self) -> _WindowFilters:
+        """Return filters for a session's evidence before the window end.
+
+        Drops the ``start`` bound and the ``stages`` / ``events``
+        selections while keeping ``end`` / ``repo`` / ``issue``, so a
+        logical session's loads from a prior stage or from before the
+        reporting window stay visible, yet the ``end`` bound still stops
+        later evidence from leaking backward into the aggregate.
+        """
+        return replace(self, start=None, events=None, stages=None)
+
 
 @dataclass
 class _WhereBuilder:
