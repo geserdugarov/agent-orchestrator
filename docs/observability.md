@@ -244,7 +244,79 @@ available and how many loaded it — an incidental `SKILL.md` reference stays a 
 raises the rate. The invocation-level views (`get_skill_trigger_rates` and `get_skill_trigger_matrix`) sit
 beneath it as a clearly named invocation-level diagnostic — see the
 [read model](#read-model-orchestratoranalyticsreadpy) and [dashboard](#dashboard-orchestratordashboardpy) sections
-below. All are pure read-side additions over `extras JSONB` with no schema change.
+below. All are pure read-side additions over `extras JSONB` with no schema change. See
+[Session-aware skill adoption](#session-aware-skill-adoption) for the four evidence forms and the per-session adoption
+semantics that sit on top of these fields.
+
+### Session-aware skill adoption
+
+The dashboard's **primary** skill metric is per-session *adoption* — for each `(repo, agent_role, backend, skill)`
+cell, what share of the logical agent sessions that had the skill available actually loaded it. It is computed by
+`analytics.read.get_skill_adoption` and rendered by the "Skill adoption" panel; the older per-run trigger views
+(`get_skill_trigger_rates` / `get_skill_trigger_matrix`) sit beneath it as a clearly named invocation-level diagnostic.
+The per-session adoption metric reads the opt-in `agent_exit` skill fields above, so it only carries signal once
+`TRACK_SKILL_TRIGGERS` has recorded a session's available and loaded skills. The invocation-level views degrade more
+gently with the switch off: the trigger-rate table still counts every `agent_exit` run (a `0` trigger rate), and the
+matrix still renders each repo's catalog-backed skills as explicit zero rows, because the `runs` denominator and the
+`repo_skill_catalog` records do not depend on the switch. Records written while it was on stay queryable after it is
+turned off.
+
+**Four evidence forms.** A skill observation is classified into one of four forms. The first three are emitted on the
+`agent_exit` record; the fourth is a read-model inference and is never written to disk:
+
+- **confirmed** *(load)* — a claude `Skill` tool-use block, the firm signal. Recorded in `skills_triggered`, with tier
+  `confirmed` in `skills_evidence`.
+- **inferred** *(load)* — a codex `command_execution` whose leading verb is an established direct reader
+  (`cat` / `sed` / `head` / …) opening a `skills/<name>/SKILL.md`. A heuristic file-open signal. Recorded in
+  `skills_triggered`, with tier `inferred` in `skills_evidence`. A single run is homogeneous — claude only confirms,
+  codex only infers — so every `skills_evidence` entry on one record shares its tier.
+- **incidental** *(not a load)* — a codex *path-only* reference to a `SKILL.md`: a non-reader inspection / search
+  (`git diff` / `git status` / `rg`), an env-prefixed inspection (`GIT_PAGER=cat git diff …`), or a write to the file
+  (`>` redirect / `sed -i`). Recorded independently in `skills_incidental` / `skills_incidental_count`, deliberately
+  kept out of `skills_triggered`, `skills_triggered_count`, `skills_evidence`, and the `skill_triggered` audit events,
+  so a bystander mention is never miscounted as a load. A skill both read *and* inspected lands in both buckets.
+- **legacy** *(implied availability)* — not an emitted field. Inside `get_skill_adoption`, a load whose logical
+  session never reported any `skills_available` metadata (no row carried the `skills_available` *key*) is treated as
+  implied availability: the load itself implies the skill was offered, so it still counts in that session's
+  availability denominator. An explicit empty `skills_available: []` is metadata ("scanned, found none") and
+  **blocks** this fallback, so a load against a session that reported no offered skills does not fabricate availability.
+
+**Logical-session fallback.** Adoption counts by *logical agent session*, not by raw run, so a resume chain that pulled
+`develop` across several ticks counts as one adopting session, not several. A session is keyed by `resume_session_id`,
+then `session_id`, then the row's primary key — an ID-less row is its own session, never merged into one anonymous
+bucket, and the primary-key fallback is stable across both scans below.
+
+**Active window vs. historical lookback.** `get_skill_adoption` runs two `agent_exit` scans and combines them in Python:
+
+- The **active-window** scan applies the full reporting-window filters (date `[start, end)` / repo / stage / issue). It
+  selects the *active* sessions (those with a run in the window) and computes the window-scoped invocation diagnostics.
+- The **historical-lookback** scan (`_WindowFilters.historical_scope`) gathers each active session's availability + load
+  evidence from every `agent_exit` row *before the window end*, deliberately dropping the window `start` bound and the
+  stage / events filters while keeping `end` / repo / issue — so a load or an availability report from a prior
+  stage, or from before the reporting window, still counts toward that session's denominator and `adopted`. History
+  rows for sessions that were not active in the window are ignored, so their evidence never leaks into the aggregate.
+
+The retained `end` bound is the **future-evidence cutoff**: evidence recorded *after* the window end never leaks
+backward into an earlier window's aggregate, so a later load cannot retroactively raise a past window's adoption.
+
+**Per-session availability denominator.** `sessions` (the denominator) is how many logical sessions in the cohort had
+the skill available — its reported `skills_available` union listed it, or the *legacy* fallback above implied it.
+`adopted` (the numerator) is how many of those sessions loaded it, counted once per session no matter how many runs
+reached for it; `adoption_rate` is `adopted / sessions`. A zero-session cell has an undefined rate that renders as a
+muted `—`, never a misleading `0%`.
+
+**Primary adoption vs. invocation-level diagnostics.** The read model carries three **window-scoped invocation** fields
+(raw `agent_exit` rows, not sessions, and not the historical evidence): `invocations` is every run in the cohort's
+window, `load_rows` the window runs that loaded the skill, and `incidental` the window runs that made a path-only
+(incidental) reference to its `SKILL.md`. The load and incidental buckets are independent — a single run can appear
+in both — so `incidental` is a parallel count, not a "did-not-load" complement, and it can never raise the adoption
+rate. Of these three the adoption table renders only `Invocation loads` (`load_rows`) and `Incidental references`
+(`incidental`) as its two trailing columns; `invocations` (the cohort's total window run count) is a read-model field
+used for ordering and context, not a displayed column. A pre-window load counts toward `adopted` but toward none of
+the three, since all three are window-scoped. The collapsed invocation-level diagnostic beneath the adoption table
+(`get_skill_trigger_rates` / `get_skill_trigger_matrix`) reports the same per-run granularity across roles / backends
+and per-skill cohorts. See the [read model](#read-model-orchestratoranalyticsreadpy) for the exact query shapes and the
+[dashboard](#dashboard-orchestratordashboardpy) for the rendered columns.
 
 ### `repo_skill_catalog` records
 
@@ -852,8 +924,9 @@ window / filter `WHERE`-clause builders).
   `skills_available` listed it, or a legacy load with the `skills_available` key absent implied it — an explicit empty
   set does not) — and `adopted` counts the sessions that loaded it, once per session, with a derived `adoption_rate`.
   `invocations` is the cohort's window `agent_exit` run count (every run, so a low `load_rows` reads against it);
-  `load_rows` counts the window runs that loaded the skill and `incidental` the window runs that referenced it without
-  loading. All three are window-scoped, so a pre-window load counts toward `adopted` but not toward them. Rows are
+  `load_rows` counts the window runs that loaded the skill and `incidental` the window runs that made a path-only
+  reference to it — independent buckets, so a run that both loaded and inspected a `SKILL.md` increments both. All
+  three are window-scoped, so a pre-window load counts toward `adopted` but not toward them. Rows are
   ordered by `sessions` DESC, then `adopted` DESC, then
   `invocations` DESC, then a stable `(repo, agent_role, backend, skill)` tiebreak, and the list is capped at `limit`
   (default `SKILL_ADOPTION_ROW_LIMIT` = 100; a non-positive `limit` disables the cap). The agent-exit event-filter
@@ -1025,9 +1098,10 @@ futures, so every `st.*` write runs on the main thread). The second wave is skip
    Invocation loads / Incidental references, counting skill use by **logical agent session** rather than by raw run:
    `Sessions` is how many sessions in the cohort had the skill available, `Sessions using skill` the subset that loaded
    it, and `Adoption rate` their share (`adopted / sessions`, once per session). The two trailing columns are the
-   window-scoped invocation diagnostics — `Invocation loads` counts the window runs that loaded the skill and
-   `Incidental references` the window runs that referenced its `SKILL.md` without loading it — so an incidental mention
-   is a separate column and can never raise the adoption rate (a cell with no available session renders a muted `—`
+   window-scoped invocation diagnostics: `Invocation loads` counts the window runs that loaded the skill and
+   `Incidental references` the window runs that made a path-only reference to its `SKILL.md`. The load and incidental
+   buckets are independent, so a run that both loaded and inspected it increments both, and an incidental mention
+   is a separate column that can never raise the adoption rate (a cell with no available session renders a muted `—`
    rate rather than a misleading `0%`). The read model caps the list at 100 rows (Sessions DESC then Sessions-using
    DESC then Invocations DESC); by default rows display sorted by Repo ascending, then Adoption rate descending. Each
    column header is a clickable sort control writing `adopt_sort` / `adopt_dir` query params (parsed by
@@ -1040,8 +1114,11 @@ futures, so every `st.*` write runs on the main thread). The second wave is skip
    matrix folds each repo's `repo_skill_catalog` into the observed triggers so a skill the repo offers but no cohort
    fired surfaces as an explicit (muted) `0` "Runs with skill" cell (and a matching muted `0%` trigger rate) rather
    than a missing row (the cohort `Runs` total is never muted); its headers write `mtx_sort` / `mtx_dir` params (parsed
-   by `parse_skill_matrix_sort`) and default to Repo ascending, then Trigger rate descending. All three tables are
-   opt-in: they only carry signal when `TRACK_SKILL_TRIGGERS` is on. When rows are present a zero-adoption window
+   by `parse_skill_matrix_sort`) and default to Repo ascending, then Trigger rate descending. The three tables degrade
+   differently with the switch off: per-session adoption only carries signal once `TRACK_SKILL_TRIGGERS` has recorded
+   per-run skill fields, but the trigger-rate table still counts every `agent_exit` run and the matrix still shows
+   catalog-backed zero rows (the `runs` denominator and `repo_skill_catalog` records do not depend on the switch). When
+   rows are present a zero-adoption window
    captions a neutral genuine-0% result (a present row proves tracking is on), an empty adoption window renders the
    adoption table's fallback notice naming the switch, and the matrix shows its own fallback notice when no
    catalog-backed matrix can be built (no catalog records matched and no run fired a skill).

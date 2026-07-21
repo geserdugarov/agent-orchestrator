@@ -394,7 +394,10 @@ an unmergeable PR.
   with incidental references kept as a separate column that never raises the rate — above a collapsed invocation-level
   diagnostic carrying the per-role/backend trigger rate (`analytics.read.get_skill_trigger_rates`) and the per-skill
   trigger matrix (`analytics.read.get_skill_trigger_matrix`) pairing each repo's offered-skill catalog with the skills
-  its runs triggered, over the accumulated fields. See
+  its runs triggered, over the accumulated fields. The `skills_evidence` tier carries only the emitted `confirmed` /
+  `inferred` load values; the *incidental* bucket and the read-side *legacy* availability inference (a load whose
+  session reported no `skills_available` metadata) are described alongside the per-session adoption semantics in
+  [`observability.md#session-aware-skill-adoption`](observability.md#session-aware-skill-adoption). See also
   [`observability.md#agent_exit-records`](observability.md#agent_exit-records) and the
   [audit event log](observability.md#audit-event-log-event_log_path).
 - `DASHBOARD_PARALLEL_READS` — default _(unset, off)_. opt-in switch for the Streamlit dashboard's parallel read
