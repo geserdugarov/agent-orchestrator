@@ -459,6 +459,71 @@ class SkillTriggerMatrixRow:
 
 
 @dataclass(frozen=True)
+class SkillAdoptionRow:
+    """One `(repo, skill, agent_role, backend)` cell of skill adoption
+    aggregated by logical agent session rather than by raw agent run.
+
+    Powers the dashboard's opt-in per-session skill-adoption view.
+    `get_skill_adoption` first identifies each logical session from the
+    `agent_exit` rows in the reporting window -- keyed by
+    `resume_session_id`, then `session_id`, then a per-row fallback so an
+    ID-less row is its own session -- and then reads that session's
+    availability and load evidence from every `agent_exit` row before the
+    window end (ignoring the window start and the stage filter, so a load
+    from a prior stage or from before the window still counts, while a
+    later load cannot leak backward). All the skill fields live in
+    `analytics_events.extras` JSONB, so the reader scans the base table
+    with no DDL and no rollup change, mirroring `SkillTriggerMatrixRow`.
+
+    `sessions` is the denominator: how many logical sessions in the
+    cohort had this skill *available* (its `skills_available` set listed
+    the skill, or -- for a legacy load recorded before availability
+    metadata existed -- the skill was loaded and the session carried no
+    availability metadata at all, so the load implies it was offered).
+    `adopted` is the numerator: how many of those sessions actually loaded
+    the skill, counted once per session no matter how many runs or
+    invocations reached for it. `adoption_rate` is `adopted / sessions`.
+
+    `invocations`, `load_rows`, and `incidental` are explicitly
+    window-scoped diagnostics -- they count only the reporting-window
+    `agent_exit` rows, not the historical evidence. `invocations` sums
+    `skills_triggered_count` over the window rows that loaded the skill
+    (three `develop` pulls in one run weigh three); `load_rows` counts
+    those rows (one per run per distinct loaded name, so the same three
+    pulls weigh one); `incidental` sums `skills_incidental_count` over
+    window rows that referenced the skill's `SKILL.md` without loading it.
+    A per-row total is attributed to each name the row carries, which is
+    exact for the common single-skill run.
+
+    `agent_role` / `backend` bucket NULLs under `"unknown"` so a cohort is
+    never silently dropped. The same `TRACK_SKILL_TRIGGERS`-off caveat as
+    `SkillTriggerRateRow` applies: with tracking off no skill keys are
+    written, so a quiet cohort and an untracked one are indistinguishable.
+    """
+
+    repo: str
+    skill: str
+    agent_role: str
+    backend: str
+    sessions: int = 0
+    adopted: int = 0
+    invocations: int = 0
+    load_rows: int = 0
+    incidental: int = 0
+
+    @property
+    def adoption_rate(self) -> float:
+        """Share of the cell's available sessions that loaded the skill.
+
+        `adopted / sessions`, guarded against a zero-session cell so a
+        row that exists only for its window diagnostics (a purely
+        incidental reference, or a load whose session reported a
+        different availability set) never divides by zero.
+        """
+        return self.adopted / self.sessions if self.sessions else 0.0
+
+
+@dataclass(frozen=True)
 class BackendDailyTokensRow:
     """One `(day, backend, total_tokens)` cell of the per-backend daily
     token series.

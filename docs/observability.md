@@ -780,7 +780,8 @@ split across three focused sibling modules by data source / shape — `read_raw.
 aggregates: `get_summary`, `get_kpi_prev`, `get_time_series`, `get_stage_breakdown`, `get_backend_efficiency`,
 `get_repo_breakdown`, `get_throughput_breakdown`), and `read_dashboard.py` (the redesigned-dashboard chart breakdowns
 the rollup cannot reconstruct: `get_review_round_breakdown`, `get_skill_trigger_rates`, `get_skill_trigger_matrix`,
-`get_cost_coverage`, `get_backend_daily_tokens`, `get_hourly_heatmap`). The supporting plumbing is split into further
+`get_skill_adoption`, `get_cost_coverage`, `get_backend_daily_tokens`, `get_hourly_heatmap`). The supporting plumbing is
+split into further
 sibling modules — `read_models.py` (the frozen read-model dataclasses), `connection.py` (`AnalyticsReadError`, the
 deferred-psycopg connect factories, and the thread-local connection cache behind `analytics_connection` /
 `close_thread_local_connection`), `db_url.py` (`_resolve_db_url`), `query.py` (`_query`), and `predicates.py` (the
@@ -835,6 +836,24 @@ window / filter `WHERE`-clause builders).
   disables the cap). The agent-exit event-filter short-circuit applies (no catalog read either). NULL `agent_role` /
   `backend` bucket under `"unknown"`. Same `extras JSONB` / no-DDL and `TRACK_SKILL_TRIGGERS`-off caveats as
   `get_skill_trigger_rates`.
+- `get_skill_adoption` (base table) — per-skill × `(repo, agent_role, backend)` adoption aggregated by **logical**
+  agent session rather than by raw agent run, so a resume chain that pulled `develop` across several ticks counts as one
+  adopting session, not several. Two `agent_exit` base-table scans combine in Python. The first applies the full
+  reporting-window filters and selects the *active* sessions plus the window-scoped diagnostics; the second reads each
+  active session's evidence from every `agent_exit` row *before the window end*, deliberately dropping the window start
+  and the stage filter (`_WindowFilters.historical_scope`) so a load from a prior stage or from before the window stays
+  visible, while the retained `end` bound stops a later load from leaking backward. A session is keyed by
+  `resume_session_id`, then `session_id`, then the row's primary key (an ID-less row is its own session, never merged
+  into one anonymous bucket). `sessions` is the denominator — sessions in the cohort with the skill available (its
+  `skills_available` listed it, or a legacy load with no availability metadata implied it) — and `adopted` counts the
+  sessions that loaded it, once per session, with a derived `adoption_rate`. `invocations` (`SUM` of
+  `skills_triggered_count`), `load_rows` (rows that loaded the skill), and `incidental` (`SUM` of
+  `skills_incidental_count`) are explicitly window-scoped diagnostics off the same window rows, so a pre-window load
+  counts toward `adopted` but not toward them. Rows are ordered by `sessions` DESC, then `adopted` DESC, then
+  `invocations` DESC, then a stable `(repo, agent_role, backend, skill)` tiebreak, and the list is capped at `limit`
+  (default `SKILL_ADOPTION_ROW_LIMIT` = 100; a non-positive `limit` disables the cap). The agent-exit event-filter
+  short-circuit (no scans at all), NULL `"unknown"` bucketing, and `extras JSONB` / no-DDL / `TRACK_SKILL_TRIGGERS`-off
+  caveats match `get_skill_trigger_matrix`.
 - `get_issues` (base table) — date / repo-bounded one-row-per-`(repo, issue)` overview: event count, first / last
   activity, latest non-null stage, agent-exit count, cost / token totals, `max_review_round`, `failed_agent_runs`,
   `max_retry_count`. Bounded by `limit` and ordered by `sort_by` (`"last_seen"` default, `"cost"` orders by

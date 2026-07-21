@@ -9,7 +9,9 @@ carry: per-review-round development/review buckets (raw
 `review_round`), per-`(agent_role, backend)` skill-trigger rates and
 the per-skill `(repo, agent_role, backend)` trigger matrix (both off
 the `extras` JSONB the rollup omits, the matrix folding in the
-`repo_skill_catalog` records too), per-`cost_source` coverage,
+`repo_skill_catalog` records too), per-skill adoption aggregated by
+logical agent session (`get_skill_adoption`, a two-scan combine over
+the same `extras` skill fields), per-`cost_source` coverage,
 per-`(day, backend)` token totals, and the weekday x hour activity
 heatmap (hour-of-day precision the day-keyed rollup loses).
 
@@ -39,6 +41,7 @@ from orchestrator.analytics.read_models import (
     CostCoverageRow,
     HourlyHeatmapPoint,
     ReviewRoundBucketRow,
+    SkillAdoptionRow,
     SkillTriggerMatrixRow,
     SkillTriggerRateRow,
 )
@@ -510,6 +513,337 @@ def get_skill_trigger_matrix(
         issue=issue,
     )
     return _skill_trigger_matrix_rows(query, filters, limit)
+
+
+# Default cap on the rows `get_skill_adoption` returns, mirroring the
+# trigger matrix: the dashboard renders the adoption breakdown in a
+# fold-out, so capping keeps an expand from flooding the page when many
+# repos x cohorts x skills multiply out. A non-positive `limit` disables it.
+SKILL_ADOPTION_ROW_LIMIT = 100
+
+_SkillAdoptionKey = tuple[str, str, str, str]
+
+# Column offsets shared by the two `agent_exit` scans the adoption reader
+# runs; both put the session-identity columns at the same positions so one
+# key builder serves either row.
+_SESSION_RESUME_INDEX = 3
+_SESSION_ID_INDEX = 4
+_SESSION_ROW_INDEX = 5
+
+
+def _skill_session_key(row: Sequence[Any]) -> str:
+    """Identify a row's logical session: resume id, then session id, then row.
+
+    A resumed run continues the session it resumed *from*, so the
+    `resume_session_id` groups a continuation with its origin; a fresh run
+    keys on its own `session_id`. A row carrying neither (an older record,
+    or a CLI hiccup that yielded no id) falls back to its primary key so
+    every ID-less row stays its own session -- never silently merged into a
+    single anonymous bucket. The primary key is stable across the window
+    and history scans, so a shared ID-less row keys the same in both.
+    """
+    resume = _row_value(row, _SESSION_RESUME_INDEX, None)
+    if isinstance(resume, str) and resume:
+        return resume
+    session = _row_value(row, _SESSION_ID_INDEX, None)
+    if isinstance(session, str) and session:
+        return session
+    return f"row:{_row_value(row, _SESSION_ROW_INDEX, None)}"
+
+
+@dataclass
+class _SessionEvidence:
+    """One logical session's availability + load evidence before window end.
+
+    `available` unions every `skills_available` set the session reported;
+    `has_availability_meta` records whether any row carried that key at all,
+    so a legacy load (a trigger with no availability metadata anywhere in
+    the session) can imply availability. `adopted` unions the skills the
+    session loaded across its rows. All three are set-based, so folding the
+    same row twice (a window row is also returned by the history scan) never
+    double-counts.
+    """
+
+    available: set[str] = field(default_factory=set)
+    adopted: set[str] = field(default_factory=set)
+    has_availability_meta: bool = False
+
+    def observe(self, *, available: Sequence[str], triggered: Sequence[str]) -> None:
+        if available:
+            self.has_availability_meta = True
+            self.available.update(available)
+        self.adopted.update(triggered)
+
+    def resolved_available(self) -> set[str]:
+        """Skills that count toward this session's denominator.
+
+        The reported `skills_available` union when the session carried any
+        availability metadata; otherwise the loaded skills themselves -- a
+        legacy load recorded before availability metadata existed implies
+        the skill was offered, so it still counts in the denominator.
+        """
+        if self.has_availability_meta:
+            return self.available
+        return set(self.adopted)
+
+
+@dataclass(frozen=True)
+class _SkillWindowRun:
+    """One reporting-window `agent_exit` row's session + diagnostic fields."""
+
+    session_key: str
+    cohort: _SkillCohort
+    triggered: frozenset[str]
+    triggered_count: int
+    incidental: frozenset[str]
+    incidental_count: int
+
+
+def _skill_window_run(row: Sequence[Any]) -> _SkillWindowRun:
+    return _SkillWindowRun(
+        session_key=_skill_session_key(row),
+        cohort=_skill_cohort(row),
+        triggered=frozenset(_as_skill_names(_row_value(row, 6, None))),
+        triggered_count=int(_row_value(row, 7, 0) or 0),
+        incidental=frozenset(_as_skill_names(_row_value(row, 8, None))),
+        incidental_count=int(_row_value(row, 9, 0) or 0),
+    )
+
+
+def _skill_window_rows(
+    query: _ReadQuery,
+    filters: _WindowFilters,
+) -> list[_SkillWindowRun]:
+    where, bindings = _build_window_where(filters.without_events())
+    clause = _append_where_condition(where, "event = 'agent_exit'")
+    rows = query.select(
+        "SELECT repo, "
+        "COALESCE(agent_role, 'unknown') AS role_label, "
+        "COALESCE(backend, 'unknown') AS backend_label, "
+        "resume_session_id, session_id, id, "
+        "extras -> 'skills_triggered' AS skills_triggered, "
+        "(extras ->> 'skills_triggered_count')::int AS skills_triggered_count, "
+        "extras -> 'skills_incidental' AS skills_incidental, "
+        "(extras ->> 'skills_incidental_count')::int AS skills_incidental_count "
+        f"FROM analytics_events{clause}",
+        bindings,
+    )
+    return [_skill_window_run(row) for row in rows]
+
+
+def _skill_history_rows(
+    query: _ReadQuery,
+    filters: _WindowFilters,
+) -> list[tuple]:
+    where, bindings = _build_window_where(filters.historical_scope())
+    clause = _append_where_condition(where, "event = 'agent_exit'")
+    return query.select(
+        "SELECT repo, "
+        "COALESCE(agent_role, 'unknown') AS role_label, "
+        "COALESCE(backend, 'unknown') AS backend_label, "
+        "resume_session_id, session_id, id, "
+        "extras -> 'skills_available' AS skills_available, "
+        "extras -> 'skills_triggered' AS skills_triggered "
+        f"FROM analytics_events{clause}",
+        bindings,
+    )
+
+
+def _skill_session_evidence(
+    query: _ReadQuery,
+    filters: _WindowFilters,
+    window_runs: Sequence[_SkillWindowRun],
+) -> dict[str, _SessionEvidence]:
+    """Gather each active session's before-window-end availability + loads.
+
+    Seeds one `_SessionEvidence` per window session (a window row is itself
+    evidence observed before the end) so only sessions active in the window
+    are tracked, then folds in the history scan -- every `agent_exit` row
+    for those sessions before the window end, ignoring the window start and
+    stage filter -- so a load from a prior stage or from before the window
+    stays visible. History rows for sessions not seen in the window are
+    dropped: their evidence must not leak into the aggregate.
+    """
+    evidence: dict[str, _SessionEvidence] = {}
+    for run in window_runs:
+        evidence.setdefault(run.session_key, _SessionEvidence()).observe(
+            available=(), triggered=run.triggered,
+        )
+    for row in _skill_history_rows(query, filters):
+        session = evidence.get(_skill_session_key(row))
+        if session is None:
+            continue
+        session.observe(
+            available=_as_skill_names(_row_value(row, 6, None)),
+            triggered=_as_skill_names(_row_value(row, 7, None)),
+        )
+    return evidence
+
+
+@dataclass
+class _SkillAdoption:
+    """Per-`(repo, role, backend, skill)` session counts and window diagnostics."""
+
+    sessions: dict[_SkillAdoptionKey, int] = field(default_factory=dict)
+    adopted: dict[_SkillAdoptionKey, int] = field(default_factory=dict)
+    invocations: dict[_SkillAdoptionKey, int] = field(default_factory=dict)
+    load_rows: dict[_SkillAdoptionKey, int] = field(default_factory=dict)
+    incidental: dict[_SkillAdoptionKey, int] = field(default_factory=dict)
+
+    @classmethod
+    def build(
+        cls,
+        window_runs: Sequence[_SkillWindowRun],
+        evidence: dict[str, _SessionEvidence],
+    ) -> _SkillAdoption:
+        counts = cls()
+        session_cohorts: dict[str, set[_SkillCohort]] = {}
+        for run in window_runs:
+            counts._observe_window(run)
+            session_cohorts.setdefault(run.session_key, set()).add(run.cohort)
+        counts._count_sessions(session_cohorts, evidence)
+        return counts
+
+    def _observe_window(self, run: _SkillWindowRun) -> None:
+        # A per-run total attributed to each name the run carries: exact for
+        # the common single-skill run, an upper bound for a multi-skill one.
+        for skill in run.triggered:
+            key = (*run.cohort, skill)
+            self.invocations[key] = self.invocations.get(key, 0) + run.triggered_count
+            self.load_rows[key] = self.load_rows.get(key, 0) + 1
+        for skill in run.incidental:
+            key = (*run.cohort, skill)
+            self.incidental[key] = self.incidental.get(key, 0) + run.incidental_count
+
+    def _count_sessions(
+        self,
+        session_cohorts: dict[str, set[_SkillCohort]],
+        evidence: dict[str, _SessionEvidence],
+    ) -> None:
+        for session_key, cohorts in session_cohorts.items():
+            session = evidence.get(session_key)
+            if session is None:
+                continue
+            available = session.resolved_available()
+            for cohort in cohorts:
+                for skill in available:
+                    key = (*cohort, skill)
+                    self.sessions[key] = self.sessions.get(key, 0) + 1
+                    if skill in session.adopted:
+                        self.adopted[key] = self.adopted.get(key, 0) + 1
+
+    def keys(self) -> set[_SkillAdoptionKey]:
+        # Every available cell plus any cell that only shows in the window
+        # diagnostics (a purely incidental reference, or a load whose session
+        # reported a different availability set) so no observation is dropped.
+        keys = set(self.sessions)
+        keys.update(self.invocations)
+        keys.update(self.incidental)
+        return keys
+
+    def order_key(self, key: _SkillAdoptionKey) -> list:
+        repo, role, backend, skill = key
+        return [
+            -self.sessions.get(key, 0),
+            -self.adopted.get(key, 0),
+            -self.invocations.get(key, 0),
+            repo,
+            role,
+            backend,
+            skill,
+        ]
+
+    def as_row(self, key: _SkillAdoptionKey) -> SkillAdoptionRow:
+        repo, role, backend, skill = key
+        return SkillAdoptionRow(
+            repo=repo,
+            skill=skill,
+            agent_role=role,
+            backend=backend,
+            sessions=self.sessions.get(key, 0),
+            adopted=self.adopted.get(key, 0),
+            invocations=self.invocations.get(key, 0),
+            load_rows=self.load_rows.get(key, 0),
+            incidental=self.incidental.get(key, 0),
+        )
+
+
+def _skill_adoption_rows(
+    query: _ReadQuery,
+    filters: _WindowFilters,
+    limit: int,
+) -> list[SkillAdoptionRow]:
+    window_runs = _skill_window_rows(query, filters)
+    evidence = _skill_session_evidence(query, filters, window_runs)
+    counts = _SkillAdoption.build(window_runs, evidence)
+    keys = sorted(counts.keys(), key=counts.order_key)
+    if limit > 0:
+        keys = keys[:limit]
+    return [counts.as_row(key) for key in keys]
+
+
+def get_skill_adoption(
+    *,
+    start: Optional[datetime] = None,
+    end: Optional[datetime] = None,
+    repo: Optional[str] = None,
+    events: Optional[Sequence[str]] = None,
+    stages: Optional[Sequence[str]] = None,
+    issue: Optional[int] = None,
+    limit: int = SKILL_ADOPTION_ROW_LIMIT,
+    db_url: Optional[str] = None,
+    connect: Optional[Callable[[str], Any]] = None,
+    conn: Any = None,
+) -> list[SkillAdoptionRow]:
+    """Per-skill x `(repo, agent_role, backend)` adoption by logical session.
+
+    Aggregates skill use by *logical agent session* rather than by raw
+    agent run, so a resume chain that pulled `develop` across three ticks
+    counts as one adopting session, not three. A session is identified by
+    `resume_session_id`, then `session_id`, then a per-row fallback (an
+    ID-less row is its own session). The skill fields live in
+    `analytics_events.extras` JSONB -- the daily rollup does not carry them
+    -- so the reader scans the base table directly, a pure read-side
+    addition with zero DDL that mirrors `get_skill_trigger_matrix`.
+
+    Two `agent_exit` scans combine in Python. The first applies the full
+    reporting-window filters (date / repo / stage / issue) and selects the
+    *active* sessions plus the window-scoped diagnostics. The second gathers
+    each active session's evidence from every `agent_exit` row *before the
+    window end*, deliberately dropping the window start and the stage filter
+    (`historical_scope`) so a load from a prior stage or from before the
+    window stays visible; the retained `end` bound keeps a later load from
+    leaking backward. History rows for sessions not active in the window are
+    ignored. Honors the same `agent_exit` event-filter contract as the other
+    skill readers: short-circuits to empty (no DB round trip, history scan
+    included) when the events multiselect excludes `agent_exit` or is cleared.
+
+    `sessions` is the denominator -- sessions in the cohort with the skill
+    available (its `skills_available` listed it, or a legacy load with no
+    availability metadata implied it). `adopted` counts the sessions that
+    loaded it, once per session. `invocations` / `load_rows` / `incidental`
+    are window-scoped diagnostics off the same window rows, so a load from
+    before the window counts toward `adopted` but not toward them. NULL
+    `agent_role` / `backend` bucket under `"unknown"`.
+
+    Rows are ordered by `sessions` DESC, then `adopted` DESC, then
+    `invocations` DESC, then a stable `(repo, agent_role, backend, skill)`
+    tiebreak, and the list is capped at `limit` rows (default
+    `SKILL_ADOPTION_ROW_LIMIT`; a non-positive `limit` disables the cap).
+    """
+    query = _ReadQuery.resolve(db_url, connect, conn)
+    if not query.available:
+        return []
+    if _agent_event_excluded(events):
+        return []
+    filters = _WindowFilters(
+        start=start,
+        end=end,
+        repo=repo,
+        stages=stages,
+        issue=issue,
+    )
+    return _skill_adoption_rows(query, filters, limit)
 
 
 def _cost_coverage_from_row(row: Sequence[Any]) -> CostCoverageRow:
