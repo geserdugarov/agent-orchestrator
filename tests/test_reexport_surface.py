@@ -12,10 +12,21 @@ from __future__ import annotations
 
 import ast
 import unittest
+from itertools import chain
 from pathlib import Path
 
 from orchestrator import dashboard, workflow, worktrees
 from orchestrator.analytics import read as analytics_read
+
+
+def _intentional_reexports(node: ast.AST) -> tuple[str, ...]:
+    if not isinstance(node, ast.ImportFrom) or node.module == "__future__":
+        return ()
+    return tuple(
+        alias.name
+        for alias in node.names
+        if alias.asname == alias.name
+    )
 
 
 def _reexport_names(module) -> set[str]:
@@ -27,15 +38,7 @@ def _reexport_names(module) -> set[str]:
     `__all__`.
     """
     tree = ast.parse(Path(module.__file__).read_text(encoding="utf-8"))
-    names: set[str] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom):
-            if node.module == "__future__":
-                continue
-            for alias in node.names:
-                if alias.asname is not None and alias.asname == alias.name:
-                    names.add(alias.name)
-    return names
+    return set(chain.from_iterable(map(_intentional_reexports, ast.walk(tree))))
 
 
 class ReexportInventoryTest(unittest.TestCase):

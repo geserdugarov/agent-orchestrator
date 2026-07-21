@@ -40,6 +40,13 @@ from tests.workflow_helpers import (
 )
 
 
+def _events(gh: FakeGitHubClient, event_name: str) -> list[dict]:
+    return [
+        event for event in gh.recorded_events
+        if event["event"] == event_name
+    ]
+
+
 class StageEventEmissionTest(unittest.TestCase, _PatchedWorkflowMixin):
     """`set_workflow_label` is the single chokepoint for stage transitions,
     so a hook there gives every workflow handler a `stage_enter` event for
@@ -153,10 +160,6 @@ class AgentLifecycleEventEmissionTest(unittest.TestCase, _PatchedWorkflowMixin):
     (the StageEventEmissionTest covers the on-disk surface).
     """
 
-    @staticmethod
-    def _events(gh, event_name: str) -> list[dict]:
-        return [event for event in gh.recorded_events if event["event"] == event_name]
-
     def test_fresh_dev_spawn_emits_event_pair(self) -> None:
         gh = FakeGitHubClient()
         issue = make_issue(1, label=LABEL_IMPLEMENTING)
@@ -166,8 +169,8 @@ class AgentLifecycleEventEmissionTest(unittest.TestCase, _PatchedWorkflowMixin):
             run_agent=_agent(session_id="sess-dev", last_message="q?"),
             has_new_commits=False,
         )
-        spawns = self._events(gh, EVENT_AGENT_SPAWN)
-        exits = self._events(gh, EVENT_AGENT_EXIT)
+        spawns = _events(gh, EVENT_AGENT_SPAWN)
+        exits = _events(gh, EVENT_AGENT_EXIT)
         self.assertEqual(len(spawns), 1)
         self.assertEqual(len(exits), 1)
         spawn = spawns[0]
@@ -214,8 +217,8 @@ class AgentLifecycleEventEmissionTest(unittest.TestCase, _PatchedWorkflowMixin):
                 ),
                 head_shas=[pr.head.sha, pr.head.sha],
             )
-        spawns = self._events(gh, EVENT_AGENT_SPAWN)
-        exits = self._events(gh, EVENT_AGENT_EXIT)
+        spawns = _events(gh, EVENT_AGENT_SPAWN)
+        exits = _events(gh, EVENT_AGENT_EXIT)
         reviewer_spawns = [
             event for event in spawns if event["agent_role"] == ROLE_REVIEWER
         ]
@@ -248,7 +251,7 @@ class AgentLifecycleEventEmissionTest(unittest.TestCase, _PatchedWorkflowMixin):
             run_agent=_agent(session_id="sess-resume", last_message="q?"),
             has_new_commits=False,
         )
-        spawns = self._events(gh, EVENT_AGENT_SPAWN)
+        spawns = _events(gh, EVENT_AGENT_SPAWN)
         self.assertEqual(len(spawns), 1)
         self.assertEqual(spawns[0]["agent_role"], ROLE_DEVELOPER)
         self.assertEqual(spawns[0]["session_id"], "sess-resume")
@@ -265,7 +268,7 @@ class AgentLifecycleEventEmissionTest(unittest.TestCase, _PatchedWorkflowMixin):
             # the issue parks (the disposition reads HEAD twice now).
             head_shas=("sha-pre", "sha-pre"),
         )
-        exits = self._events(gh, EVENT_AGENT_EXIT)
+        exits = _events(gh, EVENT_AGENT_EXIT)
         self.assertEqual(len(exits), 1)
         self.assertTrue(exits[0]["timed_out"])
         self.assertEqual(exits[0]["exit_code"], -1)

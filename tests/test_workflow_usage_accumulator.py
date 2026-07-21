@@ -20,10 +20,10 @@ from orchestrator.usage import UsageMetrics
 from tests.fakes import FakeGitHubClient, make_issue
 from tests.workflow_helpers import (
     REVIEW_APPROVED_MESSAGE,
-    _FAKE_WT,
     _PatchedWorkflowMixin,
     _TEST_SPEC,
     _agent,
+    _fake_worktree,
 )
 
 
@@ -31,6 +31,28 @@ def _usage(**overrides) -> UsageMetrics:
     base = dict(backend="claude", cost_source="estimated")
     base.update(overrides)
     return UsageMetrics(**base)
+
+
+def _resume_seed():
+    gh = FakeGitHubClient()
+    issue = make_issue(940, label="resolving_conflict")
+    gh.add_issue(issue)
+    return gh, issue
+
+
+class _PoisonedThenFreshRun:
+    def __init__(self) -> None:
+        self.calls: list[Optional[str]] = []
+
+    def __call__(self, *_args, resume_session_id=None, **_kwargs):
+        self.calls.append(resume_session_id)
+        if resume_session_id == "poisoned-sess":
+            return _agent(
+                session_id="",
+                last_message="",
+                stderr="Error: No conversation found with session ID: x",
+            )
+        return _agent(session_id="fresh-sess", last_message="ok")
 
 
 class AccumulateIssueUsageHelperTest(unittest.TestCase):
@@ -214,14 +236,8 @@ class ResumeRunUsageAccumulationTest(unittest.TestCase):
     """`_resume_dev_with_text` counts every real agent exit once: one for a
     plain resume, two when a poisoned resume triggers a fresh-spawn retry."""
 
-    def _seeded(self):
-        gh = FakeGitHubClient()
-        issue = make_issue(940, label="resolving_conflict")
-        gh.add_issue(issue)
-        return gh, issue
-
     def test_plain_resume_counts_one_exit(self) -> None:
-        gh, issue = self._seeded()
+        gh, issue = _resume_seed()
         gh.seed_state(
             940, dev_agent="claude", dev_session_id="live-sess",
             silent_park_count=0,
@@ -229,7 +245,7 @@ class ResumeRunUsageAccumulationTest(unittest.TestCase):
         state = gh.read_pinned_state(issue)
 
         with patch.object(
-            workflow, "_ensure_worktree", lambda spec, n, **_: _FAKE_WT
+            workflow, "_ensure_worktree", _fake_worktree,
         ), patch.object(
             workflow, "run_agent",
             lambda *a, **k: _agent(session_id="live-sess", last_message="ok"),
@@ -239,30 +255,21 @@ class ResumeRunUsageAccumulationTest(unittest.TestCase):
         self.assertEqual(state.get("issue_agent_runs"), 1)
 
     def test_poisoned_retry_counts_both_exits(self) -> None:
-        gh, issue = self._seeded()
+        gh, issue = _resume_seed()
         gh.seed_state(
             940, dev_agent="claude", dev_session_id="poisoned-sess",
             silent_park_count=0,
         )
         state = gh.read_pinned_state(issue)
 
-        calls: list[Optional[str]] = []
-
-        def fake_run(agent, prompt, wt, *, resume_session_id=None, extra_args=()):
-            calls.append(resume_session_id)
-            if resume_session_id == "poisoned-sess":
-                return _agent(
-                    session_id="", last_message="",
-                    stderr="Error: No conversation found with session ID: x",
-                )
-            return _agent(session_id="fresh-sess", last_message="ok")
+        run_recorder = _PoisonedThenFreshRun()
 
         with patch.object(
-            workflow, "_ensure_worktree", lambda spec, n, **_: _FAKE_WT
-        ), patch.object(workflow, "run_agent", fake_run):
+            workflow, "_ensure_worktree", _fake_worktree,
+        ), patch.object(workflow, "run_agent", run_recorder):
             workflow._resume_dev_with_text(gh, _TEST_SPEC, issue, state, "go")
 
-        self.assertEqual(calls, ["poisoned-sess", None])
+        self.assertEqual(run_recorder.calls, ["poisoned-sess", None])
         # Both the poisoned resume and the fresh retry burned a real exit.
         self.assertEqual(state.get("issue_agent_runs"), 2)
 

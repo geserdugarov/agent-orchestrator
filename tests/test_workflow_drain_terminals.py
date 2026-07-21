@@ -11,8 +11,10 @@ usage-verdict receipt each arc posts before its pinned-state write."""
 from __future__ import annotations
 
 import unittest
+from dataclasses import dataclass
 
 from orchestrator import workflow
+from orchestrator.github import PinnedState
 
 from tests.fakes import (
     FakeGitHubClient,
@@ -34,11 +36,37 @@ from tests.workflow_helpers import (
     _TEST_SPEC,
     _agent,
     _issue_branch,
+    _state_with_pr_number,
 )
 
 
 DEFAULT_HEAD_SHA = "cafe1234"
 MERGE_METHOD_EXTERNAL = "external"
+
+
+@dataclass(frozen=True)
+class _DrainContext:
+    gh: FakeGitHubClient
+    issue: object
+    state: PinnedState
+    pr: FakePR
+    stage: str
+
+
+class _DrainTerminalCall:
+    def __init__(self, context: _DrainContext) -> None:
+        self._context = context
+        self.result = False
+
+    def __call__(self) -> None:
+        self.result = workflow._drain_review_pr_terminals(
+            self._context.gh,
+            _TEST_SPEC,
+            self._context.issue,
+            self._context.state,
+            self._context.pr,
+            stage=self._context.stage,
+        )
 
 
 class DrainReviewPrTerminalsTest(unittest.TestCase, _PatchedWorkflowMixin):
@@ -53,13 +81,6 @@ class DrainReviewPrTerminalsTest(unittest.TestCase, _PatchedWorkflowMixin):
     independently of any stage wiring.
     """
 
-    def _state_with_pr_number(self, gh, issue_number, pr_number, **extra):
-        from orchestrator.github import PinnedState
-
-        seed = {"pr_number": pr_number, **extra}
-        gh.seed_state(issue_number, **seed)
-        return PinnedState(comment_id=None, data=dict(seed))
-
     def test_pr_none_returns_false_no_op(self) -> None:
         # Fixing's PR-fetch failure path sets `pr=None` and hands it
         # straight to the helper; the helper must treat that as a no-op
@@ -70,7 +91,7 @@ class DrainReviewPrTerminalsTest(unittest.TestCase, _PatchedWorkflowMixin):
         gh = FakeGitHubClient()
         issue = make_issue(310, label=LABEL_FIXING)
         gh.add_issue(issue)
-        state = self._state_with_pr_number(gh, 310, 31000)
+        state = _state_with_pr_number(gh, 310, 31000)
 
         result = self._run(
             lambda: self.assertFalse(
@@ -99,7 +120,7 @@ class DrainReviewPrTerminalsTest(unittest.TestCase, _PatchedWorkflowMixin):
             merged=False, state=STATE_OPEN,
         )
         gh.add_pr(pr)
-        state = self._state_with_pr_number(gh, 311, 31100)
+        state = _state_with_pr_number(gh, 311, 31100)
 
         result = self._run(
             lambda: self.assertFalse(
@@ -115,6 +136,10 @@ class DrainReviewPrTerminalsTest(unittest.TestCase, _PatchedWorkflowMixin):
         result["_cleanup_terminal_branch"].assert_not_called()
         self.assertEqual(gh.recorded_events, [])
 
+
+class DrainReviewPrTerminalTest(unittest.TestCase, _PatchedWorkflowMixin):
+    """Merged, closed, and manually stopped PRs take distinct exits."""
+
     def test_merged_pr_finalizes_to_done(self) -> None:
         # The merged arc: stamp `merged_at`, flip to `done`, emit
         # `pr_merged` with `merge_method="external"` and the supplied
@@ -128,7 +153,7 @@ class DrainReviewPrTerminalsTest(unittest.TestCase, _PatchedWorkflowMixin):
             merged=True, state=STATE_CLOSED,
         )
         gh.add_pr(pr)
-        state = self._state_with_pr_number(
+        state = _state_with_pr_number(
             gh, 312, 31200, review_round=2, conflict_round=0,
             branch=_issue_branch(312),
         )
@@ -178,7 +203,7 @@ class DrainReviewPrTerminalsTest(unittest.TestCase, _PatchedWorkflowMixin):
             merged=False, state=STATE_CLOSED,
         )
         gh.add_pr(pr)
-        state = self._state_with_pr_number(
+        state = _state_with_pr_number(
             gh, 313, 31300, review_round=3, conflict_round=2,
             branch=_issue_branch(313),
         )
@@ -232,7 +257,7 @@ class DrainReviewPrTerminalsTest(unittest.TestCase, _PatchedWorkflowMixin):
             merged=False, state=STATE_OPEN,
         )
         gh.add_pr(pr)
-        state = self._state_with_pr_number(gh, 314, 31400)
+        state = _state_with_pr_number(gh, 314, 31400)
 
         result = self._run(
             lambda: self.assertTrue(
@@ -262,6 +287,10 @@ class DrainReviewPrTerminalsTest(unittest.TestCase, _PatchedWorkflowMixin):
             [],
         )
 
+
+class DrainReviewPrMetadataTest(unittest.TestCase, _PatchedWorkflowMixin):
+    """Terminal events preserve stage-specific round metadata."""
+
     def test_conflict_route_keeps_zero_round(
         self,
     ) -> None:
@@ -285,7 +314,7 @@ class DrainReviewPrTerminalsTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
         gh.add_pr(pr)
         # Deliberately omit `conflict_round` from the pinned state.
-        state = self._state_with_pr_number(gh, 316, 31600)
+        state = _state_with_pr_number(gh, 316, 31600)
 
         self._run(
             lambda: self.assertTrue(
@@ -318,7 +347,7 @@ class DrainReviewPrTerminalsTest(unittest.TestCase, _PatchedWorkflowMixin):
             merged=False, state=STATE_CLOSED,
         )
         gh.add_pr(pr2)
-        state2 = self._state_with_pr_number(gh, 317, 31700)
+        state2 = _state_with_pr_number(gh, 317, 31700)
 
         self._run(
             lambda: self.assertTrue(
@@ -355,7 +384,7 @@ class DrainReviewPrTerminalsTest(unittest.TestCase, _PatchedWorkflowMixin):
             merged=True, state=STATE_CLOSED,
         )
         gh.add_pr(pr)
-        state = self._state_with_pr_number(gh, 318, 31800)
+        state = _state_with_pr_number(gh, 318, 31800)
 
         self._run(
             lambda: self.assertTrue(
@@ -372,6 +401,10 @@ class DrainReviewPrTerminalsTest(unittest.TestCase, _PatchedWorkflowMixin):
         ]
         self.assertEqual(len(merged_events), 1)
         self.assertNotIn("conflict_round", merged_events[0])
+
+
+class DrainReviewPrReceiptTest(unittest.TestCase, _PatchedWorkflowMixin):
+    """Terminal drains tolerate closed issues and persist usage receipts."""
 
     def test_merged_arc_handles_already_closed_issue(
         self,
@@ -391,7 +424,7 @@ class DrainReviewPrTerminalsTest(unittest.TestCase, _PatchedWorkflowMixin):
             merged=True, state=STATE_CLOSED,
         )
         gh.add_pr(pr)
-        state = self._state_with_pr_number(gh, 315, 31500)
+        state = _state_with_pr_number(gh, 315, 31500)
 
         self._run(
             lambda: self.assertTrue(
@@ -442,20 +475,17 @@ class DrainReviewPrTerminalsTest(unittest.TestCase, _PatchedWorkflowMixin):
                     merged=merged, state=pr_state,
                 )
                 gh.add_pr(pr)
-                state = self._state_with_pr_number(
+                state = _state_with_pr_number(
                     gh, n, prn, conflict_round=0,
                     issue_agent_runs=2, issue_total_tokens=1000,
                     issue_total_cost_usd=0.5, issue_cost_sources=["reported"],
                 )
 
-                self._run(
-                    lambda: self.assertTrue(
-                        workflow._drain_review_pr_terminals(
-                            gh, _TEST_SPEC, issue, state, pr, stage=stage,
-                        )
-                    ),
-                    run_agent=_agent(),
+                drain_call = _DrainTerminalCall(
+                    _DrainContext(gh, issue, state, pr, stage),
                 )
+                self._run(drain_call, run_agent=_agent())
+                self.assertTrue(drain_call.result)
 
                 receipts = [
                     body for posted_n, body in gh.posted_comments

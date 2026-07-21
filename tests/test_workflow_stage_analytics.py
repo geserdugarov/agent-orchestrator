@@ -7,12 +7,11 @@ disabled-sink no-op); `set_workflow_label` writes one `stage_enter`
 analytics record per non-None label transition."""
 from __future__ import annotations
 
-import json
 import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from orchestrator import analytics, workflow
 from orchestrator.github import BACKLOG_LABEL, PAUSED_LABEL
@@ -25,7 +24,41 @@ from tests.workflow_helpers import (
     LABEL_VALIDATING,
     TEST_REPO_SLUG,
     _TEST_SPEC,
+    _analytics_records,
 )
+
+
+def _stage_evaluations(path: Path, issue_number: int) -> list[dict]:
+    return [
+        record for record in _analytics_records(path)
+        if record.get("event") == EVENT_STAGE_EVALUATION
+        and record.get("issue") == issue_number
+    ]
+
+
+def _process_hard_skipped_issue(skip_label: str) -> tuple[MagicMock, list[dict]]:
+    with tempfile.TemporaryDirectory(prefix="analytics-skip-") as temp_dir:
+        path = Path(temp_dir) / "analytics.jsonl"
+        gh = FakeGitHubClient()
+        issue = make_issue(8004, label=LABEL_IMPLEMENTING)
+        issue.labels.append(FakeLabel(skip_label))
+        gh.add_issue(issue)
+        handler_mock = MagicMock()
+        with patch.object(analytics, "ANALYTICS_LOG_PATH", path), patch.object(
+            workflow,
+            "_handle_implementing",
+            handler_mock,
+        ):
+            workflow._process_issue(gh, _TEST_SPEC, issue)
+        return handler_mock, _analytics_records(path)
+
+
+def _process_error(gh: FakeGitHubClient, issue) -> RuntimeError:
+    try:
+        workflow._process_issue(gh, _TEST_SPEC, issue)
+    except RuntimeError as error:
+        return error
+    raise AssertionError("the stage handler did not propagate its error")
 
 
 class StageEvaluationAnalyticsTest(unittest.TestCase):
@@ -36,16 +69,6 @@ class StageEvaluationAnalyticsTest(unittest.TestCase):
     the per-issue tick try/except in `workflow.tick` keeps the legacy
     isolation behavior. Backlog-skips are NOT timed -- no handler runs.
     """
-
-    @staticmethod
-    def _records(path: Path) -> list[dict]:
-        if not path.exists():
-            return []
-        return [
-            json.loads(line)
-            for line in path.read_text(encoding="utf-8").splitlines()
-            if line.strip()
-        ]
 
     def test_success_appends_evaluation_record(self) -> None:
         # End-to-end: a labeled issue runs through the dispatcher with
@@ -59,11 +82,7 @@ class StageEvaluationAnalyticsTest(unittest.TestCase):
             with patch.object(analytics, "ANALYTICS_LOG_PATH", path), \
                  patch.object(workflow, "_handle_implementing"):
                 workflow._process_issue(gh, _TEST_SPEC, issue)
-            records = [
-                record for record in self._records(path)
-                if record.get("event") == EVENT_STAGE_EVALUATION
-                and record.get("issue") == 8001
-            ]
+            records = _stage_evaluations(path, 8001)
         self.assertEqual(len(records), 1)
         rec = records[0]
         self.assertEqual(rec["repo"], TEST_REPO_SLUG)
@@ -89,11 +108,7 @@ class StageEvaluationAnalyticsTest(unittest.TestCase):
             with patch.object(analytics, "ANALYTICS_LOG_PATH", path), \
                  patch.object(workflow, "_handle_pickup"):
                 workflow._process_issue(gh, _TEST_SPEC, issue)
-            records = [
-                record for record in self._records(path)
-                if record.get("event") == EVENT_STAGE_EVALUATION
-                and record.get("issue") == 8002
-            ]
+            records = _stage_evaluations(path, 8002)
         self.assertEqual(len(records), 1)
         rec = records[0]
         self.assertNotIn("stage", rec)
@@ -117,14 +132,8 @@ class StageEvaluationAnalyticsTest(unittest.TestCase):
                  patch.object(
                      workflow, "_handle_validating", side_effect=sentinel,
                  ):
-                with self.assertRaises(RuntimeError) as ctx:
-                    workflow._process_issue(gh, _TEST_SPEC, issue)
-                self.assertIs(ctx.exception, sentinel)
-            records = [
-                record for record in self._records(path)
-                if record.get("event") == EVENT_STAGE_EVALUATION
-                and record.get("issue") == 8003
-            ]
+                self.assertIs(_process_error(gh, issue), sentinel)
+            records = _stage_evaluations(path, 8003)
         self.assertEqual(len(records), 1)
         rec = records[0]
         self.assertEqual(rec["stage"], LABEL_VALIDATING)
@@ -139,17 +148,9 @@ class StageEvaluationAnalyticsTest(unittest.TestCase):
         # zero-duration evaluations for issues the orchestrator ignores.
         for skip_label in (BACKLOG_LABEL, PAUSED_LABEL):
             with self.subTest(label=skip_label):
-                with tempfile.TemporaryDirectory(prefix="analytics-skip-") as td:
-                    path = Path(td) / "analytics.jsonl"
-                    gh = FakeGitHubClient()
-                    issue = make_issue(8004, label=LABEL_IMPLEMENTING)
-                    issue.labels.append(FakeLabel(skip_label))
-                    gh.add_issue(issue)
-                    with patch.object(analytics, "ANALYTICS_LOG_PATH", path), \
-                         patch.object(workflow, "_handle_implementing") as handler:
-                        workflow._process_issue(gh, _TEST_SPEC, issue)
-                    handler.assert_not_called()
-                    self.assertEqual(self._records(path), [])
+                handler_mock, records = _process_hard_skipped_issue(skip_label)
+                handler_mock.assert_not_called()
+                self.assertEqual(records, [])
 
     def test_disabled_sink_writes_no_evaluation(self) -> None:
         # The off knob is documented as a silent no-op for the analytics
@@ -175,16 +176,6 @@ class StageEnterAnalyticsRecordTest(unittest.TestCase):
     GitHub state; the analytics record is observability only.
     """
 
-    @staticmethod
-    def _records(path: Path) -> list[dict]:
-        if not path.exists():
-            return []
-        return [
-            json.loads(line)
-            for line in path.read_text(encoding="utf-8").splitlines()
-            if line.strip()
-        ]
-
     def test_label_transition_writes_stage_enter(self) -> None:
         with tempfile.TemporaryDirectory(prefix="analytics-stage-enter-") as td:
             path = Path(td) / "analytics.jsonl"
@@ -194,7 +185,7 @@ class StageEnterAnalyticsRecordTest(unittest.TestCase):
                 gh.add_issue(issue)
                 gh.set_workflow_label(issue, LABEL_IMPLEMENTING)
                 gh.set_workflow_label(issue, LABEL_VALIDATING)
-            records = self._records(path)
+            records = _analytics_records(path)
         self.assertEqual(len(records), 2)
         self.assertEqual(
             [record["stage"] for record in records],
@@ -217,7 +208,7 @@ class StageEnterAnalyticsRecordTest(unittest.TestCase):
                 issue = make_issue(8102, label=LABEL_IMPLEMENTING)
                 gh.add_issue(issue)
                 gh.set_workflow_label(issue, None)
-        self.assertEqual(self._records(path), [])
+        self.assertEqual(_analytics_records(path), [])
 
 
 if __name__ == "__main__":

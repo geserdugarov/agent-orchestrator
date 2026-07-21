@@ -15,7 +15,7 @@ post-agent side effects; those live-guard cases live in
 from __future__ import annotations
 
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from orchestrator import workflow
 from orchestrator.github import (
@@ -40,10 +40,11 @@ class PausedLabelSkipsProcessingTest(unittest.TestCase):
         issue.labels.append(FakeLabel(PAUSED_LABEL))
         gh.add_issue(issue)
 
-        with patch.object(workflow, "_handle_implementing") as impl:
+        implementing_mock = MagicMock()
+        with patch.object(workflow, "_handle_implementing", implementing_mock):
             workflow._process_issue(gh, _TEST_SPEC, issue)
 
-        impl.assert_not_called()
+        implementing_mock.assert_not_called()
         self.assertEqual(gh.label_history, [])
         self.assertEqual(gh.posted_comments, [])
 
@@ -53,10 +54,11 @@ class PausedLabelSkipsProcessingTest(unittest.TestCase):
         issue.labels.append(FakeLabel(PAUSED_LABEL))
         gh.add_issue(issue)
 
-        with patch.object(workflow, "_handle_pickup") as pickup:
+        pickup_mock = MagicMock()
+        with patch.object(workflow, "_handle_pickup", pickup_mock):
             workflow._process_issue(gh, _TEST_SPEC, issue)
 
-        pickup.assert_not_called()
+        pickup_mock.assert_not_called()
         self.assertEqual(gh.label_history, [])
 
     def test_removing_paused_allows_dispatch(self) -> None:
@@ -64,10 +66,11 @@ class PausedLabelSkipsProcessingTest(unittest.TestCase):
         issue = make_issue(753, label="implementing")
         gh.add_issue(issue)
 
-        with patch.object(workflow, "_handle_implementing") as impl:
+        implementing_mock = MagicMock()
+        with patch.object(workflow, "_handle_implementing", implementing_mock):
             workflow._process_issue(gh, _TEST_SPEC, issue)
 
-        impl.assert_called_once_with(gh, _TEST_SPEC, issue)
+        implementing_mock.assert_called_once_with(gh, _TEST_SPEC, issue)
 
 
 class HardSkipControlLabelTest(unittest.TestCase):

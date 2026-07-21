@@ -14,6 +14,7 @@ must stay aligned with, so the two cannot silently drift back apart.
 from __future__ import annotations
 
 import unittest
+from itertools import takewhile
 from pathlib import Path
 
 from orchestrator import workflow_messages
@@ -29,6 +30,22 @@ _DEVELOP_SKILLS = (
     _REPO_ROOT / ".agents" / "skills" / "develop" / "SKILL.md",
     _REPO_ROOT / ".claude" / "skills" / "develop" / "SKILL.md",
 )
+_YAML_BLOCK_MARKERS = frozenset({">", ">-", ">+", "|", "|-", "|+"})
+
+
+def _is_indented_or_blank(line: str) -> bool:
+    return not line or line[0].isspace()
+
+
+def _description_field(lines: list[str]) -> tuple[int, str] | None:
+    return next(
+        (
+            (index, line.split(":", 1)[1].strip())
+            for index, line in enumerate(lines[1:], 1)
+            if line.startswith("description:")
+        ),
+        None,
+    )
 
 
 def _frontmatter_description(text: str) -> str:
@@ -40,23 +57,17 @@ def _frontmatter_description(text: str) -> str:
     """
     lines = text.splitlines()
     assert lines and lines[0].strip() == "---", "missing frontmatter open"
-    folded: list[str] = []
-    collecting = False
-    for line in lines[1:]:
-        if line.strip() == "---":
-            break
-        if collecting:
-            if line and not line[0].isspace():
-                break  # a non-indented line is the next top-level key
-            if line.strip():
-                folded.append(line.strip())
-            continue
-        if line.startswith("description:"):
-            inline = line.split(":", 1)[1].strip()
-            if inline and inline not in {">", ">-", ">+", "|", "|-", "|+"}:
-                return inline
-            collecting = True
-    return " ".join(folded)
+    description = _description_field(lines)
+    if description is None:
+        return ""
+    index, inline = description
+    if inline and inline not in _YAML_BLOCK_MARKERS:
+        return inline
+    return " ".join(
+        line.strip()
+        for line in takewhile(_is_indented_or_blank, lines[index + 1:])
+        if line.strip()
+    )
 
 
 class DevelopSkillTriggerAnchorTest(unittest.TestCase):

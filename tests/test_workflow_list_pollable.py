@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import unittest
-from unittest import mock
+from unittest.mock import patch
 
 
 from github import GithubException
@@ -11,6 +11,14 @@ from github import GithubException
 from orchestrator import config
 from orchestrator.github import GitHubClient
 from tests.fakes import FakeGitHubClient, make_issue
+
+
+def _bare_client(repo: "_CountingRepo") -> GitHubClient:
+    # Bypass the networked __init__; wire only what _cached_label touches.
+    gh = GitHubClient.__new__(GitHubClient)
+    gh.repo = repo
+    gh._label_cache = {}
+    return gh
 
 
 class ListPollableIssuesTest(unittest.TestCase):
@@ -33,9 +41,12 @@ class ListPollableIssuesTest(unittest.TestCase):
         # Closed but no in_review label: must be skipped (already finalized).
         closed_done = make_issue(8, label="done")
         closed_done.closed = True
-        for issue in (open_issue, closed_in_review, closed_done):
-            gh.add_issue(issue)
-        out = {issue.number for issue in gh.list_pollable_issues()}
+        for seeded_issue in (open_issue, closed_in_review, closed_done):
+            gh.add_issue(seeded_issue)
+        out = {
+            pollable_issue.number
+            for pollable_issue in gh.list_pollable_issues()
+        }
         self.assertEqual(out, {1, 7})
 
     def test_closed_question_included_for_cleanup(self) -> None:
@@ -48,9 +59,12 @@ class ListPollableIssuesTest(unittest.TestCase):
         open_issue = make_issue(1, label="implementing")
         closed_question = make_issue(9, label="question")
         closed_question.closed = True
-        for issue in (open_issue, closed_question):
-            gh.add_issue(issue)
-        out = {issue.number for issue in gh.list_pollable_issues()}
+        for seeded_issue in (open_issue, closed_question):
+            gh.add_issue(seeded_issue)
+        out = {
+            pollable_issue.number
+            for pollable_issue in gh.list_pollable_issues()
+        }
         self.assertEqual(out, {1, 9})
 
 
@@ -109,7 +123,7 @@ class ClosedSweepCadenceTest(unittest.TestCase):
         closed = make_issue(7, label="in_review")
         closed.closed = True
         gh.add_issue(closed)
-        with mock.patch.object(config, "CLOSED_ISSUE_SWEEP_EVERY_N_TICKS", 3):
+        with patch.object(config, "CLOSED_ISSUE_SWEEP_EVERY_N_TICKS", 3):
             # Call 1 (first): sweep runs -> closed issue present.
             self.assertEqual({issue.number for issue in gh.list_pollable_issues()}, {1, 7})
             # Calls 2 and 3: sweep skipped -> open issue only.
@@ -122,7 +136,7 @@ class ClosedSweepCadenceTest(unittest.TestCase):
         gh = FakeGitHubClient()
         gh.add_issue(make_issue(1, label="implementing"))
         gh.add_issue(make_issue(2, label="validating"))
-        with mock.patch.object(config, "CLOSED_ISSUE_SWEEP_EVERY_N_TICKS", 5):
+        with patch.object(config, "CLOSED_ISSUE_SWEEP_EVERY_N_TICKS", 5):
             for _ in range(5):
                 out = {issue.number for issue in gh.list_pollable_issues()}
                 self.assertEqual(out, {1, 2})
@@ -155,16 +169,9 @@ class CachedLabelTest(unittest.TestCase):
     picked up without a restart.
     """
 
-    def _bare_client(self, repo: _CountingRepo) -> GitHubClient:
-        # Bypass the networked __init__; wire only what _cached_label touches.
-        gh = GitHubClient.__new__(GitHubClient)
-        gh.repo = repo
-        gh._label_cache = {}
-        return gh
-
     def test_resolved_label_is_fetched_once(self) -> None:
         repo = _CountingRepo()
-        gh = self._bare_client(repo)
+        gh = _bare_client(repo)
         for _ in range(5):
             label = gh._cached_label("implementing")
             self.assertEqual(label.name, "implementing")
@@ -172,7 +179,7 @@ class CachedLabelTest(unittest.TestCase):
 
     def test_failed_lookup_is_not_cached_and_retries(self) -> None:
         repo = _CountingRepo(missing={"implementing"})
-        gh = self._bare_client(repo)
+        gh = _bare_client(repo)
         self.assertIsNone(gh._cached_label("implementing"))
         self.assertIsNone(gh._cached_label("implementing"))
         # Both calls hit GitHub: a transient 403 must not poison the cache.
