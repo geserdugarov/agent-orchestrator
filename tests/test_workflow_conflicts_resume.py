@@ -118,7 +118,7 @@ class ResolvingConflictAwaitingHumanResumeTest(unittest.TestCase, _ResolvingConf
         mocks[PUSH_BRANCH].assert_called_once_with(
             _TEST_SPEC,
             _FAKE_WT,
-            self.BRANCH,
+            self.issue_branch,
             force_with_lease=None,
         )
         state = gh.pinned_data(CONFLICT_ISSUE)

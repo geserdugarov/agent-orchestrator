@@ -44,7 +44,7 @@ Do not mark a stage complete until its completion gate is satisfied.
 | 3 | Remaining production complexity | 5/6 | [ ] |
 | 4 | Remaining production style and structure | 5/5 | [x] |
 | 5 | Test structure and complexity | 7/7 | [x] |
-| 6 | Test literals and naming | 6/7 | [ ] |
+| 6 | Test literals and naming | 7/7 | [x] |
 | 7 | Long-tail cleanup and final verification | 0/5 | [ ] |
 
 ## Finding-count progress
@@ -401,7 +401,7 @@ Apply these rules consistently:
 
 ### Package 6.7 — Shared and remaining test literals
 
-- [ ] Resolve the same rule groups in shared fakes/helpers and every remaining test module.
+- [x] Resolve the same rule groups in shared fakes/helpers and every remaining test module.
 
 Completion gate: high-volume test rules are cleared while individual test scenarios remain understandable.
 
@@ -1226,6 +1226,30 @@ Add one row for every implementation session, including partial sessions.
 | 2026-07-21 | 6.4 | Complete | WPS 697->141; target 555->0; 225f; 2204p/3s | None | Start 6.5 |
 | 2026-07-21 | 6.5 | Complete | WPS 560->130; target 430->0; 234f; 2204p/3s | None | Start 6.6 |
 | 2026-07-21 | 6.6 | Complete | WPS 1161->227; target 933->0; 282f; 2204p/3s | None | Start 6.7 |
+| 2026-07-21 | 6.7 | Complete | WPS 650->138; target 508->0; 353f; 2204p/3s | None | Start 7.1 |
+
+Package 6.7 is **complete**. The pass covered the shared GitHub fake and workflow harness plus the remaining
+state-machine, metadata, trust, routing, analytics, drift, lifecycle, terminal, prompt, and parallel-tick tests.
+Issue, PR, comment, and watermark identities; state and event fields; agent, model, and skill names; token and cost
+values; time budgets; paths; and command attributes now use names tied to their test role. Ambiguous result, content,
+event, path, and fixture variables were clarified. True fixture constants moved to module scope, mutable fixture
+collections became immutable, and the conflict tests now consume descriptive lowercase mixin attributes without
+introducing abstractions between unrelated scenarios.
+
+The scoped `--select=WPS` count over the 32 modules fell from 650 to 138. The Package 6.7 rule set fell from 508 to
+0: `WPS110` (38), `WPS111` (15), `WPS115` (6), `WPS118` (1), `WPS226` (103), and `WPS432` (345) were cleared.
+The four `WPS407` long-tail findings also disappeared when the module fixtures became immutable. The 113 reviewed
+structural findings assigned to Stage 5 remain unchanged: `WPS201` (1), `WPS202` (12), `WPS204` (27), `WPS210`
+(37), `WPS211` (5), `WPS213` (16), `WPS214` (1), `WPS230` (1), `WPS235` (6), and `WPS602` (7). The 25 remaining
+Stage 7 findings are `WPS237` (1), `WPS335` (2), `WPS336` (7), `WPS342` (1), `WPS435` (1), `WPS504` (8),
+`WPS509` (1), `WPS527` (3), and `WPS615` (1); no new rule family or remainder was introduced.
+
+All 353 focused tests pass, as does repository-wide Ruff. The complete tracked suite passes with 2,204 tests, 3
+live-Postgres skips, and 1,008 subtests; both committed-range and working-tree diff checks are clean. A bare
+repository-root collection also sees the ignored, externally owned `analytics-db/data` volume and receives
+`PermissionError`; the complete tracked `tests/` tree is the recorded full gate for this session. The tracked
+collection remains 2,207 tests, and the redundancy audit confirms that no scenario was removed or merged behind a
+generic helper.
 
 Package 6.6 is **complete**. The pass covered validating review, verify, squash, drift, handoff, watermark, paused,
 and terminal scenarios; in-review routing, feedback filtering, migration, drift, parks, checks, and watermarks;

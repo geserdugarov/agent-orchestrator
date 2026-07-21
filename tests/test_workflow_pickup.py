@@ -14,6 +14,12 @@ from tests.fakes import FakeGitHubClient, make_issue
 from tests.workflow_helpers import _PatchedWorkflowMixin, _TEST_SPEC, _agent
 
 
+_DECOMPOSE_CONFIG = "DECOMPOSE"
+_ALLOWLIST_CONFIG = "ALLOWED_ISSUE_AUTHORS"
+_CLARIFICATION_MESSAGE = "need clarification"
+_IMPLEMENTING_LABEL = "implementing"
+
+
 class HandlePickupTest(unittest.TestCase, _PatchedWorkflowMixin):
     def test_decompose_off_routes_to_implementing(self) -> None:
         # Legacy path retained behind the DECOMPOSE kill switch: an
@@ -24,10 +30,10 @@ class HandlePickupTest(unittest.TestCase, _PatchedWorkflowMixin):
         issue = make_issue(1)
         gh.add_issue(issue)
 
-        with patch.object(config, "DECOMPOSE", False):
+        with patch.object(config, _DECOMPOSE_CONFIG, False):
             mocks = self._run(
                 lambda: workflow._handle_pickup(gh, _TEST_SPEC, issue),
-                run_agent=_agent(last_message="need clarification"),
+                run_agent=_agent(last_message=_CLARIFICATION_MESSAGE),
                 has_new_commits=False,
             )
 
@@ -37,7 +43,7 @@ class HandlePickupTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
         # Pickup flips the label to implementing; downstream handler may park
         # on awaiting_human but does not re-label.
-        self.assertEqual(gh.label_history[0], (1, "implementing"))
+        self.assertEqual(gh.label_history[0], (1, _IMPLEMENTING_LABEL))
         self.assertIn("created_at", gh.pinned_data(1))
         # _handle_implementing was actually entered (codex spawned).
         mocks["run_agent"].assert_called_once()
@@ -51,7 +57,7 @@ class HandlePickupTest(unittest.TestCase, _PatchedWorkflowMixin):
         issue = make_issue(1, author="stranger")
         gh.add_issue(issue)
 
-        with patch.object(config, "ALLOWED_ISSUE_AUTHORS", ("geserdugarov",)):
+        with patch.object(config, _ALLOWLIST_CONFIG, ("geserdugarov",)):
             mocks = self._run(
                 lambda: workflow._handle_pickup(gh, _TEST_SPEC, issue),
                 run_agent=_agent(last_message="should not run"),
@@ -70,15 +76,15 @@ class HandlePickupTest(unittest.TestCase, _PatchedWorkflowMixin):
         issue = make_issue(1, author="alice")
         gh.add_issue(issue)
 
-        with patch.object(config, "ALLOWED_ISSUE_AUTHORS", ("alice", "bob")), \
-             patch.object(config, "DECOMPOSE", False):
+        with patch.object(config, _ALLOWLIST_CONFIG, ("alice", "bob")), \
+             patch.object(config, _DECOMPOSE_CONFIG, False):
             self._run(
                 lambda: workflow._handle_pickup(gh, _TEST_SPEC, issue),
-                run_agent=_agent(last_message="need clarification"),
+                run_agent=_agent(last_message=_CLARIFICATION_MESSAGE),
                 has_new_commits=False,
             )
 
-        self.assertIn((1, "implementing"), gh.label_history)
+        self.assertIn((1, _IMPLEMENTING_LABEL), gh.label_history)
         self.assertIn("created_at", gh.pinned_data(1))
 
     def test_pickup_matches_author_case_insensitively(self) -> None:
@@ -90,15 +96,15 @@ class HandlePickupTest(unittest.TestCase, _PatchedWorkflowMixin):
         issue = make_issue(1, author="Alice")
         gh.add_issue(issue)
 
-        with patch.object(config, "ALLOWED_ISSUE_AUTHORS", ("alice",)), \
-             patch.object(config, "DECOMPOSE", False):
+        with patch.object(config, _ALLOWLIST_CONFIG, ("alice",)), \
+             patch.object(config, _DECOMPOSE_CONFIG, False):
             self._run(
                 lambda: workflow._handle_pickup(gh, _TEST_SPEC, issue),
-                run_agent=_agent(last_message="need clarification"),
+                run_agent=_agent(last_message=_CLARIFICATION_MESSAGE),
                 has_new_commits=False,
             )
 
-        self.assertIn((1, "implementing"), gh.label_history)
+        self.assertIn((1, _IMPLEMENTING_LABEL), gh.label_history)
 
     def test_empty_allowlist_lets_anyone_through(self) -> None:
         # Default config: empty tuple disables the filter so existing
@@ -108,12 +114,12 @@ class HandlePickupTest(unittest.TestCase, _PatchedWorkflowMixin):
         issue = make_issue(1, author="random-user")
         gh.add_issue(issue)
 
-        with patch.object(config, "ALLOWED_ISSUE_AUTHORS", ()), \
-             patch.object(config, "DECOMPOSE", False):
+        with patch.object(config, _ALLOWLIST_CONFIG, ()), \
+             patch.object(config, _DECOMPOSE_CONFIG, False):
             self._run(
                 lambda: workflow._handle_pickup(gh, _TEST_SPEC, issue),
-                run_agent=_agent(last_message="need clarification"),
+                run_agent=_agent(last_message=_CLARIFICATION_MESSAGE),
                 has_new_commits=False,
             )
 
-        self.assertIn((1, "implementing"), gh.label_history)
+        self.assertIn((1, _IMPLEMENTING_LABEL), gh.label_history)

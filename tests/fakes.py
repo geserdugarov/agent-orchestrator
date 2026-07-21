@@ -29,6 +29,8 @@ from orchestrator.state_machine import (
 
 
 _LabelHistory = list[tuple[int, Optional[str]]]
+_STATE_CLOSED = "closed"
+_STATE_OPEN = "open"
 _CLOSED_SWEEP_LABELS = frozenset({
     "implementing",
     "documenting",
@@ -93,13 +95,13 @@ class FakeIssue:
     def state(self) -> str:
         """Mirror PyGithub's Issue.state so workflow code can read it
         without branching on whether the issue object is a fake or real."""
-        return "closed" if self.closed else "open"
+        return _STATE_CLOSED if self.closed else _STATE_OPEN
 
     def get_comments(self) -> Iterable[FakeComment]:
         return list(self.comments)
 
     def edit(self, *, state: Optional[str] = None) -> None:
-        if state == "closed":
+        if state == _STATE_CLOSED:
             self.closed = True
 
 
@@ -137,7 +139,7 @@ class FakePR:
     # State surface used by `_handle_in_review`. Defaults match a freshly
     # opened PR: open, no merge, no approval, no checks configured.
     merged: bool = False
-    state: str = "open"  # "open" or "closed"
+    state: str = _STATE_OPEN  # open or closed
     mergeable: Optional[bool] = True
     head: FakePRRef = field(default_factory=FakePRRef)
     approved: bool = False
@@ -250,11 +252,11 @@ class FakeGitHubClient:
         self.deleted_remote_branches: list[str] = []
         self.delete_remote_branch_returns_ok: bool = True
 
-    def seed_state(self, issue_number: int, **data: Any) -> None:
+    def seed_state(self, issue_number: int, **state_data: Any) -> None:
         """Pre-populate pinned state for an issue. The next read_pinned_state
         returns a wrapper around this dict (with a synthetic comment_id)."""
         self._pinned[issue_number] = PinnedState(
-            comment_id=next(self._comment_id), data=dict(data)
+            comment_id=next(self._comment_id), data=dict(state_data)
         )
 
     def add_issue(self, issue: FakeIssue) -> None:
@@ -300,9 +302,9 @@ class FakeGitHubClient:
 
     @staticmethod
     def workflow_label(issue: FakeIssue) -> Optional[WorkflowLabel]:
-        for lbl in issue.labels:
-            if lbl.name in WORKFLOW_LABELS:
-                return WorkflowLabel(lbl.name)
+        for label in issue.labels:
+            if label.name in WORKFLOW_LABELS:
+                return WorkflowLabel(label.name)
         return None
 
     def set_workflow_label(
@@ -316,7 +318,10 @@ class FakeGitHubClient:
                 self.workflow_label(issue), new_label,
                 config.WORKFLOW_TRANSITION_GUARD,
             )
-        keep = [l for l in issue.labels if l.name not in WORKFLOW_LABELS]
+        keep = [
+            label for label in issue.labels
+            if label.name not in WORKFLOW_LABELS
+        ]
         if new_label:
             keep.append(FakeLabel(new_label))
         if not self._stale_label_cache:
@@ -362,10 +367,10 @@ class FakeGitHubClient:
         _write_event_record(record)
 
     def comment(self, issue: FakeIssue, body: str) -> FakeComment:
-        c = FakeComment(id=next(self._comment_id), body=body)
-        issue.comments.append(c)
+        new_comment = FakeComment(id=next(self._comment_id), body=body)
+        issue.comments.append(new_comment)
         self.posted_comments.append((issue.number, body))
-        return c
+        return new_comment
 
     def get_issue(self, number: int) -> FakeIssue:
         return self._issues[int(number)]
@@ -380,13 +385,13 @@ class FakeGitHubClient:
     ) -> FakeIssue:
         # Mirror the real client's strict typo guard on this direct
         # workflow-label write path.
-        validated = [coerce_workflow_label(l) for l in labels]
+        validated = [coerce_workflow_label(label) for label in labels]
         full_body = f"{(body or '').rstrip()}\n\nParent: #{parent_number}"
         child = FakeIssue(
             number=next(self._next_issue_number),
             title=title,
             body=full_body,
-            labels=[FakeLabel(l) for l in validated],
+            labels=[FakeLabel(label) for label in validated],
         )
         self._issues[child.number] = child
         self.created_child_issues.append(child)
@@ -455,7 +460,7 @@ class FakeGitHubClient:
         return pr
 
     def pr_comment(self, pr_number: int, body: str) -> FakeComment:
-        c = FakeComment(
+        new_comment = FakeComment(
             id=next(self._comment_id),
             body=body,
             user=FakeUser("orchestrator"),
@@ -467,8 +472,8 @@ class FakeGitHubClient:
         # approval comment we just posted.
         pr = self.pulls.get(pr_number)
         if pr is not None:
-            pr.issue_comments.append(c)
-        return c
+            pr.issue_comments.append(new_comment)
+        return new_comment
 
     def find_open_pr(self, *, branch: str, base: str) -> Optional[FakePR]:
         return self.existing_open_pr.get(branch)
@@ -477,7 +482,7 @@ class FakeGitHubClient:
         """Mirror `GitHubClient.iter_open_prs` for the community-contribution
         sweep. Returns every PR in `pulls` whose state is open.
         """
-        return [pr for pr in self.pulls.values() if pr.state == "open"]
+        return [pr for pr in self.pulls.values() if pr.state == _STATE_OPEN]
 
     @staticmethod
     def pr_has_label(pr: FakePR, label_name: str) -> bool:
@@ -503,9 +508,9 @@ class FakeGitHubClient:
     def pr_state(pr: FakePR) -> str:
         if pr.merged:
             return "merged"
-        if pr.state == "closed":
-            return "closed"
-        return "open"
+        if pr.state == _STATE_CLOSED:
+            return _STATE_CLOSED
+        return _STATE_OPEN
 
     @staticmethod
     def pr_is_mergeable(pr: FakePR) -> Optional[bool]:
@@ -540,7 +545,7 @@ class FakeGitHubClient:
         if not self.merge_returns_ok:
             return False
         pr.merged = True
-        pr.state = "closed"
+        pr.state = _STATE_CLOSED
         return True
 
     def delete_remote_branch(self, branch: str) -> bool:
@@ -558,7 +563,7 @@ class FakeGitHubClient:
                 continue
             if after_id is None or comment.id > after_id:
                 out.append(comment)
-        out.sort(key=lambda item: item.id)
+        out.sort(key=lambda listed_comment: listed_comment.id)
         return out
 
     def pr_inline_comments_after(
@@ -571,7 +576,7 @@ class FakeGitHubClient:
                 continue
             if after_id is None or comment.id > after_id:
                 out.append(comment)
-        out.sort(key=lambda item: item.id)
+        out.sort(key=lambda listed_comment: listed_comment.id)
         return out
 
     def pr_reviews_after(

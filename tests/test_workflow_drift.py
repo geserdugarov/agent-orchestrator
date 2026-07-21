@@ -41,6 +41,40 @@ NEW_BODY = "new body"
 CLARIFIED_BODY = "clarified body"
 EXISTING_WORK_MESSAGE = "existing work satisfies the edit"
 PARK_AGENT_SILENT = "agent_silent"
+UNCHANGED_SHA = "same"
+
+_BOT_COMMENT_ID = 200
+_PINNED_COMMENT_ID = 300
+_GUIDED_CONTINUE_COMMENT_ID = 101
+_PROMPT_COMMENT_ID = 500
+_INITIAL_LAST_ACTION_COMMENT_ID = 500
+_BLOCKED_CHILD_ISSUE_NUMBER = 200
+_BLOCKED_PARENT_ISSUE_NUMBER = 199
+_VALIDATING_ACK_ISSUE_NUMBER = 600
+_VALIDATING_ACK_PR_NUMBER = 6000
+_IN_REVIEW_ACK_ISSUE_NUMBER = 700
+_IN_REVIEW_ACK_PR_NUMBER = 7000
+_VALIDATING_WATERMARK_ISSUE_NUMBER = 900
+_VALIDATING_WATERMARK_PR_NUMBER = 9000
+_VALIDATING_WATERMARK_COMMENT_ID = 5000
+_IN_REVIEW_WATERMARK_ISSUE_NUMBER = 910
+_IN_REVIEW_WATERMARK_PR_NUMBER = 9100
+_IN_REVIEW_WATERMARK_COMMENT_ID = 6000
+_IMPLEMENTING_WATERMARK_ISSUE_NUMBER = 920
+_IMPLEMENTING_WATERMARK_COMMENT_ID = 7000
+_CONFLICT_WATERMARK_ISSUE_NUMBER = 930
+_CONFLICT_WATERMARK_PR_NUMBER = 9300
+_CONFLICT_WATERMARK_COMMENT_ID = 8000
+_EVICTED_BOT_COMMENT_ID = 12345
+_HUMAN_COMMENT_ID = 12346
+_BOT_FILTER_HUMAN_COMMENT_ID = 900
+_BOT_FILTER_BOT_COMMENT_ID = 901
+_TYPED_HUMAN_COMMENT_ID = 910
+_VALIDATING_CLARIFICATION_ISSUE_NUMBER = 601
+_VALIDATING_CLARIFICATION_PR_NUMBER = 6001
+_IN_REVIEW_CLARIFICATION_ISSUE_NUMBER = 701
+_IN_REVIEW_CLARIFICATION_PR_NUMBER = 7001
+_IMPLEMENTING_CLARIFICATION_ISSUE_NUMBER = 602
 
 
 def _continue_comment(body: str) -> FakeComment:
@@ -74,14 +108,24 @@ class ComputeUserContentHashTest(unittest.TestCase):
         # A human comment with the same body as a bot comment must still
         # affect the hash; only the recorded bot id is filtered.
         human = FakeComment(id=100, body="please retry", user=FakeUser(TRUSTED_AUTHOR))
-        bot = FakeComment(id=200, body="picking this up", user=FakeUser(TRUSTED_AUTHOR))
+        bot = FakeComment(
+            id=_BOT_COMMENT_ID,
+            body="picking this up",
+            user=FakeUser(TRUSTED_AUTHOR),
+        )
         issue_with_human = make_issue(1, comments=[human])
         issue_with_both = make_issue(1, comments=[human, bot])
         self.assertEqual(
-            workflow._compute_user_content_hash(issue_with_human, {200}),
-            workflow._compute_user_content_hash(issue_with_both, {200}),
+            workflow._compute_user_content_hash(
+                issue_with_human,
+                {_BOT_COMMENT_ID},
+            ),
+            workflow._compute_user_content_hash(
+                issue_with_both,
+                {_BOT_COMMENT_ID},
+            ),
         )
-        # Without filtering 200, the hash differs.
+        # Without filtering the bot comment, the hash differs.
         self.assertNotEqual(
             workflow._compute_user_content_hash(issue_with_human, set()),
             workflow._compute_user_content_hash(issue_with_both, set()),
@@ -89,7 +133,8 @@ class ComputeUserContentHashTest(unittest.TestCase):
 
     def test_state_marker_filtered_by_marker(self) -> None:
         pinned = FakeComment(
-            id=300, body="<!--orchestrator-state {\"k\": 1}-->",
+            id=_PINNED_COMMENT_ID,
+            body="<!--orchestrator-state {\"k\": 1}-->",
         )
         issue = make_issue(1)
         issue_with_pinned = make_issue(1, comments=[pinned])
@@ -113,7 +158,8 @@ class ComputeUserContentHashTest(unittest.TestCase):
             id=100, body=CONTINUE_COMMAND, user=FakeUser(TRUSTED_AUTHOR),
         )
         guided = FakeComment(
-            id=101, body="/orchestrator continue\nalso rename the flag",
+            id=_GUIDED_CONTINUE_COMMENT_ID,
+            body="/orchestrator continue\nalso rename the flag",
             user=FakeUser(TRUSTED_AUTHOR),
         )
         self.assertEqual(
@@ -187,8 +233,8 @@ class DetectUserContentChangeTest(unittest.TestCase):
         gh.add_issue(issue)
         state = gh.read_pinned_state(issue)
         before = gh.write_state_calls
-        result = workflow._detect_user_content_change(gh, issue, state)
-        self.assertIsNone(result)
+        detected_hash = workflow._detect_user_content_change(gh, issue, state)
+        self.assertIsNone(detected_hash)
         self.assertEqual(
             state.get(KEY_USER_CONTENT_HASH),
             workflow._compute_user_content_hash(issue, set()),
@@ -226,11 +272,12 @@ class DetectUserContentChangeTest(unittest.TestCase):
         gh.seed_state(1, user_content_hash=prior)
         state = gh.read_pinned_state(issue_b)
         before = gh.write_state_calls
-        result = workflow._detect_user_content_change(gh, issue_b, state)
+        detected_hash = workflow._detect_user_content_change(gh, issue_b, state)
         self.assertEqual(
-            result, workflow._compute_user_content_hash(issue_b, set())
+            detected_hash,
+            workflow._compute_user_content_hash(issue_b, set()),
         )
-        self.assertNotEqual(result, prior)
+        self.assertNotEqual(detected_hash, prior)
         # The helper does NOT auto-persist on a real change; the caller
         # decides whether to act and persist (so the routing branches can
         # use the comparison without committing to a state write).
@@ -260,11 +307,11 @@ class DetectUserContentChangeTest(unittest.TestCase):
         gh.seed_state(1, user_content_hash=legacy_hash)
         state = gh.read_pinned_state(issue)
 
-        result = workflow._detect_user_content_change(gh, issue, state)
+        detected_hash = workflow._detect_user_content_change(gh, issue, state)
 
         # No drift reported; the baseline is normalized to the new algorithm
         # and durably persisted so the next tick is stable.
-        self.assertIsNone(result)
+        self.assertIsNone(detected_hash)
         self.assertEqual(state.get(KEY_USER_CONTENT_HASH), new_hash)
         self.assertEqual(gh.pinned_data(1).get(KEY_USER_CONTENT_HASH), new_hash)
 
@@ -286,12 +333,17 @@ class DetectUserContentChangeTest(unittest.TestCase):
         gh.seed_state(1, user_content_hash=prior)
         state = gh.read_pinned_state(new_issue)
 
-        result = workflow._detect_user_content_change(gh, new_issue, state)
+        detected_hash = workflow._detect_user_content_change(
+            gh,
+            new_issue,
+            state,
+        )
 
         self.assertEqual(
-            result, workflow._compute_user_content_hash(new_issue, set()),
+            detected_hash,
+            workflow._compute_user_content_hash(new_issue, set()),
         )
-        self.assertIsNotNone(result)
+        self.assertIsNotNone(detected_hash)
 
 
 class HandlePickupInitializesUserContentHashTest(
@@ -350,7 +402,8 @@ class UserContentChangePromptIncludesCommentsTest(unittest.TestCase):
     def test_recent_comments_quoted_in_resume_prompt(self) -> None:
         issue = make_issue(1, title="t", body="b")
         issue.comments.append(FakeComment(
-            id=500, body="new acceptance criterion: handle empty input",
+            id=_PROMPT_COMMENT_ID,
+            body="new acceptance criterion: handle empty input",
             user=FakeUser(TRUSTED_AUTHOR),
         ))
         comments_text = workflow._recent_comments_text(issue)
@@ -387,7 +440,7 @@ class FirstTimeHashSeedingIsDurableTest(
             100,
             pr_number=pr.number,
             awaiting_human=True,
-            last_action_comment_id=500,
+            last_action_comment_id=_INITIAL_LAST_ACTION_COMMENT_ID,
             review_round=1,
         )
 
@@ -409,16 +462,23 @@ class FirstTimeHashSeedingIsDurableTest(
         # silently become the new baseline because the no-op branch
         # returns without `write_pinned_state`.
         gh = FakeGitHubClient()
-        child = make_issue(200, label=LABEL_BLOCKED, body="child body")
+        child = make_issue(
+            _BLOCKED_CHILD_ISSUE_NUMBER,
+            label=LABEL_BLOCKED,
+            body="child body",
+        )
         gh.add_issue(child)
-        gh.seed_state(200, parent_number=199)
+        gh.seed_state(
+            _BLOCKED_CHILD_ISSUE_NUMBER,
+            parent_number=_BLOCKED_PARENT_ISSUE_NUMBER,
+        )
 
         self._run(
             lambda: workflow._handle_blocked(gh, _TEST_SPEC, child),
             run_agent=_agent(),
         )
 
-        state = gh.pinned_data(200)
+        state = gh.pinned_data(_BLOCKED_CHILD_ISSUE_NUMBER)
         self.assertIsNotNone(state.get(KEY_USER_CONTENT_HASH))
 
 
@@ -432,12 +492,19 @@ class NoCommitAckDoesNotParkTest(
 
     def test_validating_ack_does_not_park(self) -> None:
         gh = FakeGitHubClient()
-        issue = make_issue(600, label=LABEL_VALIDATING, body=CLARIFIED_BODY)
+        issue = make_issue(
+            _VALIDATING_ACK_ISSUE_NUMBER,
+            label=LABEL_VALIDATING,
+            body=CLARIFIED_BODY,
+        )
         gh.add_issue(issue)
-        pr = FakePR(number=6000, head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-600")
+        pr = FakePR(
+            number=_VALIDATING_ACK_PR_NUMBER,
+            head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-600",
+        )
         gh.add_pr(pr)
         gh.seed_state(
-            600,
+            _VALIDATING_ACK_ISSUE_NUMBER,
             pr_number=pr.number,
             dev_agent=BACKEND_CLAUDE,
             dev_session_id=DEV_SESSION,
@@ -460,7 +527,7 @@ class NoCommitAckDoesNotParkTest(
             head_shas=[SAME_SHA, SAME_SHA],
         )
 
-        state = gh.pinned_data(600)
+        state = gh.pinned_data(_VALIDATING_ACK_ISSUE_NUMBER)
         # Crucial: must NOT park as a question.
         self.assertFalse(state.get(KEY_AWAITING_HUMAN))
         # Dev's ACK justification was posted on the issue as an FYI.
@@ -479,12 +546,19 @@ class NoCommitAckDoesNotParkTest(
         # `in_review` via the final-docs handoff). `review_round`
         # resets so the validating cap counts fresh rounds.
         gh = FakeGitHubClient()
-        issue = make_issue(700, label=LABEL_IN_REVIEW, body=CLARIFIED_BODY)
+        issue = make_issue(
+            _IN_REVIEW_ACK_ISSUE_NUMBER,
+            label=LABEL_IN_REVIEW,
+            body=CLARIFIED_BODY,
+        )
         gh.add_issue(issue)
-        pr = FakePR(number=7000, head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-700")
+        pr = FakePR(
+            number=_IN_REVIEW_ACK_PR_NUMBER,
+            head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-700",
+        )
         gh.add_pr(pr)
         gh.seed_state(
-            700,
+            _IN_REVIEW_ACK_ISSUE_NUMBER,
             pr_number=pr.number,
             dev_agent=BACKEND_CLAUDE,
             dev_session_id=DEV_SESSION,
@@ -503,17 +577,23 @@ class NoCommitAckDoesNotParkTest(
             ),
             has_new_commits=False,
             dirty_files=(),
-            head_shas=["same", "same"],
+            head_shas=[UNCHANGED_SHA, UNCHANGED_SHA],
         )
 
-        state = gh.pinned_data(700)
+        state = gh.pinned_data(_IN_REVIEW_ACK_ISSUE_NUMBER)
         # Must NOT park (the dev acknowledged, not asked a question).
         self.assertFalse(state.get(KEY_AWAITING_HUMAN))
         # MUST bounce directly to validating (no documenting hop) so
         # the reviewer re-evaluates against the updated body.
-        self.assertIn((700, LABEL_VALIDATING), gh.label_history)
+        self.assertIn(
+            (_IN_REVIEW_ACK_ISSUE_NUMBER, LABEL_VALIDATING),
+            gh.label_history,
+        )
         # And NOT through documenting -- no commit landed.
-        self.assertNotIn((700, "documenting"), gh.label_history)
+        self.assertNotIn(
+            (_IN_REVIEW_ACK_ISSUE_NUMBER, "documenting"),
+            gh.label_history,
+        )
         # review_round reset so the validating cap counts fresh rounds.
         self.assertEqual(state.get("review_round"), 0)
         # Dev's reply still posted on the issue as an FYI.
@@ -537,19 +617,27 @@ class DriftMarksCommentsConsumedTest(
         self,
     ) -> None:
         gh = FakeGitHubClient()
-        issue = make_issue(900, label=LABEL_VALIDATING, body=NEW_BODY)
+        issue = make_issue(
+            _VALIDATING_WATERMARK_ISSUE_NUMBER,
+            label=LABEL_VALIDATING,
+            body=NEW_BODY,
+        )
         # Pre-existing human comment with a high id -- representing the
         # comment that arrived at the same time as the body edit.
         human = FakeComment(
-            id=5000, body="add this acceptance criterion",
+            id=_VALIDATING_WATERMARK_COMMENT_ID,
+            body="add this acceptance criterion",
             user=FakeUser(TRUSTED_AUTHOR),
         )
         issue.comments.append(human)
         gh.add_issue(issue)
-        pr = FakePR(number=9000, head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-900")
+        pr = FakePR(
+            number=_VALIDATING_WATERMARK_PR_NUMBER,
+            head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-900",
+        )
         gh.add_pr(pr)
         gh.seed_state(
-            900,
+            _VALIDATING_WATERMARK_ISSUE_NUMBER,
             pr_number=pr.number,
             dev_agent=BACKEND_CLAUDE,
             dev_session_id=DEV_SESSION,
@@ -570,12 +658,13 @@ class DriftMarksCommentsConsumedTest(
             head_shas=["before", SHA_AFTER],
         )
 
-        state = gh.pinned_data(900)
+        state = gh.pinned_data(_VALIDATING_WATERMARK_ISSUE_NUMBER)
         # last_action_comment_id advanced past the human comment so the
         # eventual handoff to in_review does not classify it as fresh
         # feedback.
         self.assertGreaterEqual(
-            int(state.get(KEY_LAST_ACTION_COMMENT_ID)), 5000,
+            int(state.get(KEY_LAST_ACTION_COMMENT_ID)),
+            _VALIDATING_WATERMARK_COMMENT_ID,
         )
 
     def test_in_review_human_comment_routes_to_fixing(
@@ -590,17 +679,25 @@ class DriftMarksCommentsConsumedTest(
         # hash is recomputed so the drift path does not double-fire on the
         # same comment changes next tick.
         gh = FakeGitHubClient()
-        issue = make_issue(910, label=LABEL_IN_REVIEW, body=NEW_BODY)
+        issue = make_issue(
+            _IN_REVIEW_WATERMARK_ISSUE_NUMBER,
+            label=LABEL_IN_REVIEW,
+            body=NEW_BODY,
+        )
         human = FakeComment(
-            id=6000, body="please also handle X",
+            id=_IN_REVIEW_WATERMARK_COMMENT_ID,
+            body="please also handle X",
             user=FakeUser(TRUSTED_AUTHOR),
         )
         issue.comments.append(human)
         gh.add_issue(issue)
-        pr = FakePR(number=9100, head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-910")
+        pr = FakePR(
+            number=_IN_REVIEW_WATERMARK_PR_NUMBER,
+            head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-910",
+        )
         gh.add_pr(pr)
         gh.seed_state(
-            910,
+            _IN_REVIEW_WATERMARK_ISSUE_NUMBER,
             pr_number=pr.number,
             dev_agent=BACKEND_CLAUDE,
             dev_session_id=DEV_SESSION,
@@ -620,11 +717,20 @@ class DriftMarksCommentsConsumedTest(
         # No dev spawn, no bounce to `validating`: the fixing route owns
         # this signal.
         mocks["run_agent"].assert_not_called()
-        self.assertIn((910, "fixing"), gh.label_history)
-        self.assertNotIn((910, LABEL_VALIDATING), gh.label_history)
-        state = gh.pinned_data(910)
+        self.assertIn(
+            (_IN_REVIEW_WATERMARK_ISSUE_NUMBER, "fixing"),
+            gh.label_history,
+        )
+        self.assertNotIn(
+            (_IN_REVIEW_WATERMARK_ISSUE_NUMBER, LABEL_VALIDATING),
+            gh.label_history,
+        )
+        state = gh.pinned_data(_IN_REVIEW_WATERMARK_ISSUE_NUMBER)
         # The triggering comment is bookmarked for the fixing handler.
-        self.assertEqual(state.get("pending_fix_issue_max_id"), 6000)
+        self.assertEqual(
+            state.get("pending_fix_issue_max_id"),
+            _IN_REVIEW_WATERMARK_COMMENT_ID,
+        )
         # Hash is updated so the drift check does not re-fire on the
         # same comment change after the fixing handler (or an operator
         # relabel) bounces the issue back to `in_review`.
@@ -640,15 +746,20 @@ class DriftMarksCommentsConsumedTest(
         self,
     ) -> None:
         gh = FakeGitHubClient()
-        issue = make_issue(920, label=LABEL_IMPLEMENTING, body=NEW_BODY)
+        issue = make_issue(
+            _IMPLEMENTING_WATERMARK_ISSUE_NUMBER,
+            label=LABEL_IMPLEMENTING,
+            body=NEW_BODY,
+        )
         human = FakeComment(
-            id=7000, body="here are more requirements",
+            id=_IMPLEMENTING_WATERMARK_COMMENT_ID,
+            body="here are more requirements",
             user=FakeUser(TRUSTED_AUTHOR),
         )
         issue.comments.append(human)
         gh.add_issue(issue)
         gh.seed_state(
-            920,
+            _IMPLEMENTING_WATERMARK_ISSUE_NUMBER,
             dev_agent=BACKEND_CLAUDE,
             dev_session_id=DEV_SESSION,
             user_content_hash=STALE_HASH,
@@ -668,28 +779,36 @@ class DriftMarksCommentsConsumedTest(
             head_shas=["before-resume", "after-resume"],
         )
 
-        state = gh.pinned_data(920)
+        state = gh.pinned_data(_IMPLEMENTING_WATERMARK_ISSUE_NUMBER)
         # The dev's commit goes through `_on_commits` which flips to
         # validating; the validating->in_review handoff later reads
         # last_action_comment_id, so we must have bumped past 7000.
         self.assertGreaterEqual(
-            int(state.get(KEY_LAST_ACTION_COMMENT_ID)), 7000,
+            int(state.get(KEY_LAST_ACTION_COMMENT_ID)),
+            _IMPLEMENTING_WATERMARK_COMMENT_ID,
         )
 
     def test_conflict_drift_bumps_last_action(self) -> None:
         gh = FakeGitHubClient()
         issue = make_issue(
-            930, label=LABEL_RESOLVING_CONFLICT, body=NEW_BODY,
+            _CONFLICT_WATERMARK_ISSUE_NUMBER,
+            label=LABEL_RESOLVING_CONFLICT,
+            body=NEW_BODY,
         )
         human = FakeComment(
-            id=8000, body="more context", user=FakeUser(TRUSTED_AUTHOR),
+            id=_CONFLICT_WATERMARK_COMMENT_ID,
+            body="more context",
+            user=FakeUser(TRUSTED_AUTHOR),
         )
         issue.comments.append(human)
         gh.add_issue(issue)
-        pr = FakePR(number=9300, head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-930")
+        pr = FakePR(
+            number=_CONFLICT_WATERMARK_PR_NUMBER,
+            head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-930",
+        )
         gh.add_pr(pr)
         gh.seed_state(
-            930,
+            _CONFLICT_WATERMARK_ISSUE_NUMBER,
             pr_number=pr.number,
             dev_agent=BACKEND_CLAUDE,
             dev_session_id=DEV_SESSION,
@@ -712,12 +831,13 @@ class DriftMarksCommentsConsumedTest(
             head_shas=["before", SHA_AFTER, SHA_AFTER],
         )
 
-        state = gh.pinned_data(930)
+        state = gh.pinned_data(_CONFLICT_WATERMARK_ISSUE_NUMBER)
         # After the pushed resolution flips to validating, the
         # subsequent handoff back to in_review must not replay the human
         # comment that arrived during conflict resolution.
         self.assertGreaterEqual(
-            int(state.get(KEY_LAST_ACTION_COMMENT_ID)), 8000,
+            int(state.get(KEY_LAST_ACTION_COMMENT_ID)),
+            _CONFLICT_WATERMARK_COMMENT_ID,
         )
 
 
@@ -736,9 +856,15 @@ class OrchCommentMarkerSurvivesIdCapTest(unittest.TestCase):
         # (because every orchestrator comment is posted with it), so
         # the hash filter must drop it.
         bot_body = "picking this up\n\n" + workflow._ORCH_COMMENT_MARKER
-        bot = FakeComment(id=12345, body=bot_body, user=FakeUser(TRUSTED_AUTHOR))
+        bot = FakeComment(
+            id=_EVICTED_BOT_COMMENT_ID,
+            body=bot_body,
+            user=FakeUser(TRUSTED_AUTHOR),
+        )
         human = FakeComment(
-            id=12346, body="please reconsider", user=FakeUser(TRUSTED_AUTHOR),
+            id=_HUMAN_COMMENT_ID,
+            body="please reconsider",
+            user=FakeUser(TRUSTED_AUTHOR),
         )
         issue_with_just_human = make_issue(1, comments=[human])
         issue_with_both = make_issue(1, comments=[bot, human])
@@ -792,10 +918,12 @@ class HashFiltersBotUsersTest(unittest.TestCase):
         # A Dependabot-style comment must NOT affect the hash even
         # though its body is unique and its id is not tracked.
         human = FakeComment(
-            id=900, body="real human comment", user=FakeUser(TRUSTED_AUTHOR),
+            id=_BOT_FILTER_HUMAN_COMMENT_ID,
+            body="real human comment",
+            user=FakeUser(TRUSTED_AUTHOR),
         )
         bot_comment = FakeComment(
-            id=901,
+            id=_BOT_FILTER_BOT_COMMENT_ID,
             body="Bumps `requests` from 2.31.0 to 2.32.0",
             user=FakeUser("dependabot[bot]", type="Bot"),
         )
@@ -813,7 +941,7 @@ class HashFiltersBotUsersTest(unittest.TestCase):
     def test_user_type_human_still_contributes(self) -> None:
         # A regular human user's `type == "User"` must NOT be filtered.
         comment = FakeComment(
-            id=910,
+            id=_TYPED_HUMAN_COMMENT_ID,
             body="adds an acceptance criterion",
             user=FakeUser(TRUSTED_AUTHOR, type="User"),
         )
@@ -875,12 +1003,19 @@ class DriftNonAckResponseParksTest(
 
     def test_validating_clarification_parks(self) -> None:
         gh = FakeGitHubClient()
-        issue = make_issue(601, label=LABEL_VALIDATING, body=CLARIFIED_BODY)
+        issue = make_issue(
+            _VALIDATING_CLARIFICATION_ISSUE_NUMBER,
+            label=LABEL_VALIDATING,
+            body=CLARIFIED_BODY,
+        )
         gh.add_issue(issue)
-        pr = FakePR(number=6001, head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-601")
+        pr = FakePR(
+            number=_VALIDATING_CLARIFICATION_PR_NUMBER,
+            head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-601",
+        )
         gh.add_pr(pr)
         gh.seed_state(
-            601,
+            _VALIDATING_CLARIFICATION_ISSUE_NUMBER,
             pr_number=pr.number,
             dev_agent=BACKEND_CLAUDE,
             dev_session_id=DEV_SESSION,
@@ -903,7 +1038,7 @@ class DriftNonAckResponseParksTest(
             head_shas=[SAME_SHA, SAME_SHA],
         )
 
-        state = gh.pinned_data(601)
+        state = gh.pinned_data(_VALIDATING_CLARIFICATION_ISSUE_NUMBER)
         # Must park awaiting human so the real question isn't lost.
         self.assertTrue(state.get(KEY_AWAITING_HUMAN))
         # Must NOT have posted the misleading "satisfies" comment.
@@ -919,12 +1054,19 @@ class DriftNonAckResponseParksTest(
 
     def test_in_review_clarification_parks(self) -> None:
         gh = FakeGitHubClient()
-        issue = make_issue(701, label=LABEL_IN_REVIEW, body=CLARIFIED_BODY)
+        issue = make_issue(
+            _IN_REVIEW_CLARIFICATION_ISSUE_NUMBER,
+            label=LABEL_IN_REVIEW,
+            body=CLARIFIED_BODY,
+        )
         gh.add_issue(issue)
-        pr = FakePR(number=7001, head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-701")
+        pr = FakePR(
+            number=_IN_REVIEW_CLARIFICATION_PR_NUMBER,
+            head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-701",
+        )
         gh.add_pr(pr)
         gh.seed_state(
-            701,
+            _IN_REVIEW_CLARIFICATION_ISSUE_NUMBER,
             pr_number=pr.number,
             dev_agent=BACKEND_CLAUDE,
             dev_session_id=DEV_SESSION,
@@ -946,16 +1088,19 @@ class DriftNonAckResponseParksTest(
             ),
             has_new_commits=False,
             dirty_files=(),
-            head_shas=["same", "same"],
+            head_shas=[UNCHANGED_SHA, UNCHANGED_SHA],
         )
 
-        state = gh.pinned_data(701)
+        state = gh.pinned_data(_IN_REVIEW_CLARIFICATION_ISSUE_NUMBER)
         # Park flagged.
         self.assertTrue(state.get(KEY_AWAITING_HUMAN))
         # NOT bounced to validating: the dev didn't ack OR commit, so
         # the in_review label is preserved and the human resolves the
         # question.
-        self.assertNotIn((701, LABEL_VALIDATING), gh.label_history)
+        self.assertNotIn(
+            (_IN_REVIEW_CLARIFICATION_ISSUE_NUMBER, LABEL_VALIDATING),
+            gh.label_history,
+        )
         # Misleading "satisfies" comment NOT posted.
         self.assertFalse(any(
             EXISTING_WORK_MESSAGE in body
@@ -969,11 +1114,13 @@ class DriftNonAckResponseParksTest(
         # contract: non-empty + no-commit + no ACK -> park as question.
         gh = FakeGitHubClient()
         issue = make_issue(
-            602, label=LABEL_IMPLEMENTING, body="updated requirements",
+            _IMPLEMENTING_CLARIFICATION_ISSUE_NUMBER,
+            label=LABEL_IMPLEMENTING,
+            body="updated requirements",
         )
         gh.add_issue(issue)
         gh.seed_state(
-            602,
+            _IMPLEMENTING_CLARIFICATION_ISSUE_NUMBER,
             user_content_hash=STALE_HASH,
             dev_agent=BACKEND_CLAUDE,
             dev_session_id=DEV_SESSION,
@@ -995,7 +1142,7 @@ class DriftNonAckResponseParksTest(
             head_shas=["sha-before", "sha-before"],
         )
 
-        state = gh.pinned_data(602)
+        state = gh.pinned_data(_IMPLEMENTING_CLARIFICATION_ISSUE_NUMBER)
         self.assertTrue(state.get(KEY_AWAITING_HUMAN))
         self.assertFalse(any(
             EXISTING_WORK_MESSAGE in body

@@ -11,6 +11,10 @@ import unittest
 from orchestrator import workflow
 
 
+_CODEX_BACKEND = "codex"
+_CODEX_MODEL = "gpt-5-codex"
+
+
 class ConfiguredModelExtractionTest(unittest.TestCase):
     """`_configured_model` is the tiny shim that converts an `extra_args`
     tuple into the model fallback `usage.parse_agent_usage` consumes.
@@ -21,14 +25,14 @@ class ConfiguredModelExtractionTest(unittest.TestCase):
 
     def test_codex_dash_m_split_form(self) -> None:
         self.assertEqual(
-            workflow._configured_model("codex", ("-m", "gpt-5-codex")),
-            "gpt-5-codex",
+            workflow._configured_model(_CODEX_BACKEND, ("-m", _CODEX_MODEL)),
+            _CODEX_MODEL,
         )
 
     def test_codex_dash_m_equals_form(self) -> None:
         self.assertEqual(
-            workflow._configured_model("codex", ("-m=gpt-5-codex",)),
-            "gpt-5-codex",
+            workflow._configured_model(_CODEX_BACKEND, (f"-m={_CODEX_MODEL}",)),
+            _CODEX_MODEL,
         )
 
     def test_claude_long_flag_split_form(self) -> None:
@@ -50,7 +54,7 @@ class ConfiguredModelExtractionTest(unittest.TestCase):
     def test_returns_none_when_flag_absent(self) -> None:
         # No `-m` / `--model` in the spec -- the parser keeps its
         # "unknown" handling rather than receiving an empty string.
-        self.assertIsNone(workflow._configured_model("codex", ()))
+        self.assertIsNone(workflow._configured_model(_CODEX_BACKEND, ()))
         self.assertIsNone(
             workflow._configured_model("claude", ("--effort", "high")),
         )
@@ -62,11 +66,11 @@ class ConfiguredModelExtractionTest(unittest.TestCase):
         # mislabeling.
         self.assertIsNone(
             workflow._configured_model(
-                "codex", ("--model", "gpt-5-codex"),
+                _CODEX_BACKEND, ("--model", _CODEX_MODEL),
             ),
         )
 
     def test_trailing_flag_without_value_returns_none(self) -> None:
         # Defensive: a stray `-m` at the end of extra_args (which a
         # bad spec could produce) must not raise.
-        self.assertIsNone(workflow._configured_model("codex", ("-m",)))
+        self.assertIsNone(workflow._configured_model(_CODEX_BACKEND, ("-m",)))

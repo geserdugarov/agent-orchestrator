@@ -22,8 +22,31 @@ from tests.workflow_helpers import (
     _PatchedWorkflowMixin,
     _TEST_SPEC,
     _agent,
+    _issue_branch,
     _state_with_pr_number,
 )
+
+
+_VALIDATING_LABEL = "validating"
+_IMPLEMENTING_LABEL = "implementing"
+_STATE_CLOSED = "closed"
+_PR_HEAD_SHA = "cafe1234"
+_CLEANUP_MOCK_KEY = "_cleanup_terminal_branch"
+_NO_PR_ISSUE_NUMBER = 200
+_OPEN_PR_ISSUE_NUMBER = 201
+_OPEN_PR_NUMBER = 20100
+_CLOSED_PR_ISSUE_NUMBER = 202
+_CLOSED_PR_NUMBER = 20200
+_OPEN_ISSUE_MERGED_NUMBER = 203
+_OPEN_ISSUE_MERGED_PR_NUMBER = 20300
+_CLOSED_ISSUE_MERGED_NUMBER = 204
+_CLOSED_ISSUE_MERGED_PR_NUMBER = 20400
+_USAGE_ISSUE_NUMBER = 205
+_USAGE_PR_NUMBER = 20500
+_USAGE_TOTAL_TOKENS = 45200
+_USAGE_TOTAL_COST = 0.87
+_NO_USAGE_ISSUE_NUMBER = 206
+_NO_USAGE_PR_NUMBER = 20600
 
 
 class FinalizeIfPrMergedTest(unittest.TestCase, _PatchedWorkflowMixin):
@@ -39,9 +62,9 @@ class FinalizeIfPrMergedTest(unittest.TestCase, _PatchedWorkflowMixin):
 
     def test_no_pr_number_returns_false(self) -> None:
         gh = FakeGitHubClient()
-        issue = make_issue(200, label="validating")
+        issue = make_issue(_NO_PR_ISSUE_NUMBER, label=_VALIDATING_LABEL)
         gh.add_issue(issue)
-        result = self._run(
+        mocks = self._run(
             lambda: self.assertFalse(
                 workflow._finalize_if_pr_merged(
                     gh, _TEST_SPEC, issue, PinnedState()
@@ -51,21 +74,26 @@ class FinalizeIfPrMergedTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
         self.assertEqual(gh.label_history, [])
         self.assertFalse(issue.closed)
-        result["_cleanup_terminal_branch"].assert_not_called()
+        mocks[_CLEANUP_MOCK_KEY].assert_not_called()
 
     def test_open_pr_returns_false(self) -> None:
         gh = FakeGitHubClient()
-        issue = make_issue(201, label="validating")
+        issue = make_issue(_OPEN_PR_ISSUE_NUMBER, label=_VALIDATING_LABEL)
         gh.add_issue(issue)
         pr = FakePR(
-            number=20100, head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-201",
-            head=FakePRRef(sha="cafe1234"),
+            number=_OPEN_PR_NUMBER,
+            head_branch=_issue_branch(_OPEN_PR_ISSUE_NUMBER),
+            head=FakePRRef(sha=_PR_HEAD_SHA),
             merged=False, state="open",
         )
         gh.add_pr(pr)
-        state = _state_with_pr_number(gh, 201, 20100)
+        state = _state_with_pr_number(
+            gh,
+            _OPEN_PR_ISSUE_NUMBER,
+            _OPEN_PR_NUMBER,
+        )
 
-        result = self._run(
+        mocks = self._run(
             lambda: self.assertFalse(
                 workflow._finalize_if_pr_merged(
                     gh, _TEST_SPEC, issue, state
@@ -75,7 +103,7 @@ class FinalizeIfPrMergedTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
         self.assertEqual(gh.label_history, [])
         self.assertFalse(issue.closed)
-        result["_cleanup_terminal_branch"].assert_not_called()
+        mocks[_CLEANUP_MOCK_KEY].assert_not_called()
 
     def test_closed_unmerged_pr_returns_false(self) -> None:
         # Closed without merge is `rejected` territory; the helper covers
@@ -83,17 +111,22 @@ class FinalizeIfPrMergedTest(unittest.TestCase, _PatchedWorkflowMixin):
         # handlers stay in charge of the rejected arc with their own
         # `closed_without_merge_at` stamp + `pr_closed_without_merge` event.
         gh = FakeGitHubClient()
-        issue = make_issue(202, label="validating")
+        issue = make_issue(_CLOSED_PR_ISSUE_NUMBER, label=_VALIDATING_LABEL)
         gh.add_issue(issue)
         pr = FakePR(
-            number=20200, head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-202",
-            head=FakePRRef(sha="cafe1234"),
-            merged=False, state="closed",
+            number=_CLOSED_PR_NUMBER,
+            head_branch=_issue_branch(_CLOSED_PR_ISSUE_NUMBER),
+            head=FakePRRef(sha=_PR_HEAD_SHA),
+            merged=False, state=_STATE_CLOSED,
         )
         gh.add_pr(pr)
-        state = _state_with_pr_number(gh, 202, 20200)
+        state = _state_with_pr_number(
+            gh,
+            _CLOSED_PR_ISSUE_NUMBER,
+            _CLOSED_PR_NUMBER,
+        )
 
-        result = self._run(
+        mocks = self._run(
             lambda: self.assertFalse(
                 workflow._finalize_if_pr_merged(
                     gh, _TEST_SPEC, issue, state
@@ -103,7 +136,7 @@ class FinalizeIfPrMergedTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
         self.assertEqual(gh.label_history, [])
         self.assertFalse(issue.closed)
-        result["_cleanup_terminal_branch"].assert_not_called()
+        mocks[_CLEANUP_MOCK_KEY].assert_not_called()
 
 
 class FinalizeMergedPrTest(unittest.TestCase, _PatchedWorkflowMixin):
@@ -111,20 +144,26 @@ class FinalizeMergedPrTest(unittest.TestCase, _PatchedWorkflowMixin):
 
     def test_merged_pr_finalizes_open_issue(self) -> None:
         gh = FakeGitHubClient()
-        issue = make_issue(203, label="implementing")
+        issue = make_issue(
+            _OPEN_ISSUE_MERGED_NUMBER,
+            label=_IMPLEMENTING_LABEL,
+        )
         gh.add_issue(issue)
         pr = FakePR(
-            number=20300, head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-203",
-            head=FakePRRef(sha="cafe1234"),
-            merged=True, state="closed",
+            number=_OPEN_ISSUE_MERGED_PR_NUMBER,
+            head_branch=_issue_branch(_OPEN_ISSUE_MERGED_NUMBER),
+            head=FakePRRef(sha=_PR_HEAD_SHA),
+            merged=True, state=_STATE_CLOSED,
         )
         gh.add_pr(pr)
         state = _state_with_pr_number(
-            gh, 203, 20300,
-            branch="orchestrator/geserdugarov__agent-orchestrator/issue-203",
+            gh,
+            _OPEN_ISSUE_MERGED_NUMBER,
+            _OPEN_ISSUE_MERGED_PR_NUMBER,
+            branch=_issue_branch(_OPEN_ISSUE_MERGED_NUMBER),
         )
 
-        result = self._run(
+        mocks = self._run(
             lambda: self.assertTrue(
                 workflow._finalize_if_pr_merged(
                     gh, _TEST_SPEC, issue, state
@@ -132,12 +171,14 @@ class FinalizeMergedPrTest(unittest.TestCase, _PatchedWorkflowMixin):
             ),
             run_agent=_agent(),
         )
-        self.assertIn((203, "done"), gh.label_history)
+        self.assertIn((_OPEN_ISSUE_MERGED_NUMBER, "done"), gh.label_history)
         self.assertIn("merged_at", state.data)
         self.assertTrue(issue.closed)
-        result["_cleanup_terminal_branch"].assert_called_once_with(
-            gh, _TEST_SPEC, 203,
-            branch="orchestrator/geserdugarov__agent-orchestrator/issue-203",
+        mocks[_CLEANUP_MOCK_KEY].assert_called_once_with(
+            gh,
+            _TEST_SPEC,
+            _OPEN_ISSUE_MERGED_NUMBER,
+            branch=_issue_branch(_OPEN_ISSUE_MERGED_NUMBER),
         )
         # An `external`-merge audit event is emitted with the
         # entry-stage label.
@@ -148,23 +189,31 @@ class FinalizeMergedPrTest(unittest.TestCase, _PatchedWorkflowMixin):
             if event["event"] == EVENT_PR_MERGED
         )
         self.assertEqual(merged_event.get("merge_method"), "external")
-        self.assertEqual(merged_event.get("stage"), "implementing")
+        self.assertEqual(merged_event.get("stage"), _IMPLEMENTING_LABEL)
 
     def test_merged_pr_finalizes_closed_issue(self) -> None:
         # An externally-merged PR with `Resolves #N` auto-closes the issue
         # before the orchestrator can react. The helper must still
         # finalize the label (and not attempt to re-close).
         gh = FakeGitHubClient()
-        issue = make_issue(204, label="validating")
+        issue = make_issue(
+            _CLOSED_ISSUE_MERGED_NUMBER,
+            label=_VALIDATING_LABEL,
+        )
         issue.closed = True
         gh.add_issue(issue)
         pr = FakePR(
-            number=20400, head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-204",
-            head=FakePRRef(sha="cafe1234"),
-            merged=True, state="closed",
+            number=_CLOSED_ISSUE_MERGED_PR_NUMBER,
+            head_branch=_issue_branch(_CLOSED_ISSUE_MERGED_NUMBER),
+            head=FakePRRef(sha=_PR_HEAD_SHA),
+            merged=True, state=_STATE_CLOSED,
         )
         gh.add_pr(pr)
-        state = _state_with_pr_number(gh, 204, 20400)
+        state = _state_with_pr_number(
+            gh,
+            _CLOSED_ISSUE_MERGED_NUMBER,
+            _CLOSED_ISSUE_MERGED_PR_NUMBER,
+        )
 
         self._run(
             lambda: self.assertTrue(
@@ -174,7 +223,7 @@ class FinalizeMergedPrTest(unittest.TestCase, _PatchedWorkflowMixin):
             ),
             run_agent=_agent(),
         )
-        self.assertIn((204, "done"), gh.label_history)
+        self.assertIn((_CLOSED_ISSUE_MERGED_NUMBER, "done"), gh.label_history)
         self.assertTrue(issue.closed)
 
     def test_posts_tracked_usage_verdict(self) -> None:
@@ -182,18 +231,23 @@ class FinalizeMergedPrTest(unittest.TestCase, _PatchedWorkflowMixin):
         # tracked comment posted BEFORE `write_pinned_state`, so its id is
         # persisted in `orchestrator_comment_ids` alongside the merge stamp.
         gh = FakeGitHubClient()
-        issue = make_issue(205, label="implementing")
+        issue = make_issue(_USAGE_ISSUE_NUMBER, label=_IMPLEMENTING_LABEL)
         gh.add_issue(issue)
         pr = FakePR(
-            number=20500, head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-205",
-            head=FakePRRef(sha="cafe1234"),
-            merged=True, state="closed",
+            number=_USAGE_PR_NUMBER,
+            head_branch=_issue_branch(_USAGE_ISSUE_NUMBER),
+            head=FakePRRef(sha=_PR_HEAD_SHA),
+            merged=True, state=_STATE_CLOSED,
         )
         gh.add_pr(pr)
         state = _state_with_pr_number(
-            gh, 205, 20500,
-            issue_agent_runs=3, issue_total_tokens=45200,
-            issue_total_cost_usd=0.87, issue_cost_sources=["estimated"],
+            gh,
+            _USAGE_ISSUE_NUMBER,
+            _USAGE_PR_NUMBER,
+            issue_agent_runs=3,
+            issue_total_tokens=_USAGE_TOTAL_TOKENS,
+            issue_total_cost_usd=_USAGE_TOTAL_COST,
+            issue_cost_sources=["estimated"],
         )
 
         self._run(
@@ -205,7 +259,7 @@ class FinalizeMergedPrTest(unittest.TestCase, _PatchedWorkflowMixin):
 
         receipts = [
             body for number, body in gh.posted_comments
-            if number == 205 and body.startswith(":receipt:")
+            if number == _USAGE_ISSUE_NUMBER and body.startswith(":receipt:")
         ]
         self.assertEqual(len(receipts), 1)
         self.assertIn(
@@ -219,22 +273,30 @@ class FinalizeMergedPrTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
         self.assertIn(
             receipt_comment.id,
-            gh.pinned_data(205).get("orchestrator_comment_ids", []),
+            gh.pinned_data(_USAGE_ISSUE_NUMBER).get(
+                "orchestrator_comment_ids",
+                [],
+            ),
         )
 
     def test_no_counters_posts_no_verdict(self) -> None:
         # No agent ever ran against this issue (external-merge of a
         # never-worked issue): the finalize skips the zero receipt.
         gh = FakeGitHubClient()
-        issue = make_issue(206, label="implementing")
+        issue = make_issue(_NO_USAGE_ISSUE_NUMBER, label=_IMPLEMENTING_LABEL)
         gh.add_issue(issue)
         pr = FakePR(
-            number=20600, head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-206",
-            head=FakePRRef(sha="cafe1234"),
-            merged=True, state="closed",
+            number=_NO_USAGE_PR_NUMBER,
+            head_branch=_issue_branch(_NO_USAGE_ISSUE_NUMBER),
+            head=FakePRRef(sha=_PR_HEAD_SHA),
+            merged=True, state=_STATE_CLOSED,
         )
         gh.add_pr(pr)
-        state = _state_with_pr_number(gh, 206, 20600)
+        state = _state_with_pr_number(
+            gh,
+            _NO_USAGE_ISSUE_NUMBER,
+            _NO_USAGE_PR_NUMBER,
+        )
 
         self._run(
             lambda: workflow._finalize_if_pr_merged(
@@ -245,7 +307,8 @@ class FinalizeMergedPrTest(unittest.TestCase, _PatchedWorkflowMixin):
 
         self.assertEqual(
             [body for number, body in gh.posted_comments
-             if number == 206 and body.startswith(":receipt:")],
+             if number == _NO_USAGE_ISSUE_NUMBER
+             and body.startswith(":receipt:")],
             [],
         )
 

@@ -13,6 +13,12 @@ from tests.fakes import FakeGitHubClient, FakeLabel, FakePR, FakeUser
 from tests.workflow_helpers import _TEST_SPEC
 
 
+_OUTSIDER_LOGIN = "outsider"
+_ALLOWED_LOGIN = "geserdugarov"
+_ALLOWLIST_CONFIG = "ALLOWED_ISSUE_AUTHORS"
+_COMMENT_RETRY_PR_NUMBER = 11
+
+
 def _pr(
     number: int, *, author: str, labels=(), user_type: str = "User"
 ) -> FakePR:
@@ -39,17 +45,17 @@ class SweepCommunityContributionPRsTest(unittest.TestCase):
 
     def test_no_op_when_allowlist_is_empty(self) -> None:
         gh = FakeGitHubClient()
-        gh.add_pr(_pr(1, author="outsider"))
-        with patch.object(config, "ALLOWED_ISSUE_AUTHORS", ()):
+        gh.add_pr(_pr(1, author=_OUTSIDER_LOGIN))
+        with patch.object(config, _ALLOWLIST_CONFIG, ()):
             workflow._sweep_community_contribution_prs(gh, _TEST_SPEC)
         self.assertEqual(gh.pulls[1].labels, [])
         self.assertEqual(gh.posted_pr_comments, [])
 
     def test_outsider_pr_gets_labeled_and_hitl_pinged(self) -> None:
         gh = FakeGitHubClient()
-        gh.add_pr(_pr(7, author="outsider"))
-        with patch.object(config, "ALLOWED_ISSUE_AUTHORS", ("geserdugarov",)), \
-             patch.object(config, "HITL_MENTIONS", "@geserdugarov"):
+        gh.add_pr(_pr(7, author=_OUTSIDER_LOGIN))
+        with patch.object(config, _ALLOWLIST_CONFIG, (_ALLOWED_LOGIN,)), \
+             patch.object(config, "HITL_MENTIONS", f"@{_ALLOWED_LOGIN}"):
             workflow._sweep_community_contribution_prs(gh, _TEST_SPEC)
         self.assertTrue(
             gh.pr_has_label(gh.pulls[7], COMMUNITY_CONTRIBUTION_LABEL)
@@ -57,14 +63,14 @@ class SweepCommunityContributionPRsTest(unittest.TestCase):
         self.assertEqual(len(gh.posted_pr_comments), 1)
         pr_number, body = gh.posted_pr_comments[0]
         self.assertEqual(pr_number, 7)
-        self.assertIn("@geserdugarov", body)
-        self.assertIn("@outsider", body)
+        self.assertIn(f"@{_ALLOWED_LOGIN}", body)
+        self.assertIn(f"@{_OUTSIDER_LOGIN}", body)
 
     def test_allowed_author_is_skipped(self) -> None:
         gh = FakeGitHubClient()
-        gh.add_pr(_pr(1, author="geserdugarov"))
+        gh.add_pr(_pr(1, author=_ALLOWED_LOGIN))
         gh.add_pr(_pr(2, author="Geserdugarov"))  # case-insensitive
-        with patch.object(config, "ALLOWED_ISSUE_AUTHORS", ("geserdugarov",)):
+        with patch.object(config, _ALLOWLIST_CONFIG, (_ALLOWED_LOGIN,)):
             workflow._sweep_community_contribution_prs(gh, _TEST_SPEC)
         self.assertEqual(gh.pulls[1].labels, [])
         self.assertEqual(gh.pulls[2].labels, [])
@@ -78,7 +84,7 @@ class SweepCommunityContributionPRsTest(unittest.TestCase):
         gh.add_pr(
             _pr(5, author="dependabot[bot]", user_type="Bot")
         )
-        with patch.object(config, "ALLOWED_ISSUE_AUTHORS", ("geserdugarov",)):
+        with patch.object(config, _ALLOWLIST_CONFIG, (_ALLOWED_LOGIN,)):
             workflow._sweep_community_contribution_prs(gh, _TEST_SPEC)
         self.assertEqual(gh.pulls[5].labels, [])
         self.assertEqual(gh.posted_pr_comments, [])
@@ -86,9 +92,13 @@ class SweepCommunityContributionPRsTest(unittest.TestCase):
     def test_labeled_prs_are_not_pinged_again(self) -> None:
         gh = FakeGitHubClient()
         gh.add_pr(
-            _pr(3, author="outsider", labels=(COMMUNITY_CONTRIBUTION_LABEL,))
+            _pr(
+                3,
+                author=_OUTSIDER_LOGIN,
+                labels=(COMMUNITY_CONTRIBUTION_LABEL,),
+            )
         )
-        with patch.object(config, "ALLOWED_ISSUE_AUTHORS", ("geserdugarov",)):
+        with patch.object(config, _ALLOWLIST_CONFIG, (_ALLOWED_LOGIN,)):
             workflow._sweep_community_contribution_prs(gh, _TEST_SPEC)
         # Still labeled exactly once, no duplicate comment.
         names = [label.name for label in gh.pulls[3].labels]
@@ -106,7 +116,7 @@ class SweepCommunityContributionFailuresTest(unittest.TestCase):
         calls: list[int] = []
         original = gh.add_pr_label
 
-        with patch.object(config, "ALLOWED_ISSUE_AUTHORS", ("geserdugarov",)), \
+        with patch.object(config, _ALLOWLIST_CONFIG, (_ALLOWED_LOGIN,)), \
              patch.object(
                  gh,
                  "add_pr_label",
@@ -135,27 +145,36 @@ class SweepCommunityContributionFailuresTest(unittest.TestCase):
         # must NOT be written -- otherwise the PR is silently skipped on
         # the next tick and no human is ever called.
         gh = FakeGitHubClient()
-        gh.add_pr(_pr(11, author="outsider"))
-        with patch.object(config, "ALLOWED_ISSUE_AUTHORS", ("geserdugarov",)), \
+        gh.add_pr(_pr(_COMMENT_RETRY_PR_NUMBER, author=_OUTSIDER_LOGIN))
+        with patch.object(config, _ALLOWLIST_CONFIG, (_ALLOWED_LOGIN,)), \
              patch.object(
                 gh, "pr_comment", side_effect=RuntimeError("comment boom")
              ):
             workflow._sweep_community_contribution_prs(gh, _TEST_SPEC)
         self.assertFalse(
-            gh.pr_has_label(gh.pulls[11], COMMUNITY_CONTRIBUTION_LABEL)
+            gh.pr_has_label(
+                gh.pulls[_COMMENT_RETRY_PR_NUMBER],
+                COMMUNITY_CONTRIBUTION_LABEL,
+            )
         )
         # A subsequent tick (comment now succeeds) must complete both
         # writes against the same PR, proving the retry path works.
-        with patch.object(config, "ALLOWED_ISSUE_AUTHORS", ("geserdugarov",)):
+        with patch.object(config, _ALLOWLIST_CONFIG, (_ALLOWED_LOGIN,)):
             workflow._sweep_community_contribution_prs(gh, _TEST_SPEC)
         self.assertTrue(
-            gh.pr_has_label(gh.pulls[11], COMMUNITY_CONTRIBUTION_LABEL)
+            gh.pr_has_label(
+                gh.pulls[_COMMENT_RETRY_PR_NUMBER],
+                COMMUNITY_CONTRIBUTION_LABEL,
+            )
         )
-        self.assertEqual([number for number, _ in gh.posted_pr_comments], [11])
+        self.assertEqual(
+            [number for number, _ in gh.posted_pr_comments],
+            [_COMMENT_RETRY_PR_NUMBER],
+        )
 
     def test_enumeration_failure_is_swallowed(self) -> None:
         gh = FakeGitHubClient()
-        with patch.object(config, "ALLOWED_ISSUE_AUTHORS", ("geserdugarov",)), \
+        with patch.object(config, _ALLOWLIST_CONFIG, (_ALLOWED_LOGIN,)), \
              patch.object(
                 gh, "iter_open_prs", side_effect=RuntimeError("api boom")
              ):

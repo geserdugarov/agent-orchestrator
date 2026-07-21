@@ -19,17 +19,24 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 
 # Ruff already lints Python; scanning it here would double-report and
 # ignore Ruff's own inline suppression directives.
-_RUFF_OWNED = {".py"}
+_RUFF_OWNED = frozenset((".py",))
 # Binary assets carry no line concept.
-_BINARY_EXT = {".png"}
+_BINARY_EXT = frozenset((".png",))
 # Machine-generated / verbatim content that is never hand-wrapped.
-_IGNORED_NAMES = {"uv.lock", "LICENSE"}
+_IGNORED_NAMES = frozenset(("uv.lock", "LICENSE"))
 _LineRuleCases = dict[str, tuple[str, list[int]]]
+_TEST_LINE_LIMIT = 120
+_LONG_PROSE_REPETITIONS = 40
+_LONG_TOKEN_LENGTH = 200
+_DIVIDER_WIDTH = 75
+_ONE_BELOW_TEST_LIMIT = 119
 
 
 def _load_limit() -> int:
-    data = tomllib.loads((_REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
-    return int(data["tool"]["ruff"]["line-length"])
+    config_data = tomllib.loads(
+        (_REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"),
+    )
+    return int(config_data["tool"]["ruff"]["line-length"])
 
 
 LIMIT = _load_limit()
@@ -90,23 +97,26 @@ def over_limit_lines(
 
 
 def _file_violations(relative_path: str, path: Path) -> list[str]:
-    data = path.read_bytes()
-    if b"\x00" in data:
+    file_content = path.read_bytes()
+    if b"\x00" in file_content:
         return []
     return [
         f"{relative_path}:{line_number} ({length} > {LIMIT} chars)"
-        for line_number, length in over_limit_lines(data.decode("utf-8"))
+        for line_number, length in over_limit_lines(file_content.decode("utf-8"))
     ]
 
 
 def _flagged_lines(text: str) -> list[int]:
-    return [line_number for line_number, _ in over_limit_lines(text, limit=120)]
+    return [
+        line_number
+        for line_number, _ in over_limit_lines(text, limit=_TEST_LINE_LIMIT)
+    ]
 
 
 def _line_rule_cases() -> _LineRuleCases:
-    long_prose = "word " * 40
-    long_url = "https://example.com/" + "a" * 200
-    wide_divider = "─" * 75
+    long_prose = "word " * _LONG_PROSE_REPETITIONS
+    long_url = "https://example.com/" + "a" * _LONG_TOKEN_LENGTH
+    wide_divider = "─" * _DIVIDER_WIDTH
     return {
         "short line": ("plain short line", []),
         "wrappable prose": (long_prose.rstrip(), [1]),
@@ -114,8 +124,8 @@ def _line_rule_cases() -> _LineRuleCases:
         "tilde fence": (f"~~~\n{long_prose}\n~~~", []),
         "unbreakable url": (long_url, []),
         "wide box drawing": (wide_divider, []),
-        "exactly at limit": ("a" * 120, []),
-        "one over limit": ("a " + "a" * 119, [1]),
+        "exactly at limit": ("a" * _TEST_LINE_LIMIT, []),
+        "one over limit": ("a " + "a" * _ONE_BELOW_TEST_LIMIT, [1]),
     }
 
 

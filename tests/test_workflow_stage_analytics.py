@@ -28,6 +28,18 @@ from tests.workflow_helpers import (
 )
 
 
+_ANALYTICS_FILENAME = "analytics.jsonl"
+_ANALYTICS_PATH_ATTR = "ANALYTICS_LOG_PATH"
+_STAGE_KEY = "stage"
+_HARD_SKIPPED_ISSUE = 8004
+_SUCCESS_ISSUE = 8001
+_UNLABELED_ISSUE = 8002
+_ERROR_ISSUE = 8003
+_DISABLED_SINK_ISSUE = 8005
+_STAGE_ENTER_ISSUE = 8101
+_LABEL_CLEAR_ISSUE = 8102
+
+
 def _stage_evaluations(path: Path, issue_number: int) -> list[dict]:
     return [
         record for record in _analytics_records(path)
@@ -38,13 +50,13 @@ def _stage_evaluations(path: Path, issue_number: int) -> list[dict]:
 
 def _process_hard_skipped_issue(skip_label: str) -> tuple[MagicMock, list[dict]]:
     with tempfile.TemporaryDirectory(prefix="analytics-skip-") as temp_dir:
-        path = Path(temp_dir) / "analytics.jsonl"
+        path = Path(temp_dir) / _ANALYTICS_FILENAME
         gh = FakeGitHubClient()
-        issue = make_issue(8004, label=LABEL_IMPLEMENTING)
+        issue = make_issue(_HARD_SKIPPED_ISSUE, label=LABEL_IMPLEMENTING)
         issue.labels.append(FakeLabel(skip_label))
         gh.add_issue(issue)
         handler_mock = MagicMock()
-        with patch.object(analytics, "ANALYTICS_LOG_PATH", path), patch.object(
+        with patch.object(analytics, _ANALYTICS_PATH_ATTR, path), patch.object(
             workflow,
             "_handle_implementing",
             handler_mock,
@@ -75,18 +87,18 @@ class StageEvaluationAnalyticsTest(unittest.TestCase):
         # the matching handler mocked, and the wrapper writes one
         # `stage_evaluation` line carrying the current label + ok result.
         with tempfile.TemporaryDirectory(prefix="analytics-stageval-") as td:
-            path = Path(td) / "analytics.jsonl"
+            path = Path(td) / _ANALYTICS_FILENAME
             gh = FakeGitHubClient()
-            issue = make_issue(8001, label=LABEL_IMPLEMENTING)
+            issue = make_issue(_SUCCESS_ISSUE, label=LABEL_IMPLEMENTING)
             gh.add_issue(issue)
-            with patch.object(analytics, "ANALYTICS_LOG_PATH", path), \
+            with patch.object(analytics, _ANALYTICS_PATH_ATTR, path), \
                  patch.object(workflow, "_handle_implementing"):
                 workflow._process_issue(gh, _TEST_SPEC, issue)
-            records = _stage_evaluations(path, 8001)
+            records = _stage_evaluations(path, _SUCCESS_ISSUE)
         self.assertEqual(len(records), 1)
         rec = records[0]
         self.assertEqual(rec["repo"], TEST_REPO_SLUG)
-        self.assertEqual(rec["stage"], LABEL_IMPLEMENTING)
+        self.assertEqual(rec[_STAGE_KEY], LABEL_IMPLEMENTING)
         self.assertEqual(rec["result"], "ok")
         self.assertIn("duration_s", rec)
         self.assertGreaterEqual(rec["duration_s"], 0)
@@ -101,17 +113,17 @@ class StageEvaluationAnalyticsTest(unittest.TestCase):
         # than a string sentinel that downstream aggregations would
         # have to special-case.
         with tempfile.TemporaryDirectory(prefix="analytics-pickup-") as td:
-            path = Path(td) / "analytics.jsonl"
+            path = Path(td) / _ANALYTICS_FILENAME
             gh = FakeGitHubClient()
-            issue = make_issue(8002)
+            issue = make_issue(_UNLABELED_ISSUE)
             gh.add_issue(issue)
-            with patch.object(analytics, "ANALYTICS_LOG_PATH", path), \
+            with patch.object(analytics, _ANALYTICS_PATH_ATTR, path), \
                  patch.object(workflow, "_handle_pickup"):
                 workflow._process_issue(gh, _TEST_SPEC, issue)
-            records = _stage_evaluations(path, 8002)
+            records = _stage_evaluations(path, _UNLABELED_ISSUE)
         self.assertEqual(len(records), 1)
         rec = records[0]
-        self.assertNotIn("stage", rec)
+        self.assertNotIn(_STAGE_KEY, rec)
         self.assertEqual(rec["result"], "ok")
 
     def test_error_is_recorded_and_propagated(
@@ -124,19 +136,19 @@ class StageEvaluationAnalyticsTest(unittest.TestCase):
         # with result=error and the duration captured up to the raise.
         sentinel = RuntimeError("handler blew up")
         with tempfile.TemporaryDirectory(prefix="analytics-err-") as td:
-            path = Path(td) / "analytics.jsonl"
+            path = Path(td) / _ANALYTICS_FILENAME
             gh = FakeGitHubClient()
-            issue = make_issue(8003, label=LABEL_VALIDATING)
+            issue = make_issue(_ERROR_ISSUE, label=LABEL_VALIDATING)
             gh.add_issue(issue)
-            with patch.object(analytics, "ANALYTICS_LOG_PATH", path), \
+            with patch.object(analytics, _ANALYTICS_PATH_ATTR, path), \
                  patch.object(
                      workflow, "_handle_validating", side_effect=sentinel,
                  ):
                 self.assertIs(_process_error(gh, issue), sentinel)
-            records = _stage_evaluations(path, 8003)
+            records = _stage_evaluations(path, _ERROR_ISSUE)
         self.assertEqual(len(records), 1)
         rec = records[0]
-        self.assertEqual(rec["stage"], LABEL_VALIDATING)
+        self.assertEqual(rec[_STAGE_KEY], LABEL_VALIDATING)
         self.assertEqual(rec["result"], "error")
         self.assertIn("duration_s", rec)
 
@@ -159,9 +171,9 @@ class StageEvaluationAnalyticsTest(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="analytics-off-") as td:
             sentinel = Path(td) / "must-not-be-created.jsonl"
             gh = FakeGitHubClient()
-            issue = make_issue(8005, label=LABEL_IMPLEMENTING)
+            issue = make_issue(_DISABLED_SINK_ISSUE, label=LABEL_IMPLEMENTING)
             gh.add_issue(issue)
-            with patch.object(analytics, "ANALYTICS_LOG_PATH", None), \
+            with patch.object(analytics, _ANALYTICS_PATH_ATTR, None), \
                  patch.object(workflow, "_handle_implementing"):
                 workflow._process_issue(gh, _TEST_SPEC, issue)
             self.assertFalse(sentinel.exists())
@@ -178,22 +190,22 @@ class StageEnterAnalyticsRecordTest(unittest.TestCase):
 
     def test_label_transition_writes_stage_enter(self) -> None:
         with tempfile.TemporaryDirectory(prefix="analytics-stage-enter-") as td:
-            path = Path(td) / "analytics.jsonl"
-            with patch.object(analytics, "ANALYTICS_LOG_PATH", path):
+            path = Path(td) / _ANALYTICS_FILENAME
+            with patch.object(analytics, _ANALYTICS_PATH_ATTR, path):
                 gh = FakeGitHubClient()
-                issue = make_issue(8101)
+                issue = make_issue(_STAGE_ENTER_ISSUE)
                 gh.add_issue(issue)
                 gh.set_workflow_label(issue, LABEL_IMPLEMENTING)
                 gh.set_workflow_label(issue, LABEL_VALIDATING)
             records = _analytics_records(path)
         self.assertEqual(len(records), 2)
         self.assertEqual(
-            [record["stage"] for record in records],
+            [record[_STAGE_KEY] for record in records],
             [LABEL_IMPLEMENTING, LABEL_VALIDATING],
         )
         for record in records:
             self.assertEqual(record["event"], EVENT_STAGE_ENTER)
-            self.assertEqual(record["issue"], 8101)
+            self.assertEqual(record["issue"], _STAGE_ENTER_ISSUE)
             self.assertEqual(record["repo"], TEST_REPO_SLUG)
             datetime.fromisoformat(record["ts"])
 
@@ -202,10 +214,10 @@ class StageEnterAnalyticsRecordTest(unittest.TestCase):
         # clearing a label is not a stage and must not produce a phantom
         # `stage_enter` analytics record.
         with tempfile.TemporaryDirectory(prefix="analytics-stage-none-") as td:
-            path = Path(td) / "analytics.jsonl"
-            with patch.object(analytics, "ANALYTICS_LOG_PATH", path):
+            path = Path(td) / _ANALYTICS_FILENAME
+            with patch.object(analytics, _ANALYTICS_PATH_ATTR, path):
                 gh = FakeGitHubClient()
-                issue = make_issue(8102, label=LABEL_IMPLEMENTING)
+                issue = make_issue(_LABEL_CLEAR_ISSUE, label=LABEL_IMPLEMENTING)
                 gh.add_issue(issue)
                 gh.set_workflow_label(issue, None)
         self.assertEqual(_analytics_records(path), [])

@@ -15,6 +15,10 @@ from orchestrator.comment_trust import filter_trusted, is_trusted_author
 from tests.fakes import FakeComment, FakeUser
 
 
+_ALLOWED_LOGIN = "alice"
+_BOT_ACCOUNT_TYPE = "Bot"
+
+
 class IsTrustedAuthorTest(unittest.TestCase):
     def test_empty_allowlist_trusts_everyone(self) -> None:
         # Legacy single-user behavior: with no allowlist configured every
@@ -22,7 +26,7 @@ class IsTrustedAuthorTest(unittest.TestCase):
         # is trusted, so opting out changes nothing.
         for user in (
             FakeUser("stranger"),
-            FakeUser("dependabot[bot]", type="Bot"),
+            FakeUser("dependabot[bot]", type=_BOT_ACCOUNT_TYPE),
             None,
         ):
             with self.subTest(user=user):
@@ -32,9 +36,9 @@ class IsTrustedAuthorTest(unittest.TestCase):
         # A configured allowlist trusts only its logins, matched
         # case-insensitively on both sides; an unlisted login, an empty
         # login, and a missing user are all untrusted.
-        allowed = ("alice", "Bob")
+        allowed = (_ALLOWED_LOGIN, "Bob")
         cases = [
-            (FakeUser("alice"), True),
+            (FakeUser(_ALLOWED_LOGIN), True),
             (FakeUser("Alice"), True),
             (FakeUser("BOB"), True),
             (FakeUser("stranger"), False),
@@ -54,19 +58,19 @@ class IsTrustedAuthorTest(unittest.TestCase):
         allowed = ("automation-bot",)
         self.assertTrue(
             is_trusted_author(
-                FakeUser("automation-bot", type="Bot"), allowed=allowed
+                FakeUser("automation-bot", type=_BOT_ACCOUNT_TYPE), allowed=allowed
             )
         )
         self.assertFalse(
             is_trusted_author(
-                FakeUser("dependabot[bot]", type="Bot"), allowed=allowed
+                FakeUser("dependabot[bot]", type=_BOT_ACCOUNT_TYPE), allowed=allowed
             )
         )
 
     def test_defaults_to_config_allowlist(self) -> None:
         # `allowed=None` reads `config.ALLOWED_ISSUE_AUTHORS` so callers
         # pick up the operator's configuration without threading it through.
-        with patch.object(config, "ALLOWED_ISSUE_AUTHORS", ("alice",)):
+        with patch.object(config, "ALLOWED_ISSUE_AUTHORS", (_ALLOWED_LOGIN,)):
             self.assertTrue(is_trusted_author(FakeUser("Alice")))
             self.assertFalse(is_trusted_author(FakeUser("mallory")))
         with patch.object(config, "ALLOWED_ISSUE_AUTHORS", ()):
@@ -77,27 +81,38 @@ class FilterTrustedTest(unittest.TestCase):
     def test_empty_allowlist_keeps_all_in_order(self) -> None:
         comments = [
             FakeComment(1, "a", FakeUser("x")),
-            FakeComment(2, "b", FakeUser("dependabot[bot]", type="Bot")),
+            FakeComment(
+                2,
+                "b",
+                FakeUser("dependabot[bot]", type=_BOT_ACCOUNT_TYPE),
+            ),
         ]
         self.assertEqual(filter_trusted(comments, allowed=()), comments)
 
     def test_allowlist_drops_untrusted_keeps_order(self) -> None:
-        allowed = ("alice",)
+        allowed = (_ALLOWED_LOGIN,)
         comments = [
             FakeComment(1, "ok", FakeUser("Alice")),
             FakeComment(2, "bad", FakeUser("stranger")),
             FakeComment(3, "no-user", None),
         ]
         kept = filter_trusted(comments, allowed=allowed)
-        self.assertEqual([c.id for c in kept], [1])
+        self.assertEqual([comment.id for comment in kept], [1])
 
     def test_defaults_to_config_allowlist(self) -> None:
         comments = [
-            FakeComment(1, "a", FakeUser("alice")),
+            FakeComment(1, "a", FakeUser(_ALLOWED_LOGIN)),
             FakeComment(2, "b", FakeUser("mallory")),
         ]
-        with patch.object(config, "ALLOWED_ISSUE_AUTHORS", ("alice",)):
-            self.assertEqual([c.id for c in filter_trusted(comments)], [1])
+        with patch.object(
+            config,
+            "ALLOWED_ISSUE_AUTHORS",
+            (_ALLOWED_LOGIN,),
+        ):
+            self.assertEqual(
+                [comment.id for comment in filter_trusted(comments)],
+                [1],
+            )
 
 
 if __name__ == "__main__":

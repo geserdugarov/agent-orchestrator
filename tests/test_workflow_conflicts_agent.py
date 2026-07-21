@@ -51,7 +51,7 @@ class ResolvingConflictAgentExecutionTest(unittest.TestCase, _ResolvingConflictM
         mocks[PUSH_BRANCH].assert_called_once_with(
             _TEST_SPEC,
             _FAKE_WT,
-            self.BRANCH,
+            self.issue_branch,
             force_with_lease=BEFORE_HEAD,
         )
         self.assertIn((CONFLICT_ISSUE, LABEL_VALIDATING), gh.label_history)

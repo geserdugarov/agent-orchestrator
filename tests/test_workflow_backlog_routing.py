@@ -15,6 +15,11 @@ from tests.fakes import FakeGitHubClient, FakeLabel, make_issue
 from tests.workflow_helpers import _TEST_SPEC
 
 
+_UNLABELED_BACKLOG_ISSUE = 701
+_IN_FLIGHT_BACKLOG_ISSUE = 702
+_RELEASED_BACKLOG_ISSUE = 703
+
+
 class BacklogLabelSkipsProcessingTest(unittest.TestCase):
     """The `backlog` control label is a "not yet" hold: applied to an issue
     (typically a freshly opened one), it prevents the orchestrator from
@@ -24,7 +29,7 @@ class BacklogLabelSkipsProcessingTest(unittest.TestCase):
 
     def test_unlabeled_issue_skips_pickup(self) -> None:
         gh = FakeGitHubClient()
-        issue = make_issue(701)
+        issue = make_issue(_UNLABELED_BACKLOG_ISSUE)
         issue.labels.append(FakeLabel(BACKLOG_LABEL))
         gh.add_issue(issue)
 
@@ -38,7 +43,7 @@ class BacklogLabelSkipsProcessingTest(unittest.TestCase):
 
     def test_in_flight_issue_skips_dispatch(self) -> None:
         gh = FakeGitHubClient()
-        issue = make_issue(702, label="implementing")
+        issue = make_issue(_IN_FLIGHT_BACKLOG_ISSUE, label="implementing")
         issue.labels.append(FakeLabel(BACKLOG_LABEL))
         gh.add_issue(issue)
 
@@ -51,7 +56,7 @@ class BacklogLabelSkipsProcessingTest(unittest.TestCase):
 
     def test_removing_backlog_allows_pickup(self) -> None:
         gh = FakeGitHubClient()
-        issue = make_issue(703)
+        issue = make_issue(_RELEASED_BACKLOG_ISSUE)
         gh.add_issue(issue)
 
         pickup_mock = MagicMock()
