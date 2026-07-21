@@ -30,17 +30,7 @@ from tests.workflow_helpers import (
 )
 
 
-class SquashOnApprovalTest(unittest.TestCase, _PatchedWorkflowMixin):
-    """After the reviewer agent emits VERDICT: APPROVED, the orchestrator
-    squashes the dev's commits on the PR branch into one and force-pushes
-    so the resulting PR is a single conventional-commit-shaped commit.
-    Watermarks advance past the squash notice; the next in_review tick
-    pings HITL without re-running the reviewer on the rewritten head.
-
-    Failures (push rejected, lease violation, dirty tree) park
-    awaiting_human and leave the original commits in place; SQUASH_ON_APPROVAL
-    off preserves the legacy "leave the dev's commits as-is" behavior.
-    """
+class _SquashApprovalFixtureMixin(_PatchedWorkflowMixin):
 
     PR_NUMBER = 31
     BRANCH = "orchestrator/geserdugarov__agent-orchestrator/issue-5"
@@ -84,6 +74,12 @@ class SquashOnApprovalTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
         return gh, issue, pr
 
+
+class SquashOnApprovalTest(
+    unittest.TestCase, _SquashApprovalFixtureMixin,
+):
+    """Squash approved branches and preserve the approval handoff."""
+
     def test_lands_in_review_without_re_review(
         self,
     ) -> None:
@@ -94,8 +90,8 @@ class SquashOnApprovalTest(unittest.TestCase, _PatchedWorkflowMixin):
         gh, issue, pr = self._setup()
 
         with patch.object(config, "SQUASH_ON_APPROVAL", True):
-            mocks_v = self._run(
-                lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+            mocks_v = self._run_validating(
+                gh, issue,
                 run_agent=_agent(last_message=REVIEW_APPROVED_MESSAGE),
                 head_shas=(self.REVIEWED_SHA,),
                 # Squash: success, new local HEAD = SQUASHED_SHA, 3 commits
@@ -146,8 +142,8 @@ class SquashOnApprovalTest(unittest.TestCase, _PatchedWorkflowMixin):
             issue.labels = [FakeLabel("in_review")]
 
         with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
-            mocks_r = self._run(
-                lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+            mocks_r = self._run_in_review(
+                gh, issue,
                 run_agent=_agent(),
             )
 
@@ -175,8 +171,8 @@ class SquashOnApprovalTest(unittest.TestCase, _PatchedWorkflowMixin):
         gh, issue, pr = self._setup()
 
         with patch.object(config, "SQUASH_ON_APPROVAL", True):
-            mocks = self._run(
-                lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+            mocks = self._run_validating(
+                gh, issue,
                 run_agent=_agent(last_message=REVIEW_APPROVED_MESSAGE),
                 head_shas=(self.REVIEWED_SHA,),
                 squash_result=(
@@ -220,8 +216,8 @@ class SquashOnApprovalTest(unittest.TestCase, _PatchedWorkflowMixin):
         pr.head = FakePRRef(sha=self.REVIEWED_SHA)
 
         with patch.object(config, "SQUASH_ON_APPROVAL", False):
-            mocks = self._run(
-                lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+            mocks = self._run_validating(
+                gh, issue,
                 run_agent=_agent(last_message=REVIEW_APPROVED_MESSAGE),
                 head_shas=(self.REVIEWED_SHA,),
             )
@@ -244,8 +240,8 @@ class SquashOnApprovalTest(unittest.TestCase, _PatchedWorkflowMixin):
         pr.head = FakePRRef(sha=self.REVIEWED_SHA)
 
         with patch.object(config, "SQUASH_ON_APPROVAL", True):
-            self._run(
-                lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+            self._run_validating(
+                gh, issue,
                 run_agent=_agent(last_message=REVIEW_APPROVED_MESSAGE),
                 head_shas=(self.REVIEWED_SHA,),
                 # Helper success no-op: nothing to squash.
@@ -259,25 +255,18 @@ class SquashOnApprovalTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertIn((5, "documenting"), gh.label_history)
 
 
-class SquashHelperRealGitTest(unittest.TestCase):
-    """Integration test for `_squash_and_force_push` against a real git repo.
+def _git(*args: str, cwd: Path, env_extra: dict | None = None) -> str:
+    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+    if env_extra:
+        env.update(env_extra)
+    result = subprocess.run(
+        ["git", *args], cwd=str(cwd),
+        capture_output=True, text=True, env=env, check=True,
+    )
+    return result.stdout
 
-    The workflow-level squash tests above mock the helper itself, so they
-    cannot catch failures in its rollback logic, in the squash-commit
-    message construction, or in the lease-pinning. This class creates a
-    bare remote + working clone with multiple commits on a topic branch,
-    runs the helper directly, and asserts the on-disk state.
-    """
 
-    def _git(self, *args: str, cwd: Path, env_extra: dict | None = None) -> str:
-        env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
-        if env_extra:
-            env.update(env_extra)
-        r = subprocess.run(
-            ["git", *args], cwd=str(cwd),
-            capture_output=True, text=True, env=env, check=True,
-        )
-        return r.stdout
+class _SquashGitFixtureMixin:
 
     def setUp(self) -> None:
         self.tmpdir = Path(tempfile.mkdtemp(prefix="orch-squash-test-"))
@@ -303,32 +292,38 @@ class SquashHelperRealGitTest(unittest.TestCase):
         }
         # Initial commit on main.
         (self.work / "README.md").write_text("hello\n")
-        self._git("add", ".", cwd=self.work)
-        self._git("commit", "-m", "initial", cwd=self.work, env_extra=author_env)
-        self._git("push", "origin", "main", cwd=self.work)
+        _git("add", ".", cwd=self.work)
+        _git("commit", "-m", "initial", cwd=self.work, env_extra=author_env)
+        _git("push", "origin", "main", cwd=self.work)
 
         # Topic branch with three dev commits.
         self.branch = "orchestrator/geserdugarov__agent-orchestrator/issue-9"
-        self._git("checkout", "-b", self.branch, cwd=self.work)
+        _git("checkout", "-b", self.branch, cwd=self.work)
         for i, msg in enumerate(["fix: typo", "add foo", "add bar"], start=1):
             (self.work / f"f{i}.txt").write_text(f"{i}\n")
-            self._git("add", ".", cwd=self.work)
-            self._git(
+            _git("add", ".", cwd=self.work)
+            _git(
                 "commit", "-m", msg, cwd=self.work, env_extra=author_env,
             )
-        self._git("push", "origin", self.branch, cwd=self.work)
-        self._git("fetch", "origin", cwd=self.work)
+        _git("push", "origin", self.branch, cwd=self.work)
+        _git("fetch", "origin", cwd=self.work)
 
     def _make_issue(self, title: str = "test issue", number: int = 9):
         return make_issue(number, title=title)
 
     def _commits_on_branch(self) -> list[str]:
         """Subjects of all commits between origin/main and HEAD, oldest first."""
-        out = self._git(
+        out = _git(
             "log", "--reverse", "--pretty=%s", "origin/main..HEAD",
             cwd=self.work,
         )
         return [line for line in out.splitlines() if line.strip()]
+
+
+class SquashHelperRealGitTest(
+    _SquashGitFixtureMixin, unittest.TestCase,
+):
+    """Build conventional squash commits against a real repository."""
 
     def test_squash_collapses_three_commits_to_one(self) -> None:
         # First commit's subject ("fix: typo") is conventional-commit form,
@@ -357,7 +352,7 @@ class SquashHelperRealGitTest(unittest.TestCase):
         # rule forbids a body or trailer on orchestrator-authored
         # commits, so the squash MUST NOT carry the legacy
         # `Squashed commits: -...` listing.
-        body = self._git(
+        body = _git(
             "log", "-1", "--pretty=%B", cwd=self.work,
         ).strip()
         self.assertEqual(body, "fix: typo")
@@ -367,15 +362,15 @@ class SquashHelperRealGitTest(unittest.TestCase):
         self,
     ) -> None:
         # Reset and rebuild the branch with non-conv-commit first subject.
-        self._git("reset", "--hard", "origin/main", cwd=self.work)
+        _git("reset", "--hard", "origin/main", cwd=self.work)
         author_env = {
             "GIT_AUTHOR_NAME": "Dev", "GIT_AUTHOR_EMAIL": "dev@example.com",
             "GIT_COMMITTER_NAME": "Dev", "GIT_COMMITTER_EMAIL": "dev@example.com",
         }
         for i, msg in enumerate(["typo fix", "feat: add foo"], start=1):
             (self.work / f"g{i}.txt").write_text(f"{i}\n")
-            self._git("add", ".", cwd=self.work)
-            self._git(
+            _git("add", ".", cwd=self.work)
+            _git(
                 "commit", "-m", msg, cwd=self.work, env_extra=author_env,
             )
 
@@ -388,7 +383,7 @@ class SquashHelperRealGitTest(unittest.TestCase):
         self.assertTrue(success, err)
         self.assertEqual(count, 2)
 
-        subject = self._git("log", "-1", "--pretty=%s", cwd=self.work).strip()
+        subject = _git("log", "-1", "--pretty=%s", cwd=self.work).strip()
         self.assertEqual(subject, "feat: rename frobnicator")
 
     def test_keeps_custom_prefix_first_subject(self) -> None:
@@ -396,7 +391,7 @@ class SquashHelperRealGitTest(unittest.TestCase):
         # (e.g. a careers site's `career:`) must be reused verbatim as the
         # squash subject -- previously it would have been discarded for a
         # synthesized `feat: <issue title>`.
-        self._git("reset", "--hard", "origin/main", cwd=self.work)
+        _git("reset", "--hard", "origin/main", cwd=self.work)
         author_env = {
             "GIT_AUTHOR_NAME": "Dev", "GIT_AUTHOR_EMAIL": "dev@example.com",
             "GIT_COMMITTER_NAME": "Dev", "GIT_COMMITTER_EMAIL": "dev@example.com",
@@ -405,8 +400,8 @@ class SquashHelperRealGitTest(unittest.TestCase):
             ["career: add a senior role", "fix wording"], start=1
         ):
             (self.work / f"c{i}.txt").write_text(f"{i}\n")
-            self._git("add", ".", cwd=self.work)
-            self._git(
+            _git("add", ".", cwd=self.work)
+            _git(
                 "commit", "-m", msg, cwd=self.work, env_extra=author_env,
             )
 
@@ -418,7 +413,7 @@ class SquashHelperRealGitTest(unittest.TestCase):
             )
         self.assertTrue(success, err)
         self.assertEqual(count, 2)
-        subject = self._git("log", "-1", "--pretty=%s", cwd=self.work).strip()
+        subject = _git("log", "-1", "--pretty=%s", cwd=self.work).strip()
         self.assertEqual(subject, "career: add a senior role")
 
     def test_infers_prefix_from_base_history(self) -> None:
@@ -431,27 +426,27 @@ class SquashHelperRealGitTest(unittest.TestCase):
             "GIT_COMMITTER_NAME": "Dev", "GIT_COMMITTER_EMAIL": "dev@example.com",
         }
         # Seed the base branch with a history dominated by `event:`.
-        self._git("checkout", "main", cwd=self.work)
+        _git("checkout", "main", cwd=self.work)
         for i, msg in enumerate(
             ["event: launch the site", "event: add a gala", "event: add a meetup"],
             start=1,
         ):
             (self.work / f"e{i}.txt").write_text(f"{i}\n")
-            self._git("add", ".", cwd=self.work)
-            self._git(
+            _git("add", ".", cwd=self.work)
+            _git(
                 "commit", "-m", msg, cwd=self.work, env_extra=author_env,
             )
         # Pushing updates the local `origin/main` tracking ref that
         # `_recent_base_subjects` reads.
-        self._git("push", "origin", "main", cwd=self.work)
+        _git("push", "origin", "main", cwd=self.work)
         # Rebuild the topic branch on the refreshed base with unprefixed
         # commits so the squash must fall back to inference.
-        self._git("checkout", self.branch, cwd=self.work)
-        self._git("reset", "--hard", "origin/main", cwd=self.work)
+        _git("checkout", self.branch, cwd=self.work)
+        _git("reset", "--hard", "origin/main", cwd=self.work)
         for i, msg in enumerate(["tweak the layout", "polish the copy"], start=1):
             (self.work / f"t{i}.txt").write_text(f"{i}\n")
-            self._git("add", ".", cwd=self.work)
-            self._git(
+            _git("add", ".", cwd=self.work)
+            _git(
                 "commit", "-m", msg, cwd=self.work, env_extra=author_env,
             )
 
@@ -463,23 +458,28 @@ class SquashHelperRealGitTest(unittest.TestCase):
             )
         self.assertTrue(success, err)
         self.assertEqual(count, 2)
-        subject = self._git("log", "-1", "--pretty=%s", cwd=self.work).strip()
+        subject = _git("log", "-1", "--pretty=%s", cwd=self.work).strip()
         self.assertEqual(subject, "event: redesign the homepage")
+
+class SquashHelperRecoveryRealGitTest(
+    _SquashGitFixtureMixin, unittest.TestCase,
+):
+    """Preserve branches and worktrees across no-op and failure paths."""
 
     def test_squash_with_only_one_commit_is_a_no_op(self) -> None:
         # Reset to a single commit on top of base.
-        self._git("reset", "--hard", "origin/main", cwd=self.work)
+        _git("reset", "--hard", "origin/main", cwd=self.work)
         author_env = {
             "GIT_AUTHOR_NAME": "Dev", "GIT_AUTHOR_EMAIL": "dev@example.com",
             "GIT_COMMITTER_NAME": "Dev", "GIT_COMMITTER_EMAIL": "dev@example.com",
         }
         (self.work / "only.txt").write_text("only\n")
-        self._git("add", ".", cwd=self.work)
-        self._git(
+        _git("add", ".", cwd=self.work)
+        _git(
             "commit", "-m", "feat: only one", cwd=self.work,
             env_extra=author_env,
         )
-        original_head = self._git(
+        original_head = _git(
             "rev-parse", "HEAD", cwd=self.work,
         ).strip()
 
@@ -496,7 +496,7 @@ class SquashHelperRealGitTest(unittest.TestCase):
         pm.assert_not_called()
         # HEAD unchanged.
         self.assertEqual(
-            self._git("rev-parse", "HEAD", cwd=self.work).strip(),
+            _git("rev-parse", "HEAD", cwd=self.work).strip(),
             original_head,
         )
 
@@ -505,7 +505,7 @@ class SquashHelperRealGitTest(unittest.TestCase):
         # the soft-reset + squash commit must not leave the branch
         # pointing at the squash commit. The original commits must still
         # be on the branch so the operator can decide what to do.
-        original_head = self._git(
+        original_head = _git(
             "rev-parse", "HEAD", cwd=self.work,
         ).strip()
         original_subjects = self._commits_on_branch()
@@ -523,7 +523,7 @@ class SquashHelperRealGitTest(unittest.TestCase):
         self.assertIn("force-push", err or "")
         # HEAD restored.
         self.assertEqual(
-            self._git("rev-parse", "HEAD", cwd=self.work).strip(),
+            _git("rev-parse", "HEAD", cwd=self.work).strip(),
             original_head,
             "rollback must restore HEAD to the pre-squash SHA",
         )
@@ -531,7 +531,7 @@ class SquashHelperRealGitTest(unittest.TestCase):
         self.assertEqual(self._commits_on_branch(), original_subjects)
         # Working tree clean (rollback used --hard, but pre-reset tree
         # already matched HEAD's tree, so no file diffs should remain).
-        status = self._git("status", "--porcelain", cwd=self.work)
+        status = _git("status", "--porcelain", cwd=self.work)
         self.assertEqual(status.strip(), "")
 
     def test_never_executes_planted_fsmonitor(self) -> None:
@@ -560,12 +560,12 @@ class SquashHelperRealGitTest(unittest.TestCase):
             "printf '/\\000'\n"
         )
         hook.chmod(0o755)
-        self._git("config", "core.fsmonitor", str(hook), cwd=self.work)
+        _git("config", "core.fsmonitor", str(hook), cwd=self.work)
 
         # Prove the planted hook is honored by this worktree config: a plain,
         # unhardened index refresh fires it. Without this the empty-marker
         # assertion below could pass simply because the hook was never wired.
-        self._git("status", "--porcelain", cwd=self.work)
+        _git("status", "--porcelain", cwd=self.work)
         self.assertTrue(
             marker.exists() and marker.read_text().strip(),
             "planted fsmonitor never fired even for a plain git status; the "
@@ -573,7 +573,7 @@ class SquashHelperRealGitTest(unittest.TestCase):
         )
         marker.unlink()
 
-        original_head = self._git(
+        original_head = _git(
             "rev-parse", "HEAD", cwd=self.work,
         ).strip()
         original_subjects = self._commits_on_branch()
@@ -599,7 +599,7 @@ class SquashHelperRealGitTest(unittest.TestCase):
         self.assertFalse(success)
         self.assertIn("force-push", err or "")
         self.assertEqual(
-            self._git("rev-parse", "HEAD", cwd=self.work).strip(),
+            _git("rev-parse", "HEAD", cwd=self.work).strip(),
             original_head,
             "rollback must restore HEAD to the pre-squash SHA",
         )
@@ -622,10 +622,10 @@ class SquashHelperRealGitTest(unittest.TestCase):
             )
         self.assertTrue(success, err)
 
-        author = self._git(
+        author = _git(
             "log", "-1", "--pretty=%an <%ae>", cwd=self.work,
         ).strip()
-        committer = self._git(
+        committer = _git(
             "log", "-1", "--pretty=%cn <%ce>", cwd=self.work,
         ).strip()
         self.assertEqual(author, "orch-bot <orch-bot@example.com>")
@@ -637,7 +637,7 @@ class SquashHelperRealGitTest(unittest.TestCase):
         # WITHOUT touching HEAD so the dirty state is visible to the
         # operator. Without the pre-reset dirty check the soft-reset
         # would happen and the rollback would clobber the dirty changes.
-        original_head = self._git(
+        original_head = _git(
             "rev-parse", "HEAD", cwd=self.work,
         ).strip()
         (self.work / "scratch.txt").write_text("uncommitted\n")
@@ -652,7 +652,7 @@ class SquashHelperRealGitTest(unittest.TestCase):
         self.assertIn("uncommitted", (err or ""))
         # HEAD untouched, dirty file preserved, no push attempted.
         self.assertEqual(
-            self._git("rev-parse", "HEAD", cwd=self.work).strip(),
+            _git("rev-parse", "HEAD", cwd=self.work).strip(),
             original_head,
         )
         self.assertTrue((self.work / "scratch.txt").exists())
@@ -664,18 +664,18 @@ class SquashHelperRealGitTest(unittest.TestCase):
         # be a no-op) with an uncommitted file must still fail so the
         # caller parks awaiting_human; otherwise the manual merge could
         # land the head with the operator's scratch invisible on the PR.
-        self._git("reset", "--hard", "origin/main", cwd=self.work)
+        _git("reset", "--hard", "origin/main", cwd=self.work)
         author_env = {
             "GIT_AUTHOR_NAME": "Dev", "GIT_AUTHOR_EMAIL": "dev@example.com",
             "GIT_COMMITTER_NAME": "Dev", "GIT_COMMITTER_EMAIL": "dev@example.com",
         }
         (self.work / "only.txt").write_text("only\n")
-        self._git("add", ".", cwd=self.work)
-        self._git(
+        _git("add", ".", cwd=self.work)
+        _git(
             "commit", "-m", "feat: only one", cwd=self.work,
             env_extra=author_env,
         )
-        original_head = self._git(
+        original_head = _git(
             "rev-parse", "HEAD", cwd=self.work,
         ).strip()
         (self.work / "scratch.txt").write_text("uncommitted\n")
@@ -694,7 +694,7 @@ class SquashHelperRealGitTest(unittest.TestCase):
         # no-op success branch. HEAD untouched, dirty file preserved,
         # no push attempted.
         self.assertEqual(
-            self._git("rev-parse", "HEAD", cwd=self.work).strip(),
+            _git("rev-parse", "HEAD", cwd=self.work).strip(),
             original_head,
         )
         self.assertTrue((self.work / "scratch.txt").exists())

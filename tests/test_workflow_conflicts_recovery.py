@@ -9,7 +9,6 @@ from orchestrator import workflow
 
 from tests.workflow_helpers import (
     _ResolvingConflictMixin,
-    _TEST_SPEC,
     _agent,
 )
 
@@ -44,10 +43,8 @@ class ResolvingConflictRecoveryPushTest(
 
         with patch.object(workflow, "_rebase_base_into_worktree", merge_mock), \
              patch.object(workflow, "_git", git_on_base):
-            mocks = self._run(
-                lambda: workflow._handle_resolving_conflict(
-                    gh, _TEST_SPEC, issue,
-                ),
+            mocks = self._run_resolving_conflict(
+                gh, issue,
                 run_agent=_agent(),
                 push_branch=True,
                 # HEAD ahead of `origin/<branch>` by one commit (the
@@ -81,10 +78,8 @@ class ResolvingConflictRecoveryPushTest(
         merge_mock = MagicMock(return_value=(True, []))
 
         with patch.object(workflow, "_rebase_base_into_worktree", merge_mock):
-            mocks = self._run(
-                lambda: workflow._handle_resolving_conflict(
-                    gh, _TEST_SPEC, issue,
-                ),
+            mocks = self._run_resolving_conflict(
+                gh, issue,
                 run_agent=_agent(),
                 push_branch=False,
                 branch_ahead_behind=(1, 0),
@@ -122,10 +117,8 @@ class ResolvingConflictRecoveryPushTest(
 
         with patch.object(workflow, "_rebase_base_into_worktree", merge_mock), \
              patch.object(workflow, "_git", git_behind_base):
-            mocks = self._run(
-                lambda: workflow._handle_resolving_conflict(
-                    gh, _TEST_SPEC, issue,
-                ),
+            mocks = self._run_resolving_conflict(
+                gh, issue,
                 run_agent=_agent(),
                 push_branch=True,
                 # Recovered push first (force-with-lease=None on a

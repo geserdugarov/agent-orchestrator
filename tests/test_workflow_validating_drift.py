@@ -18,21 +18,11 @@ from tests.fakes import (
 from tests.workflow_helpers import (
     REVIEW_APPROVED_MESSAGE,
     _PatchedWorkflowMixin,
-    _TEST_SPEC,
     _agent,
 )
 
 
-class ValidatingTransientParkRecoveryTest(
-    unittest.TestCase, _PatchedWorkflowMixin
-):
-    """A validating-side park whose underlying condition can self-resolve
-    (a non-fast-forward push that the next --force-with-lease push will
-    land) must auto-recover without needing a fresh issue-thread comment.
-    Otherwise `_resume_developer_on_human_reply` -- which only fires on a
-    new comment -- leaves the issue parked indefinitely even after the
-    transient cause is gone.
-    """
+class _TransientParkFixtureMixin(_PatchedWorkflowMixin):
 
     BRANCH = "orchestrator/geserdugarov__agent-orchestrator/issue-170"
 
@@ -55,6 +45,12 @@ class ValidatingTransientParkRecoveryTest(
         gh.seed_state(170, **seed)
         return gh, issue
 
+
+class ValidatingTransientParkRecoveryTest(
+    unittest.TestCase, _TransientParkFixtureMixin,
+):
+    """Recover safe push failures while retaining ambiguous parks."""
+
     def test_push_failure_recovers_on_success(self) -> None:
         gh, issue = self._parked_issue(park_reason="push_failed")
 
@@ -63,8 +59,8 @@ class ValidatingTransientParkRecoveryTest(
         # is still on disk (otherwise the dev's local commits are gone and
         # only a human relabel can unstick the issue).
         with patch.object(workflow, "_worktree_path", return_value=Path("/tmp")):
-            mocks = self._run(
-                lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+            mocks = self._run_validating(
+                gh, issue,
                 run_agent=_agent(),
                 push_branch=True,
             )
@@ -93,8 +89,8 @@ class ValidatingTransientParkRecoveryTest(
         gh, issue = self._parked_issue(park_reason="push_failed")
 
         with patch.object(workflow, "_worktree_path", return_value=Path("/tmp")):
-            mocks = self._run(
-                lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+            mocks = self._run_validating(
+                gh, issue,
                 run_agent=_agent(),
                 push_branch=False,
             )
@@ -119,8 +115,8 @@ class ValidatingTransientParkRecoveryTest(
         # Path that will not exist on the test host.
         gone = Path("/tmp/orchestrator-test-recovery-no-such-worktree-xyz")
         with patch.object(workflow, "_worktree_path", return_value=gone):
-            mocks = self._run(
-                lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+            mocks = self._run_validating(
+                gh, issue,
                 run_agent=_agent(),
                 push_branch=True,
             )
@@ -140,8 +136,8 @@ class ValidatingTransientParkRecoveryTest(
         gh, issue = self._parked_issue(park_reason=None)
 
         with patch.object(workflow, "_worktree_path", return_value=Path("/tmp")):
-            mocks = self._run(
-                lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+            mocks = self._run_validating(
+                gh, issue,
                 run_agent=_agent(),
                 push_branch=True,
             )
@@ -152,6 +148,11 @@ class ValidatingTransientParkRecoveryTest(
         self.assertTrue(state.get("awaiting_human"))
         self.assertEqual(state.get("review_round"), 1)
 
+class ValidatingReviewerParkRecoveryTest(
+    unittest.TestCase, _TransientParkFixtureMixin,
+):
+    """Recover reviewer-side transient parks or rerun on a human reply."""
+
     def test_reviewer_timeout_park_recovers_silently(self) -> None:
         # A previous tick parked because the reviewer agent timed out.
         # The next tick must clear the flags so the reviewer re-runs --
@@ -160,8 +161,8 @@ class ValidatingTransientParkRecoveryTest(
         gh, issue = self._parked_issue(park_reason="reviewer_timeout")
 
         with patch.object(workflow, "_worktree_path", return_value=Path("/tmp")):
-            mocks = self._run(
-                lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+            mocks = self._run_validating(
+                gh, issue,
                 run_agent=_agent(),
                 push_branch=True,
             )
@@ -189,8 +190,8 @@ class ValidatingTransientParkRecoveryTest(
         gh, issue = self._parked_issue(park_reason="reviewer_failed")
 
         with patch.object(workflow, "_worktree_path", return_value=Path("/tmp")):
-            mocks = self._run(
-                lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+            mocks = self._run_validating(
+                gh, issue,
                 run_agent=_agent(),
                 push_branch=True,
             )
@@ -224,8 +225,8 @@ class ValidatingTransientParkRecoveryTest(
             last_message=REVIEW_APPROVED_MESSAGE,
         )
         with patch.object(workflow, "_worktree_path", return_value=Path("/tmp")):
-            mocks = self._run(
-                lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+            mocks = self._run_validating(
+                gh, issue,
                 run_agent=review,
                 head_shas=["cafe1234"],
             )
@@ -259,8 +260,8 @@ class ValidatingTransientParkRecoveryTest(
             last_message=REVIEW_APPROVED_MESSAGE,
         )
         with patch.object(workflow, "_worktree_path", return_value=Path("/tmp")):
-            mocks = self._run(
-                lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+            mocks = self._run_validating(
+                gh, issue,
                 run_agent=review,
                 head_shas=["cafe1234"],
             )
@@ -272,6 +273,11 @@ class ValidatingTransientParkRecoveryTest(
         state = gh.pinned_data(170)
         self.assertFalse(state.get("awaiting_human"))
         self.assertIsNone(state.get("park_reason"))
+
+class ValidatingDevParkRecoveryTest(
+    unittest.TestCase, _TransientParkFixtureMixin,
+):
+    """Recover dev timeouts from the worktree and push state."""
 
     def test_dev_timeout_comment_routes_to_dev(self) -> None:
         # Regression: dev-side park reasons (agent_timeout) must keep
@@ -289,8 +295,8 @@ class ValidatingTransientParkRecoveryTest(
         )
 
         with patch.object(workflow, "_worktree_path", return_value=Path("/tmp")):
-            mocks = self._run(
-                lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+            mocks = self._run_validating(
+                gh, issue,
                 run_agent=_agent(
                     session_id="dev-sess", last_message="rebased",
                 ),
@@ -317,8 +323,8 @@ class ValidatingTransientParkRecoveryTest(
         )
 
         with patch.object(workflow, "_worktree_path", return_value=Path("/tmp")):
-            mocks = self._run(
-                lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+            mocks = self._run_validating(
+                gh, issue,
                 run_agent=_agent(),
                 dirty_files=(),
                 push_branch=True,
@@ -349,8 +355,8 @@ class ValidatingTransientParkRecoveryTest(
         )
 
         with patch.object(workflow, "_worktree_path", return_value=Path("/tmp")):
-            mocks = self._run(
-                lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+            mocks = self._run_validating(
+                gh, issue,
                 run_agent=_agent(),
                 # Mock `_has_new_commits` to True to model an established
                 # PR worktree (commits ahead of origin/main); the
@@ -382,8 +388,8 @@ class ValidatingTransientParkRecoveryTest(
         )
 
         with patch.object(workflow, "_worktree_path", return_value=Path("/tmp")):
-            mocks = self._run(
-                lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+            mocks = self._run_validating(
+                gh, issue,
                 run_agent=_agent(),
                 dirty_files=(),
                 push_branch=True,
@@ -412,8 +418,8 @@ class ValidatingTransientParkRecoveryTest(
         )
 
         with patch.object(workflow, "_worktree_path", return_value=Path("/tmp")):
-            mocks = self._run(
-                lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+            mocks = self._run_validating(
+                gh, issue,
                 run_agent=_agent(),
                 dirty_files=(),
                 push_branch=False,
@@ -429,6 +435,11 @@ class ValidatingTransientParkRecoveryTest(
         self.assertEqual(state.get("review_round"), 1)
         self.assertEqual(state.get("pre_dev_fix_sha"), "cafe1234")
 
+class ValidatingDevParkSafetyTest(
+    unittest.TestCase, _TransientParkFixtureMixin,
+):
+    """Keep unsafe or unanchored dev timeout recoveries parked."""
+
     def test_dirty_timeout_stays_parked(self) -> None:
         # The dev edited files without committing before timing out.
         # Recovery refuses to silently push (would publish an incomplete
@@ -441,8 +452,8 @@ class ValidatingTransientParkRecoveryTest(
         )
 
         with patch.object(workflow, "_worktree_path", return_value=Path("/tmp")):
-            mocks = self._run(
-                lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+            mocks = self._run_validating(
+                gh, issue,
                 run_agent=_agent(),
                 dirty_files=["leftover.py"],
                 push_branch=True,
@@ -466,8 +477,8 @@ class ValidatingTransientParkRecoveryTest(
         gh, issue = self._parked_issue(park_reason="agent_timeout")
 
         with patch.object(workflow, "_worktree_path", return_value=Path("/tmp")):
-            mocks = self._run(
-                lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+            mocks = self._run_validating(
+                gh, issue,
                 run_agent=_agent(),
                 dirty_files=(),
                 push_branch=True,
@@ -494,8 +505,8 @@ class ValidatingTransientParkRecoveryTest(
         )
 
         with patch.object(workflow, "_worktree_path", return_value=Path("/tmp")):
-            mocks = self._run(
-                lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+            mocks = self._run_validating(
+                gh, issue,
                 run_agent=_agent(
                     session_id="dev-sess", last_message="rebased",
                 ),
@@ -535,8 +546,8 @@ class HandleValidatingResumeOnHashChangeTest(
             branch="orchestrator/geserdugarov__agent-orchestrator/issue-70",
         )
 
-        self._run(
-            lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+        self._run_validating(
+            gh, issue,
             run_agent=_agent(
                 session_id="dev-sess", last_message="fixed"
             ),
@@ -606,8 +617,8 @@ class ValidatingDriftDefersToReviewerRecoveryTest(
             user_content_hash=seed_hash,
         )
 
-        mocks = self._run(
-            lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+        mocks = self._run_validating(
+            gh, issue,
             run_agent=_agent(
                 session_id="rev-sess",
                 last_message="Looks fine.\n\nVERDICT: APPROVED",

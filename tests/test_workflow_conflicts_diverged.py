@@ -9,7 +9,6 @@ from orchestrator import workflow
 
 from tests.workflow_helpers import (
     _ResolvingConflictMixin,
-    _TEST_SPEC,
     _agent,
 )
 
@@ -31,10 +30,8 @@ class ResolvingConflictStaleDivergedTest(
         merge_mock = MagicMock(return_value=(True, []))
 
         with patch.object(workflow, "_rebase_base_into_worktree", merge_mock):
-            mocks = self._run(
-                lambda: workflow._handle_resolving_conflict(
-                    gh, _TEST_SPEC, issue,
-                ),
+            mocks = self._run_resolving_conflict(
+                gh, issue,
                 run_agent=_agent(),
                 push_branch=True,
                 branch_ahead_behind=(0, 2),
@@ -56,10 +53,8 @@ class ResolvingConflictStaleDivergedTest(
         merge_mock = MagicMock(return_value=(True, []))
 
         with patch.object(workflow, "_rebase_base_into_worktree", merge_mock):
-            mocks = self._run(
-                lambda: workflow._handle_resolving_conflict(
-                    gh, _TEST_SPEC, issue,
-                ),
+            mocks = self._run_resolving_conflict(
+                gh, issue,
                 run_agent=_agent(),
                 push_branch=True,
                 branch_ahead_behind=(1, 1),

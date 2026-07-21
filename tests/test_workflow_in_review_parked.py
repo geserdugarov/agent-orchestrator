@@ -9,7 +9,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
-from orchestrator import config, workflow
+from orchestrator import config
 
 from tests.fakes import (
     FakeComment,
@@ -21,19 +21,11 @@ from tests.fakes import (
 )
 from tests.workflow_helpers import (
     _PatchedWorkflowMixin,
-    _TEST_SPEC,
     _agent,
 )
 
 
-class AwaitingHumanParkStaysParkedTest(
-    unittest.TestCase, _PatchedWorkflowMixin,
-):
-    """An issue parked awaiting human must stay parked when no new comments
-    surface. The handler is manual-merge-only -- there is no auto-recovery
-    branch that re-checks the mergeability gate. A human reply (comment or
-    relabel) is what unsticks the issue.
-    """
+class _ParkedInReviewFixtureMixin(_PatchedWorkflowMixin):
 
     PR_NUMBER = 500
     BRANCH = "orchestrator/geserdugarov__agent-orchestrator/issue-170"
@@ -62,6 +54,12 @@ class AwaitingHumanParkStaysParkedTest(
         )
         return gh, issue, pr
 
+
+class AwaitingHumanParkStaysParkedTest(
+    unittest.TestCase, _ParkedInReviewFixtureMixin,
+):
+    """Keep awaiting-human review issues parked until an operator acts."""
+
     def test_auto_rebase_park_ignores_new_comment(self) -> None:
         # The refresh-time `_AUTO_REBASE_PARK_REASONS` parks belong to
         # `_sync_pr_worktree_to_base`'s retry loop. The human's new
@@ -80,8 +78,8 @@ class AwaitingHumanParkStaysParkedTest(
             user=FakeUser("human"),
         ))
 
-        mocks = self._run(
-            lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+        mocks = self._run_in_review(
+            gh, issue,
             run_agent=_agent(),
         )
 
@@ -110,8 +108,8 @@ class AwaitingHumanParkStaysParkedTest(
             pr_kwargs=dict(mergeable=True, check_state="success"),
         )
 
-        mocks = self._run(
-            lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+        mocks = self._run_in_review(
+            gh, issue,
             run_agent=_agent(),
         )
 
@@ -126,13 +124,7 @@ class AwaitingHumanParkStaysParkedTest(
         self.assertEqual(state.get("park_reason"), "unmergeable")
 
 
-class ManuallyClosedInReviewIssueTest(unittest.TestCase, _PatchedWorkflowMixin):
-    """An open in_review issue closed manually by a human is a stop signal.
-    The closed-in_review sweep yields the issue (so a Resolves-#N auto-close
-    can finalize to `done`), but if the linked PR is still open the sweep
-    has surfaced a manually-closed issue and `_handle_in_review` must mark
-    it rejected before the mergeable / HITL-ping path runs.
-    """
+class _ClosedInReviewFixtureMixin(_PatchedWorkflowMixin):
 
     PR_NUMBER = 700
     BRANCH = "orchestrator/geserdugarov__agent-orchestrator/issue-250"
@@ -159,11 +151,17 @@ class ManuallyClosedInReviewIssueTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
         return gh, issue, pr
 
+
+class ManuallyClosedInReviewIssueTest(
+    unittest.TestCase, _ClosedInReviewFixtureMixin,
+):
+    """Treat a manually closed issue with an open PR as rejected."""
+
     def test_open_pr_marks_rejected(self) -> None:
         gh, issue, pr = self._setup()
 
-        mocks = self._run(
-            lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+        mocks = self._run_in_review(
+            gh, issue,
             run_agent=_agent(),
         )
 
@@ -189,8 +187,8 @@ class ManuallyClosedInReviewIssueTest(unittest.TestCase, _PatchedWorkflowMixin):
         # is therefore never observed by the orchestrator and the
         # operator must clean up the branch / worktree by hand.
         gh, issue, pr = self._setup()
-        mocks = self._run(
-            lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+        mocks = self._run_in_review(
+            gh, issue,
             run_agent=_agent(),
         )
         self.assertIn((250, "rejected"), gh.label_history)
@@ -221,8 +219,8 @@ class ManuallyClosedInReviewIssueTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
 
         with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
-            mocks = self._run(
-                lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+            mocks = self._run_in_review(
+                gh, issue,
                 run_agent=_agent(),
             )
 
@@ -245,8 +243,8 @@ class ManuallyClosedInReviewIssueTest(unittest.TestCase, _PatchedWorkflowMixin):
         gh.add_pr(pr)
         gh.seed_state(251, pr_number=701, branch="orchestrator/geserdugarov__agent-orchestrator/issue-251")
 
-        self._run(
-            lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+        self._run_in_review(
+            gh, issue,
             run_agent=_agent(),
         )
 
@@ -301,8 +299,8 @@ class StaleParkReasonClearedOnFixingRouteTest(
         # and clears both the stale `park_reason` and `awaiting_human`
         # flag so the fixing handler is not greeted with stale park state.
         with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
-            mocks = self._run(
-                lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+            mocks = self._run_in_review(
+                gh, issue,
                 run_agent=_agent(),
             )
 

@@ -6,6 +6,11 @@ from __future__ import annotations
 
 import unittest
 from types import SimpleNamespace
+from unittest.mock import MagicMock
+
+from github import GithubException
+
+from orchestrator.github import GitHubClient
 
 
 class GitHubClientClosedIssueSweepLabelTest(unittest.TestCase):
@@ -21,9 +26,6 @@ class GitHubClientClosedIssueSweepLabelTest(unittest.TestCase):
     """
 
     def test_closed_sweep_uses_label_object(self) -> None:
-        from unittest.mock import MagicMock
-        from orchestrator.github import GitHubClient
-
         # Bypass __init__: it would require a real PAT and Github client.
         client = GitHubClient.__new__(GitHubClient)
         client.repo = MagicMock()
@@ -42,18 +44,15 @@ class GitHubClientClosedIssueSweepLabelTest(unittest.TestCase):
         resolving_label = MagicMock(name="resolving_conflict_label")
         question_label = MagicMock(name="question_label")
 
-        def fake_get_label(name: str):
-            return {
-                "implementing": implementing_label,
-                "documenting": documenting_label,
-                "validating": validating_label,
-                "in_review": in_review_label,
-                "fixing": fixing_label,
-                "resolving_conflict": resolving_label,
-                "question": question_label,
-            }[name]
-
-        client.repo.get_label.side_effect = fake_get_label
+        client.repo.get_label.side_effect = {
+            "implementing": implementing_label,
+            "documenting": documenting_label,
+            "validating": validating_label,
+            "in_review": in_review_label,
+            "fixing": fixing_label,
+            "resolving_conflict": resolving_label,
+            "question": question_label,
+        }.__getitem__
 
         list(client.list_pollable_issues())
 
@@ -89,10 +88,6 @@ class GitHubClientClosedIssueSweepLabelTest(unittest.TestCase):
         # If `get_label` raises (under-scoped PAT, label not yet bootstrapped)
         # the generator must complete the open-issue sweep AND swallow the
         # closed-issue branch -- otherwise `tick()` aborts mid-loop.
-        from unittest.mock import MagicMock
-        from orchestrator.github import GitHubClient
-        from github import GithubException
-
         client = GitHubClient.__new__(GitHubClient)
         client.repo = MagicMock()
         client._pollable_calls = 0
@@ -250,6 +245,21 @@ class CombinedCheckStateNormalizationTest(unittest.TestCase):
                 )
 
 
+def _client_with(*, combined_state, combined_total, check_runs_exc):
+    client = GitHubClient.__new__(GitHubClient)
+    client.repo = MagicMock()
+    commit_obj = MagicMock()
+    commit_obj.get_combined_status.return_value = MagicMock(
+        state=combined_state,
+        total_count=combined_total,
+    )
+    commit_obj.get_check_runs.side_effect = check_runs_exc
+    client.repo.get_commit.return_value = commit_obj
+    pr = MagicMock()
+    pr.head.sha = "deadbeef"
+    return client, pr
+
+
 class PartialCheckReadFailsClosedTest(unittest.TestCase):
     """A read failure on one checks surface must NOT be masked by a
     'success' from the other surface. Otherwise a single green
@@ -259,30 +269,12 @@ class PartialCheckReadFailsClosedTest(unittest.TestCase):
     the head as green over the unread failing checks.
     """
 
-    def _client_with(self, *, combined_state, combined_total, check_runs_exc):
-        from unittest.mock import MagicMock
-        from orchestrator.github import GitHubClient
-
-        client = GitHubClient.__new__(GitHubClient)
-        client.repo = MagicMock()
-        commit_obj = MagicMock()
-        commit_obj.get_combined_status.return_value = MagicMock(
-            state=combined_state, total_count=combined_total,
-        )
-        commit_obj.get_check_runs.side_effect = check_runs_exc
-        client.repo.get_commit.return_value = commit_obj
-        pr = MagicMock()
-        pr.head.sha = "deadbeef"
-        return client, pr
-
     def test_success_plus_403_returns_pending(self) -> None:
         # The dangerous case: legacy commit-status says 'success' but the
         # PAT cannot read check-runs. Without the partial-read guard, a
         # caller would trust the head as green over failing/pending
         # Actions runs.
-        from github import GithubException
-
-        client, pr = self._client_with(
+        client, pr = _client_with(
             combined_state="success", combined_total=1,
             check_runs_exc=GithubException(
                 403, {"message": "Resource not accessible"}, None,
@@ -301,9 +293,7 @@ class PartialCheckReadFailsClosedTest(unittest.TestCase):
         # A transient 5xx on check-runs has the same downgrade rule -- the
         # next tick may succeed and resolve to a real verdict, but until
         # then we cannot report success.
-        from github import GithubException
-
-        client, pr = self._client_with(
+        client, pr = _client_with(
             combined_state="success", combined_total=1,
             check_runs_exc=GithubException(
                 500, {"message": "Internal Server Error"}, None,
@@ -319,9 +309,7 @@ class PartialCheckReadFailsClosedTest(unittest.TestCase):
         # existing 'none' return so the workflow's failed_checks branch
         # parks awaiting_human (visible to the operator) instead of
         # silently waiting forever on 'pending'.
-        from github import GithubException
-
-        client, pr = self._client_with(
+        client, pr = _client_with(
             combined_state="", combined_total=0,
             check_runs_exc=GithubException(
                 403, {"message": "Resource not accessible"}, None,

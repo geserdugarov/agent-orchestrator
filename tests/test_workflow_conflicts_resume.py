@@ -46,10 +46,9 @@ class ResolvingConflictAwaitingHumanResumeTest(
         ), patch.object(workflow, "_git", git_mock), patch.object(
             workflow, "_git_hardened", git_mock,
         ):
-            mocks = self._run(
-                lambda: workflow._handle_resolving_conflict(
-                    gh, _TEST_SPEC, issue,
-                ),
+            mocks = self._run_resolving_conflict(
+                gh,
+                issue,
                 run_agent=_agent(),
                 push_branch=True,
             )
@@ -223,6 +222,11 @@ class ResolvingConflictAwaitingHumanResumeTest(
         self.assertEqual(state.get("conflict_round"), 1)
         self.assertNotIn((200, "validating"), gh.label_history)
 
+class ResolvingConflictSessionRecoveryTest(
+    unittest.TestCase, _ResolvingConflictMixin,
+):
+    """Recover stale sessions and interpret explicit continue commands."""
+
     def test_stale_claude_session_recovers(self) -> None:
         # Regression: a `resolving_conflict` issue parked awaiting human
         # whose pinned `dev_session_id` references a Claude transcript that
@@ -252,15 +256,12 @@ class ResolvingConflictAwaitingHumanResumeTest(
 
         stale_stderr = "Error: No conversation found with session ID: poisoned-sess"
 
-        calls: list = []
-
-        def fake_run(agent, prompt, wt, *, resume_session_id=None, extra_args=()):
-            calls.append(resume_session_id)
-            if resume_session_id == "poisoned-sess":
-                return _agent(
-                    session_id="", last_message="", stderr=stale_stderr,
-                )
-            return _agent(session_id="fresh-sess", last_message="resolved")
+        run_agent = MagicMock(
+            side_effect=[
+                _agent(session_id="", last_message="", stderr=stale_stderr),
+                _agent(session_id="fresh-sess", last_message="resolved"),
+            ],
+        )
 
         merge_mock = MagicMock(return_value=(True, []))
         git_mock = MagicMock(
@@ -271,18 +272,21 @@ class ResolvingConflictAwaitingHumanResumeTest(
         ), patch.object(workflow, "_git", git_mock), patch.object(
             workflow, "_git_hardened", git_mock,
         ):
-            mocks = self._run(
-                lambda: workflow._handle_resolving_conflict(
-                    gh, _TEST_SPEC, issue,
-                ),
-                run_agent=fake_run,
+            mocks = self._run_resolving_conflict(
+                gh,
+                issue,
+                run_agent=run_agent,
                 push_branch=True,
                 head_shas=["beforehead", "merged"],
             )
 
         # Two run_agent calls: the poisoned resume + the fresh-spawn retry.
         self.assertEqual(
-            calls, ["poisoned-sess", None],
+            [
+                agent_call.kwargs.get("resume_session_id")
+                for agent_call in run_agent.call_args_list
+            ],
+            ["poisoned-sess", None],
             "stale-session resume must be transparently retried as fresh",
         )
         # Successful retry pushes the branch and hands straight back to
@@ -416,10 +420,9 @@ class ResolvingConflictAwaitingHumanResumeTest(
         ), patch.object(workflow, "_git", git_mock), patch.object(
             workflow, "_git_hardened", git_mock,
         ):
-            mocks = self._run(
-                lambda: workflow._handle_resolving_conflict(
-                    gh, _TEST_SPEC, issue,
-                ),
+            mocks = self._run_resolving_conflict(
+                gh,
+                issue,
                 run_agent=_agent(),
                 push_branch=True,
             )

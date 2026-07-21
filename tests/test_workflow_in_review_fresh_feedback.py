@@ -33,15 +33,7 @@ from tests.workflow_helpers import (
 )
 
 
-class InReviewRoutesFreshFeedbackToFixingTest(
-    unittest.TestCase, _PatchedWorkflowMixin
-):
-    """Fresh actionable PR feedback during `in_review` must hand the issue
-    off to `fixing` immediately -- no debounce wait, no dev spawn from the
-    in_review handler itself. The pending-fix bookmark recorded in pinned
-    state gives the (future) fixing handler a starting point for the
-    triggering comment.
-    """
+class _FreshFeedbackFixtureMixin(_PatchedWorkflowMixin):
 
     PR_NUMBER = 880
     BRANCH = "orchestrator/geserdugarov__agent-orchestrator/issue-880"
@@ -70,6 +62,12 @@ class InReviewRoutesFreshFeedbackToFixingTest(
             seed_state.update(extra_state)
         gh.seed_state(880, **seed_state)
         return gh, issue, pr
+
+
+class InReviewRoutesFreshFeedbackToFixingTest(
+    unittest.TestCase, _FreshFeedbackFixtureMixin,
+):
+    """Route fresh review feedback to fixing without spawning the dev."""
 
     def test_pr_comment_routes_without_dev_spawn(
         self,
@@ -165,8 +163,8 @@ class InReviewRoutesFreshFeedbackToFixingTest(
             user=FakeUser("carol"), created_at=old,
         ))
 
-        self._run(
-            lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+        self._run_in_review(
+            gh, issue,
             run_agent=_agent(),
         )
 
@@ -198,8 +196,8 @@ class InReviewRoutesFreshFeedbackToFixingTest(
         )
         gh, issue, _ = self._seed_in_review_with_pr(pr=pr)
 
-        self._run(
-            lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+        self._run_in_review(
+            gh, issue,
             run_agent=_agent(),
         )
 
@@ -229,8 +227,8 @@ class InReviewRoutesFreshFeedbackToFixingTest(
         )
         gh, issue, _ = self._seed_in_review_with_pr(pr=pr)
 
-        self._run(
-            lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+        self._run_in_review(
+            gh, issue,
             run_agent=_agent(),
         )
 
@@ -283,8 +281,8 @@ class InReviewRoutesFreshFeedbackToFixingTest(
         )
 
         with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
-            mocks = self._run(
-                lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+            mocks = self._run_in_review(
+                gh, issue,
                 run_agent=_agent(),
             )
 

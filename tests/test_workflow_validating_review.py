@@ -32,7 +32,7 @@ from tests.workflow_helpers import (
 )
 
 
-class HandleValidatingFreshReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
+class _FreshReviewFixtureMixin(_PatchedWorkflowMixin):
     def _seeded(self, **state):
         gh = FakeGitHubClient()
         issue = make_issue(5, label=LABEL_VALIDATING)
@@ -47,10 +47,16 @@ class HandleValidatingFreshReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
         gh.seed_state(5, **defaults)
         return gh, issue
 
+
+class HandleValidatingFreshReviewTest(
+    unittest.TestCase, _FreshReviewFixtureMixin,
+):
+    """Route explicit review verdicts and surface unknown output."""
+
     def test_approved_flips_label_and_does_not_resume(self) -> None:
         gh, issue = self._seeded()
-        mocks = self._run(
-            lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+        mocks = self._run_validating(
+            gh, issue,
             run_agent=_agent(last_message=REVIEW_APPROVED_MESSAGE),
         )
 
@@ -72,8 +78,8 @@ class HandleValidatingFreshReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
         dev_fix = _agent(session_id="dev-sess", last_message="fixed")
 
-        mocks = self._run(
-            lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+        mocks = self._run_validating(
+            gh, issue,
             run_agent=[review, dev_fix],
             dirty_files=(),
             push_branch=True,
@@ -114,8 +120,8 @@ class HandleValidatingFreshReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
 
     def test_unknown_verdict_parks_with_message(self) -> None:
         gh, issue = self._seeded()
-        self._run(
-            lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+        self._run_validating(
+            gh, issue,
             run_agent=_agent(
                 last_message="I'm not sure what to think",
                 stderr="some subprocess noise",
@@ -143,8 +149,8 @@ class HandleValidatingFreshReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
             "Verifying you are human. This may take a few seconds."
         )
         with self.assertLogs("orchestrator.workflow", level="WARNING") as logs:
-            self._run(
-                lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+            self._run_validating(
+                gh, issue,
                 run_agent=_agent(
                     last_message="",
                     stderr=cf_blob,
@@ -172,8 +178,8 @@ class HandleValidatingFreshReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
         # park comment caps stderr at 1KB.
         gh, issue = self._seeded()
         huge = "X" * 8192 + "TAIL_MARKER"
-        self._run(
-            lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+        self._run_validating(
+            gh, issue,
             run_agent=_agent(last_message="", stderr=huge, exit_code=1),
         )
 
@@ -184,8 +190,8 @@ class HandleValidatingFreshReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
 
     def test_empty_review_without_stderr_omits_block(self) -> None:
         gh, issue = self._seeded()
-        self._run(
-            lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+        self._run_validating(
+            gh, issue,
             run_agent=_agent(last_message="", stderr=""),
         )
 
@@ -194,10 +200,15 @@ class HandleValidatingFreshReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertNotIn("_Reviewer stderr", last_comment)
         self.assertNotIn("_Reviewer exit code:_", last_comment)
 
+class HandleValidatingReviewerFailureTest(
+    unittest.TestCase, _FreshReviewFixtureMixin,
+):
+    """Classify timeout, crash, and silent reviewer outcomes."""
+
     def test_reviewer_timeout_parks(self) -> None:
         gh, issue = self._seeded()
-        self._run(
-            lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+        self._run_validating(
+            gh, issue,
             run_agent=_agent(timed_out=True),
         )
 
@@ -218,8 +229,8 @@ class HandleValidatingFreshReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
         # transient-recovery branch re-spawns the reviewer silently
         # without needing a human comment.
         gh, issue = self._seeded()
-        self._run(
-            lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+        self._run_validating(
+            gh, issue,
             run_agent=_agent(last_message="", stderr="boom", exit_code=2),
         )
 
@@ -232,8 +243,8 @@ class HandleValidatingFreshReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
         # is real adjudication and must NOT be silently retried -- a
         # human needs to read the message. Park reason stays cleared.
         gh, issue = self._seeded()
-        self._run(
-            lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+        self._run_validating(
+            gh, issue,
             run_agent=_agent(
                 last_message="not sure what to think", exit_code=0,
             ),
@@ -249,8 +260,8 @@ class HandleValidatingFreshReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
         # Don't tag transient; a clean exit with no text needs human
         # adjudication, not a silent retry that would loop the same way.
         gh, issue = self._seeded()
-        self._run(
-            lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+        self._run_validating(
+            gh, issue,
             run_agent=_agent(last_message="", stderr="", exit_code=0),
         )
 
@@ -259,7 +270,7 @@ class HandleValidatingFreshReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertIsNone(state.get("park_reason"))
 
 
-class HandleValidatingFixLoopEdgeCasesTest(unittest.TestCase, _PatchedWorkflowMixin):
+class _FixLoopFixtureMixin(_PatchedWorkflowMixin):
     def _seeded(self, *, stale_label_cache=False, **state):
         gh = FakeGitHubClient(stale_label_cache=stale_label_cache)
         issue = make_issue(6, label=LABEL_VALIDATING)
@@ -280,6 +291,12 @@ class HandleValidatingFixLoopEdgeCasesTest(unittest.TestCase, _PatchedWorkflowMi
             last_message=REVIEW_CHANGES_REQUESTED_MESSAGE,
         )
 
+
+class HandleValidatingFixLoopEdgeCasesTest(
+    unittest.TestCase, _FixLoopFixtureMixin,
+):
+    """Keep unsafe reviewer-requested fixes parked without round drift."""
+
     def test_dev_fix_timeout_parks_agent_timeout(self) -> None:
         # The dev agent timed out mid-fix. The park must be tagged so the
         # next tick's recovery branch can rerun the reviewer instead of
@@ -289,8 +306,8 @@ class HandleValidatingFixLoopEdgeCasesTest(unittest.TestCase, _PatchedWorkflowMi
         # naive `_has_new_commits()` check is unconditionally true for a
         # PR worktree past its first fix).
         gh, issue = self._seeded()
-        self._run(
-            lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+        self._run_validating(
+            gh, issue,
             run_agent=[
                 self._changes_requested_review(),
                 _agent(session_id="dev-sess", timed_out=True),
@@ -317,8 +334,8 @@ class HandleValidatingFixLoopEdgeCasesTest(unittest.TestCase, _PatchedWorkflowMi
 
     def test_no_commit_fix_parks_without_round_bump(self) -> None:
         gh, issue = self._seeded()
-        mocks = self._run(
-            lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+        mocks = self._run_validating(
+            gh, issue,
             run_agent=[
                 self._changes_requested_review(),
                 _agent(session_id="dev-sess", last_message="why?"),
@@ -342,8 +359,8 @@ class HandleValidatingFixLoopEdgeCasesTest(unittest.TestCase, _PatchedWorkflowMi
 
     def test_dev_fix_dirty_parks_round_unchanged(self) -> None:
         gh, issue = self._seeded()
-        mocks = self._run(
-            lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+        mocks = self._run_validating(
+            gh, issue,
             run_agent=[
                 self._changes_requested_review(),
                 _agent(session_id="dev-sess", last_message="partial"),
@@ -364,8 +381,8 @@ class HandleValidatingFixLoopEdgeCasesTest(unittest.TestCase, _PatchedWorkflowMi
 
     def test_dev_fix_push_fail_parks_round_unchanged(self) -> None:
         gh, issue = self._seeded()
-        self._run(
-            lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+        self._run_validating(
+            gh, issue,
             run_agent=[
                 self._changes_requested_review(),
                 _agent(session_id="dev-sess", last_message="fixed"),
@@ -389,8 +406,8 @@ class HandleValidatingFixLoopEdgeCasesTest(unittest.TestCase, _PatchedWorkflowMi
 
     def test_round_cap_parks_without_reviewer(self) -> None:
         gh, issue = self._seeded(review_round=config.MAX_REVIEW_ROUNDS)
-        mocks = self._run(
-            lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+        mocks = self._run_validating(
+            gh, issue,
             run_agent=_agent(),
         )
 
@@ -398,6 +415,11 @@ class HandleValidatingFixLoopEdgeCasesTest(unittest.TestCase, _PatchedWorkflowMi
         self.assertTrue(gh.pinned_data(6).get("awaiting_human"))
         last_comment = gh.posted_comments[-1][1]
         self.assertIn("review still has comments", last_comment)
+
+class HandleValidatingFixLoopRoutingTest(
+    unittest.TestCase, _FixLoopFixtureMixin,
+):
+    """Expose the fixing subphase and return pushed fixes to validating."""
 
     def test_enters_fixing_before_dev_spawn(self) -> None:
         # The dev-fix subphase must run under the `fixing` label so the
@@ -413,8 +435,8 @@ class HandleValidatingFixLoopEdgeCasesTest(unittest.TestCase, _PatchedWorkflowMi
         # `validating`, so the dev-run stage cannot be read back off the
         # issue -- the reviewer-requested fix path must pass it explicitly.
         gh, issue = self._seeded(stale_label_cache=True)
-        self._run(
-            lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+        self._run_validating(
+            gh, issue,
             run_agent=[
                 self._changes_requested_review(),
                 _agent(session_id="dev-sess", last_message="fixed"),
@@ -454,8 +476,8 @@ class HandleValidatingFixLoopEdgeCasesTest(unittest.TestCase, _PatchedWorkflowMi
         # stranded-fix gate on the next clean resume, not this interrupted
         # one.
         gh, issue = self._seeded(dev_agent="claude", dev_session_id="dev-sess")
-        mocks = self._run(
-            lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+        mocks = self._run_validating(
+            gh, issue,
             run_agent=[
                 self._changes_requested_review(),
                 _agent(
@@ -490,8 +512,8 @@ class HandleValidatingFixLoopEdgeCasesTest(unittest.TestCase, _PatchedWorkflowMi
         # discriminator that drives the review-round reset, so setting it here
         # would mis-account the round on the eventual pushed fix.
         gh, issue = self._seeded()
-        self._run(
-            lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+        self._run_validating(
+            gh, issue,
             run_agent=[
                 self._changes_requested_review(),
                 # No-commit park: the dev asks a question / goes silent.
@@ -516,8 +538,8 @@ class HandleValidatingFixLoopEdgeCasesTest(unittest.TestCase, _PatchedWorkflowMi
         # anchor is cleared (a later session-failure park must not replay it)
         # and the round bumps back on `validating`.
         gh, issue = self._seeded(review_round=2)
-        self._run(
-            lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+        self._run_validating(
+            gh, issue,
             run_agent=[
                 self._changes_requested_review(),
                 _agent(session_id="dev-sess", last_message="fixed"),
@@ -551,8 +573,8 @@ class HandleValidatingAwaitingHumanResumeTest(unittest.TestCase, _PatchedWorkflo
             branch=_issue_branch(7),
         )
 
-        mocks = self._run(
-            lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+        mocks = self._run_validating(
+            gh, issue,
             run_agent=_agent(session_id="dev-sess", last_message="fixed"),
             dirty_files=(),
             push_branch=True,
@@ -604,8 +626,8 @@ class HandleValidatingAwaitingHumanResumeTest(unittest.TestCase, _PatchedWorkflo
             silent_park_count=1,
         )
 
-        self._run(
-            lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+        self._run_validating(
+            gh, issue,
             run_agent=_agent(session_id="dev-sess", last_message="fixed"),
             dirty_files=(),
             push_branch=True,
@@ -620,13 +642,7 @@ class HandleValidatingAwaitingHumanResumeTest(unittest.TestCase, _PatchedWorkflo
         )
 
 
-class HandleValidatingContinueCommandTest(
-    unittest.TestCase, _PatchedWorkflowMixin
-):
-    """`/orchestrator continue` on a parked `validating` dev fix is an operator
-    command, not ordinary resume text (issue #729). A session-failure park
-    (`agent_silent` / `agent_timeout`) retries the dev on a neutral prompt
-    without feeding the literal command; a park needing a real answer refuses."""
+class _ContinueCommandFixtureMixin(_PatchedWorkflowMixin):
 
     def _seed(self, number, *, park_reason, command="/orchestrator continue"):
         gh = FakeGitHubClient()
@@ -652,13 +668,19 @@ class HandleValidatingContinueCommandTest(
         )
         return gh, issue
 
+
+class HandleValidatingContinueCommandTest(
+    unittest.TestCase, _ContinueCommandFixtureMixin,
+):
+    """Retry transient parks without forwarding the continue command."""
+
     def test_bare_continue_retries_without_literal(
         self,
     ) -> None:
         gh, issue = self._seed(7, park_reason="agent_silent")
 
-        mocks = self._run(
-            lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+        mocks = self._run_validating(
+            gh, issue,
             run_agent=_agent(session_id="dev-sess", last_message="fixed"),
             dirty_files=(),
             push_branch=True,
@@ -686,8 +708,8 @@ class HandleValidatingContinueCommandTest(
     def test_bare_continue_on_question_park_refuses(self) -> None:
         gh, issue = self._seed(8, park_reason=None)
 
-        mocks = self._run(
-            lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+        mocks = self._run_validating(
+            gh, issue,
             run_agent=_agent(),
         )
 
@@ -700,17 +722,7 @@ class HandleValidatingContinueCommandTest(
         self.assertTrue(state.get("awaiting_human"))
 
 
-class HandleValidatingReviewCapAddRoundsCommandTest(
-    unittest.TestCase, _PatchedWorkflowMixin
-):
-    """`/orchestrator add-review-rounds N` operator command.
-
-    Honored only while parked with `park_reason == "review_cap"`. Resets
-    `review_round` to `MAX_REVIEW_ROUNDS - N` so the reviewer reruns from
-    validating without losing the PR/worktree. Posting a plain reply on a
-    cap park no longer wakes the dev session (that was the original bug:
-    the resume just bumped past the cap again on the next tick).
-    """
+class _ReviewCapFixtureMixin(_PatchedWorkflowMixin):
 
     def _seeded(self, *, comment_body: Optional[str] = None, **state):
         gh = FakeGitHubClient()
@@ -734,6 +746,12 @@ class HandleValidatingReviewCapAddRoundsCommandTest(
         gh.seed_state(80, **defaults)
         return gh, issue
 
+
+class HandleValidatingReviewCapAddRoundsCommandTest(
+    unittest.TestCase, _ReviewCapFixtureMixin,
+):
+    """Reset a review-cap park with a valid operator command."""
+
     def test_command_resets_round_park_and_reruns(self) -> None:
         # Granting 1 more round on a 3-cap means review_round becomes 2.
         # The reviewer-spawn block fires on the SAME tick (fall-through
@@ -744,8 +762,8 @@ class HandleValidatingReviewCapAddRoundsCommandTest(
             comment_body="/orchestrator add-review-rounds 1",
         )
 
-        mocks = self._run(
-            lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+        mocks = self._run_validating(
+            gh, issue,
             run_agent=_agent(
                 last_message=REVIEW_APPROVED_MESSAGE,
             ),
@@ -791,8 +809,8 @@ class HandleValidatingReviewCapAddRoundsCommandTest(
             ),
         )
 
-        self._run(
-            lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+        self._run_validating(
+            gh, issue,
             run_agent=_agent(last_message=REVIEW_APPROVED_MESSAGE),
             head_shas=["aaa"],
         )
@@ -820,8 +838,8 @@ class HandleValidatingReviewCapAddRoundsCommandTest(
             )
         )
 
-        self._run(
-            lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+        self._run_validating(
+            gh, issue,
             run_agent=_agent(last_message=REVIEW_APPROVED_MESSAGE),
             head_shas=["aaa"],
         )
@@ -837,8 +855,8 @@ class HandleValidatingReviewCapAddRoundsCommandTest(
             comment_body="/orchestrator add-review-rounds 0",
         )
 
-        mocks = self._run(
-            lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+        mocks = self._run_validating(
+            gh, issue,
             run_agent=_agent(),
         )
 
@@ -866,8 +884,8 @@ class HandleValidatingReviewCapAddRoundsCommandTest(
         # can restart the loop.
         gh, issue = self._seeded(comment_body="any luck on this?")
 
-        mocks = self._run(
-            lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+        mocks = self._run_validating(
+            gh, issue,
             run_agent=_agent(),
         )
 
@@ -879,6 +897,11 @@ class HandleValidatingReviewCapAddRoundsCommandTest(
         # command later in a follow-up comment, and we need to see it.
         self.assertEqual(state.get("last_action_comment_id"), 950)
 
+class HandleValidatingReviewCapCommandGuardTest(
+    unittest.TestCase, _ReviewCapFixtureMixin,
+):
+    """Reject misplaced commands and advertise real cap recovery."""
+
     def test_command_only_fires_on_review_cap_park(self) -> None:
         # A command posted under a different park reason (here: a
         # standard dev-question park with `park_reason=None`) must NOT
@@ -889,8 +912,8 @@ class HandleValidatingReviewCapAddRoundsCommandTest(
             review_round=1,
         )
 
-        self._run(
-            lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+        self._run_validating(
+            gh, issue,
             run_agent=_agent(session_id="dev-sess", last_message="fixed"),
             head_shas=["aaa", "bbb"],
             dirty_files=(),
@@ -916,8 +939,8 @@ class HandleValidatingReviewCapAddRoundsCommandTest(
             ),
         )
 
-        mocks = self._run(
-            lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+        mocks = self._run_validating(
+            gh, issue,
             run_agent=_agent(),
         )
 
@@ -943,8 +966,8 @@ class HandleValidatingReviewCapAddRoundsCommandTest(
             branch=_issue_branch(81),
         )
 
-        self._run(
-            lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+        self._run_validating(
+            gh, issue,
             run_agent=_agent(),
         )
 
@@ -968,8 +991,8 @@ class HandleValidatingReviewCapAddRoundsCommandTest(
             branch=_issue_branch(82),
         )
 
-        self._run(
-            lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+        self._run_validating(
+            gh, issue,
             run_agent=_agent(),
         )
 
@@ -1000,8 +1023,8 @@ class HandleValidatingReviewCapAddRoundsCommandTest(
         )
 
         # Tick 1: cap park.
-        self._run(
-            lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+        self._run_validating(
+            gh, issue,
             run_agent=_agent(),
         )
         tick1 = gh.pinned_data(83)
@@ -1027,8 +1050,8 @@ class HandleValidatingReviewCapAddRoundsCommandTest(
         )
 
         # Tick 2: command processes through the cap-reset path.
-        self._run(
-            lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+        self._run_validating(
+            gh, issue,
             run_agent=_agent(last_message=REVIEW_APPROVED_MESSAGE),
             head_shas=["aaa"],
         )
@@ -1064,11 +1087,7 @@ class HandleValidatingReviewCapAddRoundsCommandTest(
         )
 
 
-class ValidatingDevFixInterruptedHelperTest(unittest.TestCase):
-    """The shared validating dev-fix helpers must ignore a shutdown-killed
-    (interrupted) result: no park, no HITL comment, no push, no watermark,
-    and no `_on_question`. The guard short-circuits before any of that, so
-    these call the helpers directly without the worktree/git mocks."""
+class _InterruptedFixFixtureMixin:
 
     def _seeded(self, **state):
         gh = FakeGitHubClient()
@@ -1076,6 +1095,12 @@ class ValidatingDevFixInterruptedHelperTest(unittest.TestCase):
         gh.add_issue(issue)
         gh.seed_state(7, **state)
         return gh, gh.read_pinned_state(issue), issue
+
+
+class ValidatingDevFixInterruptedHelperTest(
+    unittest.TestCase, _InterruptedFixFixtureMixin,
+):
+    """Ignore shutdown-interrupted results before fix disposition."""
 
     def test_false_without_side_effects(
         self,
@@ -1155,8 +1180,8 @@ class ValidatingInterruptedResumeHandlerTest(
             branch=_issue_branch(8),
         )
 
-        mocks = self._run(
-            lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+        mocks = self._run_validating(
+            gh, issue,
             run_agent=_agent(
                 session_id="dev-sess",
                 interrupted=True,
@@ -1200,8 +1225,8 @@ class ValidatingInterruptedResumeHandlerTest(
             branch=_issue_branch(9),
         )
 
-        mocks = self._run(
-            lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+        mocks = self._run_validating(
+            gh, issue,
             run_agent=_agent(
                 session_id="dev-sess",
                 interrupted=True,
@@ -1220,15 +1245,7 @@ class ValidatingInterruptedResumeHandlerTest(
         self.assertEqual(state.get("last_action_comment_id"), 1000)
 
 
-class HandleValidatingResumeTrustFilterTest(
-    unittest.TestCase, _PatchedWorkflowMixin
-):
-    """With `ALLOWED_ISSUE_AUTHORS` set, only trusted authors drive an
-    awaiting-human validating resume. An outsider comment must neither satisfy
-    the `/orchestrator add-review-rounds` cap-reset command nor supply the
-    "retry" nudge that re-spawns a timed-out reviewer; a trusted author still
-    drives both paths exactly as with no allowlist configured.
-    """
+class _ResumeTrustFixtureMixin(_PatchedWorkflowMixin):
 
     _ALLOWLIST = ("geserdugarov",)
 
@@ -1270,6 +1287,12 @@ class HandleValidatingResumeTrustFilterTest(
         )
         return issue
 
+
+class HandleValidatingResumeTrustFilterTest(
+    unittest.TestCase, _ResumeTrustFixtureMixin,
+):
+    """Allow only trusted authors to drive parked validating resumes."""
+
     def test_outsider_add_rounds_ignored(self) -> None:
         gh = FakeGitHubClient()
         issue = self._seed_cap_park(
@@ -1277,8 +1300,8 @@ class HandleValidatingResumeTrustFilterTest(
             body="/orchestrator add-review-rounds 5",
         )
         with patch.object(config, "ALLOWED_ISSUE_AUTHORS", self._ALLOWLIST):
-            mocks = self._run(
-                lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+            mocks = self._run_validating(
+                gh, issue,
                 run_agent=_agent(),
             )
         # The outsider's command never reaches the parser: no reviewer rerun,
@@ -1303,8 +1326,8 @@ class HandleValidatingResumeTrustFilterTest(
             body="/orchestrator add-review-rounds 1",
         )
         with patch.object(config, "ALLOWED_ISSUE_AUTHORS", self._ALLOWLIST):
-            mocks = self._run(
-                lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+            mocks = self._run_validating(
+                gh, issue,
                 run_agent=_agent(last_message=REVIEW_APPROVED_MESSAGE),
                 head_shas=["aaa"],
             )
@@ -1326,8 +1349,8 @@ class HandleValidatingResumeTrustFilterTest(
         gh = FakeGitHubClient()
         issue = self._seed_reviewer_timeout_park(gh, author="mallory")
         with patch.object(config, "ALLOWED_ISSUE_AUTHORS", self._ALLOWLIST):
-            mocks = self._run(
-                lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+            mocks = self._run_validating(
+                gh, issue,
                 run_agent=_agent(),
             )
         # Filtered to empty, so the reviewer_timeout park self-heals through the
@@ -1341,8 +1364,8 @@ class HandleValidatingResumeTrustFilterTest(
         gh = FakeGitHubClient()
         issue = self._seed_reviewer_timeout_park(gh, author="geserdugarov")
         with patch.object(config, "ALLOWED_ISSUE_AUTHORS", self._ALLOWLIST):
-            mocks = self._run(
-                lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+            mocks = self._run_validating(
+                gh, issue,
                 run_agent=_agent(last_message=REVIEW_APPROVED_MESSAGE),
                 head_shas=["aaa"],
             )

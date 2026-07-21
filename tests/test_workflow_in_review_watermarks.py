@@ -7,7 +7,6 @@ from __future__ import annotations
 import unittest
 from datetime import datetime, timedelta, timezone
 
-from orchestrator import workflow
 
 from tests.fakes import (
     FakeComment,
@@ -19,7 +18,6 @@ from tests.fakes import (
 )
 from tests.workflow_helpers import (
     _PatchedWorkflowMixin,
-    _TEST_SPEC,
     _agent,
 )
 
@@ -53,8 +51,8 @@ class InReviewParkWatermarkTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
 
         # Tick 1: unmergeable park.
-        self._run(
-            lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+        self._run_in_review(
+            gh, issue,
             run_agent=_agent(),
         )
         self.assertTrue(gh.pinned_data(60).get("awaiting_human"))
@@ -68,8 +66,8 @@ class InReviewParkWatermarkTest(unittest.TestCase, _PatchedWorkflowMixin):
 
         # Tick 2: nothing new; must NOT route the orchestrator's park
         # message back through the fixing route.
-        mocks = self._run(
-            lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+        mocks = self._run_in_review(
+            gh, issue,
             run_agent=_agent(),
         )
         mocks["run_agent"].assert_not_called()
@@ -78,12 +76,7 @@ class InReviewParkWatermarkTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertNotIn((60, "fixing"), gh.label_history)
 
 
-class InReviewSplitWatermarkTest(unittest.TestCase, _PatchedWorkflowMixin):
-    """Issue comments and PR inline review comments live in different id
-    namespaces in GitHub's REST API. The handler tracks them with two
-    independent watermarks so a high id on one side cannot eclipse newer
-    comments on the other.
-    """
+class _SplitWatermarkFixtureMixin(_PatchedWorkflowMixin):
 
     BRANCH = "orchestrator/geserdugarov__agent-orchestrator/issue-65"
     PR_NUMBER = 95
@@ -108,6 +101,12 @@ class InReviewSplitWatermarkTest(unittest.TestCase, _PatchedWorkflowMixin):
         gh.seed_state(65, **state)
         return gh, issue, pr
 
+
+class InReviewSplitWatermarkTest(
+    unittest.TestCase, _SplitWatermarkFixtureMixin,
+):
+    """Track issue and inline-review ids in independent namespaces."""
+
     def test_inline_review_comment_routes_to_fixing(self) -> None:
         long_ago = datetime.now(timezone.utc) - timedelta(hours=1)
         gh, issue, pr = self._setup(
@@ -123,8 +122,8 @@ class InReviewSplitWatermarkTest(unittest.TestCase, _PatchedWorkflowMixin):
             state_extra={"pr_last_review_comment_id": 41},
         )
 
-        mocks = self._run(
-            lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+        mocks = self._run_in_review(
+            gh, issue,
             run_agent=_agent(),
         )
 
@@ -158,8 +157,8 @@ class InReviewSplitWatermarkTest(unittest.TestCase, _PatchedWorkflowMixin):
             },
         )
 
-        mocks = self._run(
-            lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+        mocks = self._run_in_review(
+            gh, issue,
             run_agent=_agent(),
         )
 

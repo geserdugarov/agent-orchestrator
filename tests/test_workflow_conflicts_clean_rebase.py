@@ -58,10 +58,8 @@ class AuthedFetchRoutingTest(
         with patch.object(
             workflow, "_rebase_base_into_worktree", merge_mock,
         ):
-            mocks = self._run(
-                lambda: workflow._handle_resolving_conflict(
-                    gh, _TEST_SPEC, issue,
-                ),
+            mocks = self._run_resolving_conflict(
+                gh, issue,
                 run_agent=_agent(),
                 push_branch=True,
                 head_shas=["sha", "sha"],
@@ -208,6 +206,11 @@ class ResolvingConflictCleanRebaseTest(
         last_comment = gh.posted_comments[-1][1]
         self.assertIn("MAX_CONFLICT_ROUNDS", last_comment)
 
+class ResolvingConflictTerminalRoutingTest(
+    unittest.TestCase, _ResolvingConflictMixin,
+):
+    """Finalize terminal pull requests and park missing PR state."""
+
     def test_pr_merged_externally_finalizes_to_done(self) -> None:
         # Mirror the in_review terminal: a human merged the PR (perhaps
         # after manually resolving conflicts) while we were resolving.
@@ -286,10 +289,9 @@ class ResolvingConflictCleanRebaseTest(
         ), patch.object(workflow, "_git", git_mock), patch.object(
             workflow, "_git_hardened", git_mock,
         ):
-            mocks = self._run(
-                lambda: workflow._handle_resolving_conflict(
-                    gh, _TEST_SPEC, issue,
-                ),
+            mocks = self._run_resolving_conflict(
+                gh,
+                issue,
                 run_agent=_agent(),
                 push_branch=True,
             )

@@ -8,7 +8,7 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
-from orchestrator import config, workflow
+from orchestrator import config
 
 from tests.fakes import (
     FakeComment,
@@ -19,7 +19,6 @@ from tests.fakes import (
 )
 from tests.workflow_helpers import (
     _PatchedWorkflowMixin,
-    _TEST_SPEC,
     _agent,
 )
 
@@ -56,8 +55,8 @@ class HandleInReviewResumeOnHashChangeTest(
             branch="orchestrator/geserdugarov__agent-orchestrator/issue-80",
         )
 
-        self._run(
-            lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+        self._run_in_review(
+            gh, issue,
             run_agent=_agent(
                 session_id="dev-sess", last_message="addressed"
             ),
@@ -109,8 +108,8 @@ class HandleInReviewResumeOnHashChangeTest(
             review_round=2,
         )
 
-        self._run(
-            lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+        self._run_in_review(
+            gh, issue,
             run_agent=_agent(
                 session_id="dev-sess",
                 last_message="ACK: prior commits already satisfy the edit.",
@@ -161,8 +160,8 @@ class HandleInReviewResumeOnHashChangeTest(
             branch="orchestrator/geserdugarov__agent-orchestrator/issue-82",
         )
 
-        self._run(
-            lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+        self._run_in_review(
+            gh, issue,
             run_agent=_agent(timed_out=True),
             head_shas=["before"],
         )
@@ -198,8 +197,8 @@ class HandleInReviewResumeOnHashChangeTest(
             branch="orchestrator/geserdugarov__agent-orchestrator/issue-83",
         )
 
-        mocks = self._run(
-            lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+        mocks = self._run_in_review(
+            gh, issue,
             run_agent=_agent(
                 session_id="dev-sess",
                 interrupted=True,
@@ -244,8 +243,8 @@ class HandleInReviewResumeOnHashChangeTest(
             branch="orchestrator/geserdugarov__agent-orchestrator/issue-84",
         )
 
-        mocks = self._run(
-            lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+        mocks = self._run_in_review(
+            gh, issue,
             run_agent=_agent(
                 session_id="dev-sess",
                 last_message="ACK: existing work already satisfies the edit",
@@ -314,8 +313,8 @@ class FreshFeedbackBothSurfacesTest(
             last_action_comment_id=100,
         )
 
-        mocks = self._run(
-            lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+        mocks = self._run_in_review(
+            gh, issue,
             run_agent=_agent(),
         )
 
@@ -361,8 +360,8 @@ class FreshFeedbackBothSurfacesTest(
             last_action_comment_id=100,
         )
 
-        mocks = self._run(
-            lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+        mocks = self._run_in_review(
+            gh, issue,
             run_agent=_agent(),
         )
 
@@ -415,8 +414,8 @@ class InReviewDriftPromptTrustFilterTest(
         )
 
         with patch.object(config, "ALLOWED_ISSUE_AUTHORS", ("geserdugarov",)):
-            mocks = self._run(
-                lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+            mocks = self._run_in_review(
+                gh, issue,
                 run_agent=_agent(session_id="dev-sess", last_message="addressed"),
                 has_new_commits=True,
                 dirty_files=(),

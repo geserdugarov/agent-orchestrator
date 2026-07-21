@@ -11,6 +11,8 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from orchestrator import agents, config, verify, workflow
+from orchestrator.config import _parse_verify_commands as parse_verify_commands
+from orchestrator.worktrees import VerifyResult
 
 from tests.fakes import (
     FakeGitHubClient,
@@ -24,7 +26,6 @@ from tests.workflow_helpers import (
     REVIEW_CHANGES_REQUESTED_MESSAGE,
     TEST_BASE_BRANCH,
     _PatchedWorkflowMixin,
-    _TEST_SPEC,
     _agent,
     _issue_branch,
 )
@@ -47,6 +48,17 @@ PARK_VERIFY_HEAD_CHANGED = "verify_head_changed"
 PARK_VERIFY_DIRTY = "verify_dirty"
 
 
+class _RegisteredCommunicate:
+    def __init__(self, process, seen):
+        self.process = process
+        self.seen = seen
+
+    def __call__(self, *_args, **_kwargs):
+        with agents._running_procs_lock:
+            self.seen["during"] = self.process in agents._running_procs
+        return "", ""
+
+
 def shutil_quote(s: str) -> str:
     """Local shell-quote helper for the truncate test -- avoids importing
     `shlex` at module scope when it is only used by one test."""
@@ -54,14 +66,7 @@ def shutil_quote(s: str) -> str:
     return shlex.quote(s)
 
 
-class HandleValidatingVerifyGateTest(unittest.TestCase, _PatchedWorkflowMixin):
-    """Local verification gate that runs in the per-issue worktree on
-    `VERDICT: APPROVED`, before the issue is labeled `in_review`. Default-
-    empty `VERIFY_COMMANDS` keeps the legacy behaviour; a non-empty config
-    runs each command sequentially with a bounded timeout and parks the
-    issue in `validating` on any failure (non-zero exit, timeout, or a
-    dirty tree left behind).
-    """
+class _VerifyGateFixtureMixin(_PatchedWorkflowMixin):
 
     def _seeded(self, **state):
         gh = FakeGitHubClient()
@@ -77,14 +82,20 @@ class HandleValidatingVerifyGateTest(unittest.TestCase, _PatchedWorkflowMixin):
         gh.seed_state(ISSUE, **defaults)
         return gh, issue
 
+
+class HandleValidatingVerifyGateTest(
+    unittest.TestCase, _VerifyGateFixtureMixin,
+):
+    """Run verification only after an approved review verdict."""
+
     def test_empty_default_is_noop_on_approval(self) -> None:
         # With no `VERIFY_COMMANDS` configured, the gate short-circuits
         # to ok inside the runner; the helper is still called once (so a
         # future config flip toggles the gate without code changes), but
         # the approval / squash / in_review handoff path is unchanged.
         gh, issue = self._seeded()
-        mocks = self._run(
-            lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+        mocks = self._run_validating(
+            gh, issue,
             run_agent=_agent(last_message=REVIEW_APPROVED_MESSAGE),
             head_shas=(REVIEW_SHA,),
         )
@@ -105,28 +116,26 @@ class HandleValidatingVerifyGateTest(unittest.TestCase, _PatchedWorkflowMixin):
         # `_parse_verify_commands` accepts both `;` and `\n` separators so
         # the value fits on one line in a `.env` file. Blank lines and
         # `#`-commented lines are skipped.
-        from orchestrator.config import _parse_verify_commands
 
-        self.assertEqual(_parse_verify_commands(""), ())
+        self.assertEqual(parse_verify_commands(""), ())
         self.assertEqual(
-            _parse_verify_commands(f"{VERIFY_PYTEST};ruff check ."),
+            parse_verify_commands(f"{VERIFY_PYTEST};ruff check ."),
             (VERIFY_PYTEST, "ruff check ."),
         )
         self.assertEqual(
-            _parse_verify_commands(f"{VERIFY_PYTEST}\nruff check .\n"),
+            parse_verify_commands(f"{VERIFY_PYTEST}\nruff check .\n"),
             (VERIFY_PYTEST, "ruff check ."),
         )
         self.assertEqual(
-            _parse_verify_commands(f"\n#comment\n{VERIFY_PYTEST}\n\n"),
+            parse_verify_commands(f"\n#comment\n{VERIFY_PYTEST}\n\n"),
             (VERIFY_PYTEST,),
         )
 
     def test_verify_success_keeps_approval_flow(self) -> None:
         gh, issue = self._seeded()
-        from orchestrator.worktrees import VerifyResult
         with patch.object(config, "VERIFY_COMMANDS", (VERIFY_PYTEST,)):
-            mocks = self._run(
-                lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+            mocks = self._run_validating(
+                gh, issue,
                 run_agent=_agent(last_message=REVIEW_APPROVED_MESSAGE),
                 head_shas=(REVIEW_SHA,),
                 verify_result=VerifyResult(status=VERIFY_OK),
@@ -145,7 +154,6 @@ class HandleValidatingVerifyGateTest(unittest.TestCase, _PatchedWorkflowMixin):
 
     def test_verify_failed_parks(self) -> None:
         gh, issue = self._seeded()
-        from orchestrator.worktrees import VerifyResult
         run = VerifyResult(
             status=VERIFY_FAILED,
             command=VERIFY_PYTEST,
@@ -153,8 +161,8 @@ class HandleValidatingVerifyGateTest(unittest.TestCase, _PatchedWorkflowMixin):
             output="E   AssertionError: bad\nTAIL_MARKER",
         )
         with patch.object(config, "VERIFY_COMMANDS", (VERIFY_PYTEST,)):
-            self._run(
-                lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+            self._run_validating(
+                gh, issue,
                 run_agent=_agent(last_message=REVIEW_APPROVED_MESSAGE),
                 head_shas=(REVIEW_SHA,),
                 verify_result=run,
@@ -180,7 +188,6 @@ class HandleValidatingVerifyGateTest(unittest.TestCase, _PatchedWorkflowMixin):
 
     def test_verify_timeout_parks(self) -> None:
         gh, issue = self._seeded()
-        from orchestrator.worktrees import VerifyResult
         run = VerifyResult(
             status=VERIFY_TIMEOUT,
             command=VERIFY_SLOW,
@@ -189,8 +196,8 @@ class HandleValidatingVerifyGateTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
         with patch.object(config, "VERIFY_COMMANDS", (VERIFY_SLOW,)), \
              patch.object(config, "VERIFY_TIMEOUT", 123):
-            self._run(
-                lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+            self._run_validating(
+                gh, issue,
                 run_agent=_agent(last_message=REVIEW_APPROVED_MESSAGE),
                 head_shas=(REVIEW_SHA,),
                 verify_result=run,
@@ -205,6 +212,11 @@ class HandleValidatingVerifyGateTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertIn(VERIFY_SLOW, last_comment)
         self.assertIn("timed out after 123s", last_comment)
 
+class HandleValidatingVerifyRefusalTest(
+    unittest.TestCase, _VerifyGateFixtureMixin,
+):
+    """Park when verification mutates HEAD, dirties the tree, or is premature."""
+
     def test_verify_head_changed_parks(self) -> None:
         # End-to-end: a verify command that moved HEAD must NOT flow
         # through to `in_review` -- otherwise squash-on-approval would
@@ -212,7 +224,6 @@ class HandleValidatingVerifyGateTest(unittest.TestCase, _PatchedWorkflowMixin):
         # distinct `verify_head_changed` reason so the operator can
         # adjudicate whether the auto-commit belongs in the PR.
         gh, issue = self._seeded()
-        from orchestrator.worktrees import VerifyResult
         run = VerifyResult(
             status=VERIFY_HEAD_CHANGED,
             command="sh -c 'git commit -am autofix'",
@@ -222,8 +233,8 @@ class HandleValidatingVerifyGateTest(unittest.TestCase, _PatchedWorkflowMixin):
             head_after="bbbb2222",
         )
         with patch.object(config, "VERIFY_COMMANDS", ("sh -c 'git commit -am autofix'",)):
-            self._run(
-                lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+            self._run_validating(
+                gh, issue,
                 run_agent=_agent(last_message=REVIEW_APPROVED_MESSAGE),
                 head_shas=(REVIEW_SHA,),
                 verify_result=run,
@@ -248,7 +259,6 @@ class HandleValidatingVerifyGateTest(unittest.TestCase, _PatchedWorkflowMixin):
 
     def test_verify_dirty_worktree_parks(self) -> None:
         gh, issue = self._seeded()
-        from orchestrator.worktrees import VerifyResult
         run = VerifyResult(
             status=VERIFY_DIRTY,
             command=VERIFY_PYTEST,
@@ -256,8 +266,8 @@ class HandleValidatingVerifyGateTest(unittest.TestCase, _PatchedWorkflowMixin):
             dirty_files=("build/artifact.bin", "tests/cache"),
         )
         with patch.object(config, "VERIFY_COMMANDS", (VERIFY_PYTEST,)):
-            self._run(
-                lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+            self._run_validating(
+                gh, issue,
                 run_agent=_agent(last_message=REVIEW_APPROVED_MESSAGE),
                 head_shas=(REVIEW_SHA,),
                 verify_result=run,
@@ -273,7 +283,6 @@ class HandleValidatingVerifyGateTest(unittest.TestCase, _PatchedWorkflowMixin):
 
     def test_changes_requested_does_not_run_verify(self) -> None:
         gh, issue = self._seeded()
-        from orchestrator.worktrees import VerifyResult
         review = _agent(
             session_id="rev-sess",
             last_message=REVIEW_CHANGES_REQUESTED_MESSAGE,
@@ -285,8 +294,8 @@ class HandleValidatingVerifyGateTest(unittest.TestCase, _PatchedWorkflowMixin):
             status=VERIFY_FAILED, command=VERIFY_PYTEST, exit_code=1, output="bad",
         )
         with patch.object(config, "VERIFY_COMMANDS", (VERIFY_PYTEST,)):
-            mocks = self._run(
-                lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+            mocks = self._run_validating(
+                gh, issue,
                 run_agent=[review, dev_fix],
                 dirty_files=(),
                 push_branch=True,
@@ -303,13 +312,12 @@ class HandleValidatingVerifyGateTest(unittest.TestCase, _PatchedWorkflowMixin):
 
     def test_unknown_verdict_does_not_run_verify(self) -> None:
         gh, issue = self._seeded()
-        from orchestrator.worktrees import VerifyResult
         verify_fail = VerifyResult(
             status=VERIFY_FAILED, command=VERIFY_PYTEST, exit_code=1, output="bad",
         )
         with patch.object(config, "VERIFY_COMMANDS", (VERIFY_PYTEST,)):
-            mocks = self._run(
-                lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+            mocks = self._run_validating(
+                gh, issue,
                 run_agent=_agent(
                     last_message="I'm not sure what to think.",
                 ),
@@ -330,8 +338,7 @@ class HandleValidatingVerifyGateTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertIn("did not emit a VERDICT line", gh.posted_comments[-1][1])
 
 
-class RunVerifyCommandsTest(unittest.TestCase):
-    """Direct tests for the verify-command runner against a real shell."""
+class _VerifyCommandsFixtureMixin:
 
     def setUp(self) -> None:
         self.tmp = Path(tempfile.mkdtemp())
@@ -359,6 +366,12 @@ class RunVerifyCommandsTest(unittest.TestCase):
 
     def tearDown(self) -> None:
         shutil.rmtree(self.tmp, ignore_errors=True)
+
+
+class RunVerifyCommandsTest(
+    _VerifyCommandsFixtureMixin, unittest.TestCase,
+):
+    """Run commands, enforce timeouts, and report dirty worktrees."""
 
     def test_empty_commands_short_circuits_to_ok(self) -> None:
         run = workflow._run_verify_commands(self.tmp, (), 60)
@@ -441,6 +454,11 @@ class RunVerifyCommandsTest(unittest.TestCase):
         # Tail preserved, leading bulk trimmed.
         self.assertIn("TAIL", run.output)
         self.assertLessEqual(len(run.output), 4096)
+
+class VerifyCommandEnvironmentTest(
+    _VerifyCommandsFixtureMixin, unittest.TestCase,
+):
+    """Redact output and strip secrets or credential locators from env."""
 
     def test_boundary_secret_fully_redacted(self) -> None:
         # Regression: `_redact_secrets` does `str.replace(value, "***")`
@@ -643,6 +661,11 @@ class RunVerifyCommandsTest(unittest.TestCase):
         self.assertNotIn("sk-ant-SHOULD_NOT_LEAK_TO_VERIFY", run.output)
         self.assertNotIn("sk-oai-SHOULD_NOT_LEAK_TO_VERIFY", run.output)
 
+class VerifyCommandMutationTest(
+    _VerifyCommandsFixtureMixin, unittest.TestCase,
+):
+    """Report verify-time commits, dirty output, and process registration."""
+
     def test_commit_command_reports_head_change(self) -> None:
         # Regression: a verify command that runs `git commit` leaves
         # `git status --porcelain` clean and exits 0, so the previous
@@ -710,12 +733,7 @@ class RunVerifyCommandsTest(unittest.TestCase):
         proc.returncode = 0
         seen: dict[str, bool] = {}
 
-        def check_registered(*_a, **_k):
-            with agents._running_procs_lock:
-                seen["during"] = proc in agents._running_procs
-            return ("", "")
-
-        proc.communicate.side_effect = check_registered
+        proc.communicate.side_effect = _RegisteredCommunicate(proc, seen)
         with patch.object(verify.subprocess, "Popen", return_value=proc), \
              patch.object(verify, "_worktree_dirty_files", return_value=[]), \
              patch.object(verify, "_head_sha", return_value="sha"):
@@ -763,6 +781,14 @@ class DrainVerifyOutputTest(unittest.TestCase):
         proc.kill.assert_called_once()
 
 
+def _run_git(*args: str, cwd: Path) -> None:
+    subprocess.run(
+        ["git", *args], cwd=str(cwd), check=True,
+        capture_output=True, text=True,
+        env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+    )
+
+
 class WorktreeDirtyFilesHardeningTest(unittest.TestCase):
     """`_worktree_dirty_files` runs its `git status` probe through the
     hardened git path, so an agent-planted `core.fsmonitor` in the worktree
@@ -772,24 +798,17 @@ class WorktreeDirtyFilesHardeningTest(unittest.TestCase):
     execution and the global-config trust boundary are dropped.
     """
 
-    def _git(self, *args: str, cwd: Path) -> None:
-        subprocess.run(
-            ["git", *args], cwd=str(cwd), check=True,
-            capture_output=True, text=True,
-            env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
-        )
-
     def setUp(self) -> None:
         self.tmpdir = Path(tempfile.mkdtemp(prefix="orch-dirty-hardening-"))
         self.addCleanup(shutil.rmtree, str(self.tmpdir), ignore_errors=True)
         self.work = self.tmpdir / "work"
         self.work.mkdir()
-        self._git("init", "-q", "-b", TEST_BASE_BRANCH, cwd=self.work)
-        self._git("config", "user.email", "t@t", cwd=self.work)
-        self._git("config", "user.name", "t", cwd=self.work)
+        _run_git("init", "-q", "-b", TEST_BASE_BRANCH, cwd=self.work)
+        _run_git("config", "user.email", "t@t", cwd=self.work)
+        _run_git("config", "user.name", "t", cwd=self.work)
         (self.work / "seed").write_text("x\n")
-        self._git("add", ".", cwd=self.work)
-        self._git("commit", "-q", "-m", "seed", cwd=self.work)
+        _run_git("add", ".", cwd=self.work)
+        _run_git("commit", "-q", "-m", "seed", cwd=self.work)
 
     def test_blocks_planted_fsmonitor_reports_dirty(self) -> None:
         # Hook + marker live outside the worktree so they are not themselves
@@ -803,13 +822,13 @@ class WorktreeDirtyFilesHardeningTest(unittest.TestCase):
             "printf '/\\000'\n"
         )
         hook.chmod(0o755)
-        self._git("config", "core.fsmonitor", str(hook), cwd=self.work)
+        _run_git("config", "core.fsmonitor", str(hook), cwd=self.work)
 
         (self.work / "leftover.txt").write_text("leak\n")
         # Prove the planted hook is genuinely honored: a plain, unhardened
         # index refresh fires it. Without this the empty-marker assertion
         # below could pass simply because the hook was never wired.
-        self._git("status", "--porcelain", cwd=self.work)
+        _run_git("status", "--porcelain", cwd=self.work)
         self.assertTrue(
             marker.exists() and marker.read_text(),
             "planted fsmonitor never fired for a plain git status; the test "

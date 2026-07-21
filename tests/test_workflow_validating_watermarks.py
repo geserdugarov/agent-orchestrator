@@ -27,14 +27,7 @@ from tests.workflow_helpers import (
 )
 
 
-class ValidatingHandoffPreservesHumanFeedbackTest(
-    unittest.TestCase, _PatchedWorkflowMixin
-):
-    """A human review comment posted while validating is still running must
-    not be silently consumed when the validating handler approves and seeds
-    the in_review watermarks. Otherwise the dev would never see the
-    human's feedback before in_review pings HITL for the manual merge.
-    """
+class _HumanFeedbackHandoffFixtureMixin(_PatchedWorkflowMixin):
 
     PR_NUMBER = 22
     BRANCH = "orchestrator/geserdugarov__agent-orchestrator/issue-15"
@@ -78,14 +71,20 @@ class ValidatingHandoffPreservesHumanFeedbackTest(
         )
         return gh, issue, pr
 
+
+class ValidatingHandoffPreservesHumanFeedbackTest(
+    unittest.TestCase, _HumanFeedbackHandoffFixtureMixin,
+):
+    """Keep concurrent human PR feedback visible after handoff."""
+
     def test_human_pr_comment_survives_handoff(self) -> None:
         gh, issue, pr = self._setup()
 
         # Step 1: validating approves. The orchestrator's approval comment
         # lands AFTER the human's. With the fix, the watermark stops at
         # the first human comment instead of swallowing it.
-        self._run(
-            lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+        self._run_validating(
+            gh, issue,
             run_agent=_agent(last_message=REVIEW_APPROVED_MESSAGE),
         )
         # Validating's approval flips through `documenting` first (the
@@ -109,8 +108,8 @@ class ValidatingHandoffPreservesHumanFeedbackTest(
             issue.labels = [FakeLabel("in_review")]
 
         with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
-            mocks = self._run(
-                lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+            mocks = self._run_in_review(
+                gh, issue,
                 run_agent=_agent(),
             )
 
@@ -124,14 +123,7 @@ class ValidatingHandoffPreservesHumanFeedbackTest(
         )
 
 
-class PrePickupChatterHandoffTest(unittest.TestCase, _PatchedWorkflowMixin):
-    """Pre-pickup human comments on the issue (the original discussion that
-    landed in the dev agent's spawn context) must be advanced past at
-    validating -> in_review handoff. If the watermark stops at the first
-    non-self comment, those same already-consumed comments replay as fresh
-    PR feedback once the in_review debounce expires -- a ready-for-merge
-    candidate would instead bounce back through validating in a loop.
-    """
+class _PrePickupHandoffFixtureMixin(_PatchedWorkflowMixin):
 
     PR_NUMBER = 25
     BRANCH = "orchestrator/geserdugarov__agent-orchestrator/issue-20"
@@ -171,13 +163,19 @@ class PrePickupChatterHandoffTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
         return gh, issue, pr, long_ago
 
+
+class PrePickupChatterHandoffTest(
+    unittest.TestCase, _PrePickupHandoffFixtureMixin,
+):
+    """Advance the handoff watermark past pre-pickup discussion."""
+
     def test_pre_pickup_chatter_not_replayed(self) -> None:
         gh, issue, pr, long_ago = self._setup()
 
         # Step 1: validating approves. Watermark must include id 850 so the
         # pre-pickup human comment is treated as consumed.
-        self._run(
-            lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+        self._run_validating(
+            gh, issue,
             run_agent=_agent(last_message=REVIEW_APPROVED_MESSAGE),
             head_shas=("cafe1234",),
         )
@@ -204,8 +202,8 @@ class PrePickupChatterHandoffTest(unittest.TestCase, _PatchedWorkflowMixin):
         if not any(l.name == "in_review" for l in issue.labels):
             issue.labels = [FakeLabel("in_review")]
         with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
-            mocks = self._run(
-                lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+            mocks = self._run_in_review(
+                gh, issue,
                 run_agent=_agent(),
             )
 
@@ -223,19 +221,7 @@ class PrePickupChatterHandoffTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertEqual(len(ping_comments), 1)
 
 
-class ValidatingHandoffSeedsAllWatermarksTest(
-    unittest.TestCase, _PatchedWorkflowMixin
-):
-    """The validating -> in_review handoff has to seed every comment-surface
-    watermark. The orchestrator never posts inline review comments or PR
-    review summaries, so `_seed_watermark_past_self` returns None for those
-    surfaces; without an explicit default seed, the in_review legacy
-    migration would advance past human feedback submitted on those surfaces
-    during validate (the COMMENTED PR review summary case is the worst:
-    `pr_has_changes_requested` does not veto the HITL ping, so the manual
-    merge could land the PR over the human's note without surfacing it to
-    the dev).
-    """
+class _AllWatermarksHandoffFixtureMixin(_PatchedWorkflowMixin):
 
     PR_NUMBER = 600
     BRANCH = "orchestrator/geserdugarov__agent-orchestrator/issue-200"
@@ -271,6 +257,12 @@ class ValidatingHandoffSeedsAllWatermarksTest(
         )
         return gh, issue, pr, long_ago
 
+
+class ValidatingHandoffSeedsAllWatermarksTest(
+    unittest.TestCase, _AllWatermarksHandoffFixtureMixin,
+):
+    """Seed every feedback surface without consuming human reviews."""
+
     def test_review_summary_survives_handoff(self) -> None:
         # A "Comment" review without `CHANGES_REQUESTED` is the dangerous
         # case: it doesn't trip `pr_has_changes_requested` so the HITL
@@ -289,8 +281,8 @@ class ValidatingHandoffSeedsAllWatermarksTest(
         # Step 1: validating approves. Handoff must seed
         # pr_last_review_summary_id so the legacy in_review migration cannot
         # accidentally advance past the human review.
-        self._run(
-            lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+        self._run_validating(
+            gh, issue,
             run_agent=_agent(last_message=REVIEW_APPROVED_MESSAGE),
         )
         state = gh.pinned_data(200)
@@ -305,8 +297,8 @@ class ValidatingHandoffSeedsAllWatermarksTest(
         if not any(l.name == "in_review" for l in issue.labels):
             issue.labels = [FakeLabel("in_review")]
         with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
-            mocks = self._run(
-                lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+            mocks = self._run_in_review(
+                gh, issue,
                 run_agent=_agent(),
             )
 
@@ -332,8 +324,8 @@ class ValidatingHandoffSeedsAllWatermarksTest(
             ],
         )
 
-        self._run(
-            lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+        self._run_validating(
+            gh, issue,
             run_agent=_agent(last_message=REVIEW_APPROVED_MESSAGE),
         )
         state = gh.pinned_data(200)
@@ -343,8 +335,8 @@ class ValidatingHandoffSeedsAllWatermarksTest(
         if not any(l.name == "in_review" for l in issue.labels):
             issue.labels = [FakeLabel("in_review")]
         with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
-            mocks = self._run(
-                lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+            mocks = self._run_in_review(
+                gh, issue,
                 run_agent=_agent(),
             )
 
@@ -404,8 +396,8 @@ class HandoffInlineIdCollisionTest(unittest.TestCase, _PatchedWorkflowMixin):
 
         # Step 1: validating handoff. The inline comment must NOT bump
         # pr_last_review_comment_id past 4242.
-        self._run(
-            lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+        self._run_validating(
+            gh, issue,
             run_agent=_agent(last_message=REVIEW_APPROVED_MESSAGE),
         )
         state = gh.pinned_data(300)
@@ -420,8 +412,8 @@ class HandoffInlineIdCollisionTest(unittest.TestCase, _PatchedWorkflowMixin):
         if not any(l.name == "in_review" for l in issue.labels):
             issue.labels = [FakeLabel("in_review")]
         with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
-            mocks = self._run(
-                lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+            mocks = self._run_in_review(
+                gh, issue,
                 run_agent=_agent(),
             )
 
@@ -498,8 +490,8 @@ class HandoffWithoutPickupIdLegacyStateTest(
 
         # Step 1: validating approves. Handoff must NOT advance the
         # watermark past 950.
-        self._run(
-            lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+        self._run_validating(
+            gh, issue,
             run_agent=_agent(last_message=REVIEW_APPROVED_MESSAGE),
         )
         watermark = gh.pinned_data(500).get("pr_last_comment_id")
@@ -517,8 +509,8 @@ class HandoffWithoutPickupIdLegacyStateTest(
         if not any(l.name == "in_review" for l in issue.labels):
             issue.labels = [FakeLabel("in_review")]
         with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
-            mocks = self._run(
-                lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+            mocks = self._run_in_review(
+                gh, issue,
                 run_agent=_agent(),
             )
 
@@ -613,8 +605,8 @@ class HandoffWalkerHonorsOrchestratorMarkerTest(
             pickup_comment_id=900,
         )
 
-        self._run(
-            lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+        self._run_validating(
+            gh, issue,
             run_agent=_agent(last_message=REVIEW_APPROVED_MESSAGE),
         )
 
@@ -690,8 +682,8 @@ class HandoffSkipsConsumedRepliesTest(unittest.TestCase, _PatchedWorkflowMixin):
 
         # Step 1: validating approves. The handoff seed must walk PAST
         # comment 920 (already consumed) instead of stopping at it.
-        self._run(
-            lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+        self._run_validating(
+            gh, issue,
             run_agent=_agent(last_message=REVIEW_APPROVED_MESSAGE),
             head_shas=("cafe1234",),
         )
@@ -708,8 +700,8 @@ class HandoffSkipsConsumedRepliesTest(unittest.TestCase, _PatchedWorkflowMixin):
         if not any(l.name == "in_review" for l in issue.labels):
             issue.labels = [FakeLabel("in_review")]
         with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
-            mocks = self._run(
-                lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+            mocks = self._run_in_review(
+                gh, issue,
                 run_agent=_agent(),
             )
 
@@ -826,8 +818,8 @@ class HandoffConsumedThroughIssueThreadOnlyTest(
         # seed must stop before 915 so the next in_review tick scans the
         # PR-conv surface and finds the human comment. Approval routes
         # through `documenting` first (the final-docs hop).
-        self._run(
-            lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+        self._run_validating(
+            gh, issue,
             run_agent=_agent(last_message=REVIEW_APPROVED_MESSAGE),
             head_shas=("cafe1234",),
         )
@@ -848,8 +840,8 @@ class HandoffConsumedThroughIssueThreadOnlyTest(
         if not any(l.name == "in_review" for l in issue.labels):
             issue.labels = [FakeLabel("in_review")]
         with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
-            mocks = self._run(
-                lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+            mocks = self._run_in_review(
+                gh, issue,
                 run_agent=_agent(),
             )
 

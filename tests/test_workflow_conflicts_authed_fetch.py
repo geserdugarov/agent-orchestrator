@@ -5,10 +5,16 @@ from __future__ import annotations
 import os
 import unittest
 from pathlib import Path
+from unittest.mock import MagicMock, patch as mock_patch
 
 from orchestrator import config, git_plumbing, workflow
 
-from tests.workflow_helpers import _TEST_SPEC, _temp_git_repo_with_local_config
+from tests.workflow_helpers import (
+    _GitRunRecorder,
+    _TEST_SPEC,
+    _TokenResolver,
+    _temp_git_repo_with_local_config,
+)
 
 
 class AuthedFetchHardeningTest(unittest.TestCase):
@@ -20,24 +26,13 @@ class AuthedFetchHardeningTest(unittest.TestCase):
     """
 
     def test_askpass_token_blocks_inherited_config(self) -> None:
-        from unittest.mock import patch as mock_patch, MagicMock
-
         # First subprocess.run call is the rewrite-rule probe (returncode=1
         # = no rewrite rules); second is the real fetch -- capture its env.
-        captured: dict[str, dict] = {}
+        run_recorder = _GitRunRecorder(
+            probe_result=MagicMock(returncode=1, stdout="", stderr=""),
+        )
 
-        rewrite_check = MagicMock(returncode=1, stdout="", stderr="")
-        fetch_result = MagicMock(returncode=0, stdout="", stderr="")
-
-        def fake_run(args, **kwargs):
-            if args and args[:3] == ["git", "config", "--get-regexp"]:
-                return rewrite_check
-            captured["args"] = args
-            captured["env"] = kwargs.get("env")
-            captured["cwd"] = kwargs.get("cwd")
-            return fetch_result
-
-        with mock_patch("subprocess.run", side_effect=fake_run), \
+        with mock_patch("subprocess.run", side_effect=run_recorder), \
              mock_patch.object(
                  workflow.config, "_resolve_github_token",
                  return_value="fake-token-xyz",
@@ -48,19 +43,19 @@ class AuthedFetchHardeningTest(unittest.TestCase):
                 cwd=Path("/tmp"),
             )
 
-        env = captured["env"]
+        env = run_recorder.env
         # askpass wires the token via env, NOT argv.
         self.assertIn("GIT_ASKPASS", env)
         self.assertEqual(env.get("GIT_TOKEN"), "fake-token-xyz")
         # Token must NOT appear in argv.
-        for arg in captured["args"]:
+        for arg in run_recorder.args:
             self.assertNotIn("fake-token-xyz", str(arg))
         # Global/system config detached so url rewrites planted there
         # cannot redirect the fetch to an attacker-controlled host.
         self.assertEqual(env.get("GIT_CONFIG_GLOBAL"), os.devnull)
         self.assertEqual(env.get("GIT_CONFIG_SYSTEM"), os.devnull)
         # Hooks / fsmonitor / credential helpers blocked via -c overrides.
-        argv = captured["args"]
+        argv = run_recorder.args
         self.assertIn("core.hooksPath=/dev/null", argv)
         self.assertIn("credential.helper=", argv)
         self.assertIn("core.fsmonitor=", argv)
@@ -75,24 +70,19 @@ class AuthedFetchHardeningTest(unittest.TestCase):
         )
 
     def test_url_rewrite_rule_is_refused(self) -> None:
-        from unittest.mock import patch as mock_patch, MagicMock
-
         # Rewrite-rule probe returns a hit; the real fetch must NOT run.
-        rewrite_check = MagicMock(
-            returncode=0,
-            stdout="url.https://evil.example/.insteadof https://github.com/\n",
-            stderr="",
+        run_recorder = _GitRunRecorder(
+            probe_result=MagicMock(
+                returncode=0,
+                stdout=(
+                    "url.https://evil.example/.insteadof "
+                    "https://github.com/\n"
+                ),
+                stderr="",
+            ),
         )
-        fetch_result = MagicMock(returncode=0, stdout="", stderr="")
-        runs: list = []
 
-        def fake_run(args, **kwargs):
-            runs.append(args)
-            if args and args[:3] == ["git", "config", "--get-regexp"]:
-                return rewrite_check
-            return fetch_result
-
-        with mock_patch("subprocess.run", side_effect=fake_run), \
+        with mock_patch("subprocess.run", side_effect=run_recorder), \
              mock_patch.object(
                  workflow.config, "_resolve_github_token",
                  return_value="fake-token-xyz",
@@ -104,7 +94,7 @@ class AuthedFetchHardeningTest(unittest.TestCase):
             )
 
         # Only the rewrite probe ran -- the fetch was refused.
-        self.assertEqual(len(runs), 1)
+        self.assertEqual(len(run_recorder.calls), 1)
         self.assertNotEqual(fetch.returncode, 0)
 
     def test_refuses_on_real_local_http_proxy(self) -> None:
@@ -112,8 +102,6 @@ class AuthedFetchHardeningTest(unittest.TestCase):
         # can't prove the broadened regexp actually catches http.* keys. Use
         # real git config resolution: a worktree carrying `http.proxy` must
         # make `_authed_fetch` fail closed before the token-bearing fetch runs.
-        from unittest.mock import patch as mock_patch
-
         with _temp_git_repo_with_local_config(
             [("http.proxy", "http://evil.example:8080")]
         ) as repo, mock_patch.object(
@@ -132,15 +120,9 @@ class AuthedFetchHardeningTest(unittest.TestCase):
         )
 
     def test_no_token_fails_without_subprocess(self) -> None:
-        from unittest.mock import patch as mock_patch, MagicMock
+        subprocess_run = MagicMock()
 
-        runs: list = []
-
-        def fake_run(args, **kwargs):
-            runs.append(args)
-            return MagicMock(returncode=0, stdout="", stderr="")
-
-        with mock_patch("subprocess.run", side_effect=fake_run), \
+        with mock_patch("subprocess.run", subprocess_run), \
              mock_patch.object(
                  workflow.config, "_resolve_github_token", return_value=""
              ):
@@ -150,7 +132,7 @@ class AuthedFetchHardeningTest(unittest.TestCase):
             )
 
         # No subprocess at all when the token is missing.
-        self.assertEqual(runs, [])
+        subprocess_run.assert_not_called()
         self.assertNotEqual(fetch.returncode, 0)
 
     def test_uses_per_spec_token_for_git_fetch(self) -> None:
@@ -161,35 +143,19 @@ class AuthedFetchHardeningTest(unittest.TestCase):
         # this, `_handle_resolving_conflict` fetches origin/<branch> /
         # origin/<base> with the wrong (or empty) token for any repo other
         # than the legacy single-repo `REPO`.
-        from unittest.mock import patch as mock_patch, MagicMock
-
-        rewrite_check = MagicMock(returncode=1, stdout="", stderr="")
-        fetch_result = MagicMock(returncode=0, stdout="", stderr="")
-        captured: dict[str, object] = {}
-
-        def fake_run(args, **kwargs):
-            if args and args[:3] == ["git", "config", "--get-regexp"]:
-                return rewrite_check
-            captured["args"] = args
-            captured["env"] = kwargs.get("env")
-            return fetch_result
-
-        resolved: list[str] = []
-
-        def fake_resolve(slug: str) -> str:
-            resolved.append(slug)
-            # Distinct token per slug so a regression that fell back to
-            # `config.GITHUB_TOKEN` would surface in GIT_TOKEN below.
-            return f"ghp-token-for-{slug.replace('/', '-')}"
+        run_recorder = _GitRunRecorder(
+            probe_result=MagicMock(returncode=1, stdout="", stderr=""),
+        )
+        token_resolver = _TokenResolver()
 
         repo = config.RepoSpec(
             slug="acme/widgets",
             target_root=Path("/tmp/orchestrator-test-target-root"),
             base_branch="main",
         )
-        with mock_patch("subprocess.run", side_effect=fake_run), \
+        with mock_patch("subprocess.run", side_effect=run_recorder), \
              mock_patch.object(
-                 workflow.config, "_resolve_github_token", fake_resolve
+                 workflow.config, "_resolve_github_token", token_resolver
              ):
             fetch = workflow._authed_fetch(
                 repo,
@@ -199,13 +165,13 @@ class AuthedFetchHardeningTest(unittest.TestCase):
         self.assertEqual(fetch.returncode, 0)
         # Token resolved exactly once, for the spec's slug -- not for
         # `config.REPO`.
-        self.assertEqual(resolved, ["acme/widgets"])
-        env = captured["env"]
+        self.assertEqual(token_resolver.slugs, ["acme/widgets"])
+        env = run_recorder.env
         self.assertEqual(env.get("GIT_TOKEN"), "ghp-token-for-acme-widgets")
         # Auth URL targets the spec's slug, not the cached config.REPO.
         self.assertIn(
             "https://x-access-token@github.com/acme/widgets.git",
-            captured["args"],
+            run_recorder.args,
         )
 
     def test_missing_per_spec_token_logs_slug(self) -> None:
@@ -214,20 +180,14 @@ class AuthedFetchHardeningTest(unittest.TestCase):
         # the error log -- the resolving_conflict handler then parks awaiting
         # human, which is far more debuggable than a generic "GITHUB_TOKEN
         # missing" with no repo identifier.
-        from unittest.mock import patch as mock_patch, MagicMock
-
-        runs: list = []
-
-        def fake_run(args, **kwargs):
-            runs.append(args)
-            return MagicMock(returncode=0, stdout="", stderr="")
+        subprocess_run = MagicMock()
 
         repo = config.RepoSpec(
             slug="acme/widgets",
             target_root=Path("/tmp/orchestrator-test-target-root"),
             base_branch="main",
         )
-        with mock_patch("subprocess.run", side_effect=fake_run), \
+        with mock_patch("subprocess.run", subprocess_run), \
              mock_patch.object(
                  workflow.config, "_resolve_github_token", return_value=""
              ), self.assertLogs(git_plumbing.log, level="ERROR") as cm:
@@ -237,7 +197,7 @@ class AuthedFetchHardeningTest(unittest.TestCase):
                 cwd=Path("/tmp"),
             )
         # Fetch aborted before any subprocess ran.
-        self.assertEqual(runs, [])
+        subprocess_run.assert_not_called()
         self.assertNotEqual(fetch.returncode, 0)
         self.assertTrue(
             any("acme/widgets" in line for line in cm.output),

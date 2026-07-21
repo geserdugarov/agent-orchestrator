@@ -4,12 +4,10 @@ from __future__ import annotations
 
 import unittest
 
-from orchestrator import workflow
 
 from tests.fakes import FakeGitHubClient, FakePR, make_issue
 from tests.workflow_helpers import (
     _PatchedWorkflowMixin,
-    _TEST_SPEC,
     _agent,
 )
 
@@ -39,10 +37,8 @@ class HandleResolvingConflictHashDriftTest(
             user_content_hash="stale-hash",
         )
 
-        self._run(
-            lambda: workflow._handle_resolving_conflict(
-                gh, _TEST_SPEC, issue,
-            ),
+        self._run_resolving_conflict(
+            gh, issue,
             run_agent=_agent(
                 session_id="dev-sess", last_message="resolved with edit"
             ),
@@ -89,10 +85,8 @@ class HandleResolvingConflictHashDriftTest(
         )
         before_writes = gh.write_state_calls
 
-        mocks = self._run(
-            lambda: workflow._handle_resolving_conflict(
-                gh, _TEST_SPEC, issue,
-            ),
+        mocks = self._run_resolving_conflict(
+            gh, issue,
             run_agent=_agent(
                 session_id="dev-sess", last_message="", interrupted=True,
             ),

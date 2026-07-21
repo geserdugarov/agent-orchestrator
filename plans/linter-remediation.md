@@ -43,7 +43,7 @@ Do not mark a stage complete until its completion gate is satisfied.
 | 2 | Extreme production complexity hotspots | 8/8 | [x] |
 | 3 | Remaining production complexity | 5/6 | [ ] |
 | 4 | Remaining production style and structure | 5/5 | [x] |
-| 5 | Test structure and complexity | 5/7 | [ ] |
+| 5 | Test structure and complexity | 6/7 | [ ] |
 | 6 | Test literals and naming | 1/7 | [ ] |
 | 7 | Long-tail cleanup and final verification | 0/5 | [ ] |
 
@@ -349,7 +349,7 @@ For every package:
 
 ### Package 5.6 — Validating, in-review, and conflict tests
 
-- [ ] Refactor validating, in-review, conflict-resolution, review-filtering, watermark, and handoff test modules.
+- [x] Refactor validating, in-review, conflict-resolution, review-filtering, watermark, and handoff test modules.
 
 ### Package 5.7 — Shared and remaining tests
 
@@ -1010,7 +1010,10 @@ considered.
   `tests/test_workflow_scheduler_routing.py`, `tests/test_workflow_branch_publication.py`,
   `tests/test_workflow_decomposition_blocked.py`, `tests/test_workflow_decomposition_decomposing.py`,
   `tests/test_workflow_decomposition_umbrella.py`, `tests/test_workflow_question.py`,
-  `tests/test_workflow_question_routing.py`, and `tests/test_workflow_documenting_routing.py`.
+  `tests/test_workflow_question_routing.py`, `tests/test_workflow_documenting_routing.py`,
+  `tests/test_workflow_conflicts_authed_fetch.py`, `tests/test_workflow_conflicts_routing.py`,
+  `tests/test_workflow_conflicts_target_fetch.py`, `tests/test_workflow_in_review_checks.py`,
+  `tests/test_workflow_validating_review.py`, and `tests/test_workflow_validating_squash.py`.
 - Rule: `WPS441`.
 - Reason: `unittest` populates log captures on context exit, and patch mocks are asserted after restoration. Reading
   each capture afterward is the standard assertion boundary; wrapping it in a helper would hide the patched operation,
@@ -1042,6 +1045,30 @@ considered.
   duplicate the shared state builders, and the direct workflow-helper imports keep backend, label, and prompt
   contracts explicit at use sites.
 - Protected by: the 189 focused tests in these five modules.
+- Reviewed: [x]
+
+### Validating, in-review, and conflict scenario density
+
+- File and symbols: scenario tests across `tests/test_workflow_validating_*.py`,
+  `tests/test_workflow_in_review_*.py`, and `tests/test_workflow_conflicts_*.py`.
+- Rule: `WPS204`, `WPS210`, and `WPS213`.
+- Reason: Shared stage runners, behavior fixtures, authenticated-git recorders, watermark seeds, and real-git setup
+  remove the duplicated plumbing. The remaining expressions and locals describe distinct pinned-state inputs, agent
+  outcomes, comment surfaces, git safety probes, ordered writes, or per-branch assertions; further extraction would
+  hide the workflow scenario or replace meaningful local names with an opaque options mapping.
+- Protected by: the 282 focused Package 5.6 tests and their 29 subtests.
+- Reviewed: [x]
+
+### Cohesive validating, in-review, and conflict test shapes
+
+- File and symbols: `tests/test_workflow_in_review_checks.py`, `tests/test_workflow_in_review_routing.py`,
+  `tests/test_workflow_validating_review.py`, `tests/test_workflow_validating_verify.py`, and
+  `tests/test_workflow_validating_watermarks.py`.
+- Rule: `WPS201`, `WPS202`, and `WPS235`.
+- Reason: Oversized test classes are split into behavior-focused groups while their stage constants, fixture mixins,
+  and direct collaborators stay beside the scenarios that consume them. Splitting these cohesive modules at the
+  import/member thresholds would duplicate shared state builders or obscure the workflow and security boundaries.
+- Protected by: the 282 focused Package 5.6 tests and their 29 subtests.
 - Reviewed: [x]
 
 ## Session log
@@ -1116,6 +1143,30 @@ Add one row for every implementation session, including partial sessions.
 | 2026-07-20 | 5.3 | Complete | WPS 681->363; 167 focused; gate 2150p/3s | Not committed | Start Package 5.4 |
 | 2026-07-20 | 5.4 | Complete | WPS 748->697; 225 focused; gate 2150p/3s | Not committed | Start Package 5.5 |
 | 2026-07-20 | 5.5 | Complete | WPS 680->560; 234 focused; gate 2149p/3s | Not committed | Start Package 5.6 |
+| 2026-07-20 | 5.6 | Complete | WPS 1272->1161; 282 focused; gate 2149p/3s | Not committed | Start Package 5.7 |
+
+Package 5.6 is **complete**. The pass covered the validating review, verify, squash, drift, handoff, watermark,
+paused, and terminal suites; in-review routing, feedback filtering, migration, drift, parks, checks, and watermarks;
+conflict execution, recovery, resume, publication, authenticated fetch, and worktree restoration; plus verdict
+parsing. Repeated stage lambdas moved into the shared `_run_validating`, `_run_in_review`, and
+`_run_resolving_conflict` helpers; oversized classes were split by behavior; and nested git/token/process callbacks
+became reusable callable recorders or inspectable mocks. The collected set of 282 focused tests and 29 subtests is
+unchanged, and every scenario retains its original assertions.
+
+The scoped `--select=WPS` count over the 35 Package 5.6 modules fell from 1,272 to 1,161. The structural subset fell
+from 314 to 220: `WPS211` (1), `WPS214` (13), `WPS221` (2), `WPS338` (32), `WPS426` (2), `WPS430` (19), `WPS458`
+(3), and `WPS602` (1) were cleared; `WPS204` fell from 84 to 67, `WPS210` from 101 to 96, and `WPS213` from 34 to
+33. The 220 retained structural findings are `WPS201` (2), `WPS202` (4), `WPS204` (67), `WPS210` (96), `WPS213`
+(33), `WPS235` (2), and `WPS441` (16), covered by the reviewed scenario-density, cohesive-module, and unittest
+capture entries above. The other 941 findings are naming, repeated-string, numeric-literal, and long-tail format
+findings assigned to Package 6.6 or Stage 7: `WPS110` (15), `WPS111` (30), `WPS114` (4), `WPS115` (66), `WPS226`
+(184), `WPS237` (2), `WPS336` (2), `WPS342` (4), and `WPS432` (634).
+
+All 282 focused tests, 29 focused subtests, and Ruff pass. The complete tracked suite passes with 2,149 tests, 3
+live-Postgres skips, and 974 subtests; the modified tree still collects exactly 2,152 tests, matching clean `HEAD`'s
+recorded count. Both committed-range and working-tree diff checks are clean. A bare repository-root collection also
+sees the ignored, externally owned `analytics-db/data` volume and receives `PermissionError`; the complete tracked
+`tests/` tree is the recorded full gate for this session.
 
 Package 5.5 is **complete**. The pass covered the implementing timeout, retry, PR-reuse, drift, fresh-run, paused,
 full-spec, and terminal suites plus fixing handling, paused behavior, and routing. Repeated stage lambdas moved into
