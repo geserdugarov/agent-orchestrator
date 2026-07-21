@@ -24,7 +24,8 @@ from __future__ import annotations
 
 import logging
 from enum import StrEnum
-from typing import Optional
+from types import MappingProxyType
+from typing import Mapping, Optional
 
 log = logging.getLogger(__name__)
 
@@ -112,7 +113,9 @@ _DETOUR_TO_RESOLVING: frozenset[WorkflowLabel] = frozenset(
 # `_build_allowed` from `_INTERRUPT_SOURCES`, so this map holds only the
 # deterministic forward flow (plus `umbrella`/`question` -> `done`, which is
 # those states' own forward completion rather than an external interrupt).
-_FORWARD: dict[Optional[WorkflowLabel], frozenset[WorkflowLabel]] = {
+_FORWARD: Mapping[
+    Optional[WorkflowLabel], frozenset[WorkflowLabel],
+] = MappingProxyType({
     # Entry: an unlabeled issue decomposes, or (DECOMPOSE=off) goes straight
     # to implementing. It never enters `question` (operator-applied only) and
     # is never born `blocked` via this path -- children are created `blocked`
@@ -164,7 +167,7 @@ _FORWARD: dict[Optional[WorkflowLabel], frozenset[WorkflowLabel]] = {
     WorkflowLabel.QUESTION: frozenset((WorkflowLabel.DONE,)),
     WorkflowLabel.DONE: frozenset(),
     WorkflowLabel.REJECTED: frozenset(),
-}
+})
 
 
 # Interrupt / detour edges, keyed by TARGET -> the EXACT set of source states
@@ -182,7 +185,9 @@ _FORWARD: dict[Optional[WorkflowLabel], frozenset[WorkflowLabel]] = {
 #  * -> rejected : PR / issue closed without merge
 #                  (`_finalize_if_issue_closed`, `_drain_review_pr_terminals`).
 #  * -> resolving_conflict : the per-tick base-sync conflict detour.
-_INTERRUPT_SOURCES: dict[WorkflowLabel, frozenset[WorkflowLabel]] = {
+_INTERRUPT_SOURCES: Mapping[
+    WorkflowLabel, frozenset[WorkflowLabel],
+] = MappingProxyType({
     WorkflowLabel.DONE: frozenset(
         (
             WorkflowLabel.IMPLEMENTING, WorkflowLabel.VALIDATING,
@@ -198,7 +203,7 @@ _INTERRUPT_SOURCES: dict[WorkflowLabel, frozenset[WorkflowLabel]] = {
         )
     ),
     WorkflowLabel.RESOLVING_CONFLICT: _DETOUR_TO_RESOLVING,
-}
+})
 
 
 def _mutable_forward_transitions(

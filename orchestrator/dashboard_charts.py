@@ -51,3 +51,17 @@ from orchestrator.dashboard_charts_usage import (
     backend_per_day as backend_per_day,
     usage_over_time as usage_over_time,
 )
+
+
+# The hub exposes these names by attribute; retaining an explicit inventory
+# keeps that compatibility surface visible to static import analysis.
+_COMPATIBILITY_EXPORTS = (
+    backend_per_day,
+    cost_by_repo,
+    cost_by_review_round,
+    cost_by_stage,
+    cost_horizontal_bars,
+    done_per_day_bars,
+    hour_weekday_heatmap,
+    usage_over_time,
+)

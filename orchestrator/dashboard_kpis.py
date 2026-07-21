@@ -25,8 +25,8 @@ from orchestrator.analytics.read import (
 DEFAULT_EXPENSIVE_LIMIT = 8
 
 # Insight thresholds.
-FAILURE_RATE_BANNER_THRESHOLD = 0.10
-UNPRICED_COVERAGE_THRESHOLD = 0.10
+FAILURE_RATE_BANNER_THRESHOLD = 0.1
+UNPRICED_COVERAGE_THRESHOLD = 0.1
 UNPRICED_COST_SOURCES: frozenset[str] = frozenset(("unknown-price", "unknown"))
 # Bucket strings the review-round breakdown emits whose runs are
 # "rework" (i.e. happened after the initial pass). Used to compute the

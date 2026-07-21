@@ -24,6 +24,7 @@ re-export), so the polling tick never imports it.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Optional, Sequence
 
 from plotly import graph_objects as go
@@ -50,9 +51,9 @@ from orchestrator.dashboard_charts_base import (
 
 _REVIEW_BAR_ROW_HEIGHT = 44
 _REVIEW_BAR_EXTRA_HEIGHT = 90
-_HORIZONTAL_BAR_MARGIN = {"l": 160, "r": 64, "b": 32}
+_HORIZONTAL_BAR_MARGIN = MappingProxyType({"l": 160, "r": 64, "b": 32})
 
-_REVIEW_ROUND_LABELS = {
+_REVIEW_ROUND_LABELS = MappingProxyType({
     "0": "Initial",
     "1": "Round 1",
     "2": "Round 2",
@@ -61,7 +62,7 @@ _REVIEW_ROUND_LABELS = {
     "5": "Round 5",
     "6+": "Rounds 6+",
     "unknown": "No review round",
-}
+})
 _REVIEW_ROUND_ORDER = ("0", "1", "2", "3", "4", "5", "6+", "unknown")
 
 # Default rendered chart height in px when a caller does not override it.

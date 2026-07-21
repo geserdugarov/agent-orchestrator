@@ -46,6 +46,8 @@ from orchestrator.analytics.read_models import (
     SkillTriggerRateRow,
 )
 
+_AGENT_EXIT_CONDITION = "event = 'agent_exit'"
+
 
 def _as_skill_names(raw: Any) -> list[str]:
     """Coerce a JSONB skill-name array column into a list of strings.
@@ -203,12 +205,12 @@ def _review_round_rows(
     query: _ReadQuery,
     filters: _WindowFilters,
 ) -> list[ReviewRoundBucketRow]:
-    where, bindings = _build_view_window_where(filters)
-    where = _append_where_condition(
-        where,
+    view_where, view_bindings = _build_view_window_where(filters)
+    view_where = _append_where_condition(
+        view_where,
         "agent_role IN ('developer', 'reviewer')",
     )
-    rows = query.select(_review_round_sql(where), bindings)
+    rows = query.select(_review_round_sql(view_where), view_bindings)
     return [_review_round_from_row(row) for row in rows]
 
 
@@ -288,9 +290,9 @@ def _skill_trigger_rate_rows(
     query: _ReadQuery,
     filters: _WindowFilters,
 ) -> list[SkillTriggerRateRow]:
-    where, bindings = _build_window_where(filters.without_events())
-    clause = _append_where_condition(where, "event = 'agent_exit'")
-    rows = query.select(_skill_trigger_rate_sql(clause), bindings)
+    event_where, event_bindings = _build_window_where(filters.without_events())
+    clause = _append_where_condition(event_where, _AGENT_EXIT_CONDITION)
+    rows = query.select(_skill_trigger_rate_sql(clause), event_bindings)
     return [_skill_trigger_rate_from_row(row) for row in rows]
 
 
@@ -344,12 +346,14 @@ def _skill_catalog_rows(
     query: _ReadQuery,
     filters: _WindowFilters,
 ) -> list[tuple]:
-    where, bindings = _build_window_where(filters.catalog_scope())
-    clause = _append_where_condition(where, "event = 'repo_skill_catalog'")
+    catalog_where, catalog_bindings = _build_window_where(filters.catalog_scope())
+    clause = _append_where_condition(
+        catalog_where, "event = 'repo_skill_catalog'",
+    )
     return query.select(
         "SELECT repo, extras -> 'skills_available' AS skills_available "
         f"FROM analytics_events{clause}",
-        bindings,
+        catalog_bindings,
     )
 
 
@@ -368,15 +372,15 @@ def _skill_run_rows(
     query: _ReadQuery,
     filters: _WindowFilters,
 ) -> list[tuple]:
-    where, bindings = _build_window_where(filters.without_events())
-    clause = _append_where_condition(where, "event = 'agent_exit'")
+    run_where, run_bindings = _build_window_where(filters.without_events())
+    clause = _append_where_condition(run_where, _AGENT_EXIT_CONDITION)
     return query.select(
         "SELECT repo, "
         "COALESCE(agent_role, 'unknown') AS role_label, "
         "COALESCE(backend, 'unknown') AS backend_label, "
         "extras -> 'skills_triggered' AS skills_triggered "
         f"FROM analytics_events{clause}",
-        bindings,
+        run_bindings,
     )
 
 
@@ -623,8 +627,8 @@ def _skill_window_rows(
     query: _ReadQuery,
     filters: _WindowFilters,
 ) -> list[_SkillWindowRun]:
-    where, bindings = _build_window_where(filters.without_events())
-    clause = _append_where_condition(where, "event = 'agent_exit'")
+    window_where, window_bindings = _build_window_where(filters.without_events())
+    clause = _append_where_condition(window_where, _AGENT_EXIT_CONDITION)
     rows = query.select(
         "SELECT repo, "
         "COALESCE(agent_role, 'unknown') AS role_label, "
@@ -633,7 +637,7 @@ def _skill_window_rows(
         "extras -> 'skills_triggered' AS skills_triggered, "
         "extras -> 'skills_incidental' AS skills_incidental "
         f"FROM analytics_events{clause}",
-        bindings,
+        window_bindings,
     )
     return [_skill_window_run(row) for row in rows]
 
@@ -642,8 +646,10 @@ def _skill_history_rows(
     query: _ReadQuery,
     filters: _WindowFilters,
 ) -> list[tuple]:
-    where, bindings = _build_window_where(filters.historical_scope())
-    clause = _append_where_condition(where, "event = 'agent_exit'")
+    history_where, history_bindings = _build_window_where(
+        filters.historical_scope(),
+    )
+    clause = _append_where_condition(history_where, _AGENT_EXIT_CONDITION)
     return query.select(
         "SELECT repo, "
         "COALESCE(agent_role, 'unknown') AS role_label, "
@@ -653,7 +659,7 @@ def _skill_history_rows(
         "(extras -> 'skills_available') IS NOT NULL AS has_skills_available, "
         "extras -> 'skills_triggered' AS skills_triggered "
         f"FROM analytics_events{clause}",
-        bindings,
+        history_bindings,
     )
 
 
@@ -720,32 +726,6 @@ class _SkillAdoption:
         counts._count_sessions(session_cohorts, evidence)
         return counts
 
-    def _observe_window(self, run: _SkillWindowRun) -> None:
-        self.cohort_runs[run.cohort] = self.cohort_runs.get(run.cohort, 0) + 1
-        for skill in run.triggered:
-            key = (*run.cohort, skill)
-            self.load_rows[key] = self.load_rows.get(key, 0) + 1
-        for skill in run.incidental:
-            key = (*run.cohort, skill)
-            self.incidental[key] = self.incidental.get(key, 0) + 1
-
-    def _count_sessions(
-        self,
-        session_cohorts: dict[str, set[_SkillCohort]],
-        evidence: dict[str, _SessionEvidence],
-    ) -> None:
-        for session_key, cohorts in session_cohorts.items():
-            session = evidence.get(session_key)
-            if session is None:
-                continue
-            available = session.resolved_available()
-            for cohort in cohorts:
-                for skill in available:
-                    key = (*cohort, skill)
-                    self.sessions[key] = self.sessions.get(key, 0) + 1
-                    if skill in session.adopted:
-                        self.adopted[key] = self.adopted.get(key, 0) + 1
-
     def keys(self) -> set[_SkillAdoptionKey]:
         # Every available cell plus any cell that only shows in the window
         # diagnostics (a purely incidental reference, or a load whose session
@@ -780,6 +760,40 @@ class _SkillAdoption:
             load_rows=self.load_rows.get(key, 0),
             incidental=self.incidental.get(key, 0),
         )
+
+    def _observe_window(self, run: _SkillWindowRun) -> None:
+        cohort = run.cohort
+        self.cohort_runs[cohort] = self.cohort_runs.get(cohort, 0) + 1
+        for skill in run.triggered:
+            key = (*cohort, skill)
+            self.load_rows[key] = self.load_rows.get(key, 0) + 1
+        for skill in run.incidental:
+            key = (*cohort, skill)
+            self.incidental[key] = self.incidental.get(key, 0) + 1
+
+    def _count_sessions(
+        self,
+        session_cohorts: dict[str, set[_SkillCohort]],
+        evidence: dict[str, _SessionEvidence],
+    ) -> None:
+        for session_key, cohorts in session_cohorts.items():
+            session = evidence.get(session_key)
+            if session is None:
+                continue
+            self._count_session(cohorts, session)
+
+    def _count_session(
+        self,
+        cohorts: set[_SkillCohort],
+        session: _SessionEvidence,
+    ) -> None:
+        available = session.resolved_available()
+        for cohort in cohorts:
+            for skill in available:
+                key = (*cohort, skill)
+                self.sessions[key] = self.sessions.get(key, 0) + 1
+                if skill in session.adopted:
+                    self.adopted[key] = self.adopted.get(key, 0) + 1
 
 
 def _skill_adoption_rows(
@@ -875,7 +889,7 @@ def _cost_coverage_rows(
     query: _ReadQuery,
     filters: _WindowFilters,
 ) -> list[CostCoverageRow]:
-    where, bindings = _build_view_window_where(filters)
+    coverage_where, coverage_bindings = _build_view_window_where(filters)
     rows = query.select(
         "SELECT "
         "COALESCE(cost_source, 'unknown') AS source_label, "
@@ -885,10 +899,10 @@ def _cost_coverage_rows(
         "  COALESCE(cache_read_tokens, 0) + "
         "  COALESCE(cache_write_tokens, 0)"
         "), 0) AS source_total_tokens "
-        f"FROM analytics_agent_runs{where} "
+        f"FROM analytics_agent_runs{coverage_where} "
         "GROUP BY source_label "
         "ORDER BY runs DESC, source_label ASC",
-        bindings,
+        coverage_bindings,
     )
     return [_cost_coverage_from_row(row) for row in rows]
 
@@ -946,7 +960,7 @@ def _backend_daily_token_rows(
     query: _ReadQuery,
     filters: _WindowFilters,
 ) -> list[BackendDailyTokensRow]:
-    where, bindings = _build_view_window_where(filters)
+    daily_where, daily_bindings = _build_view_window_where(filters)
     rows = query.select(
         "SELECT "
         "date_trunc('day', ts)::date AS day, "
@@ -956,10 +970,10 @@ def _backend_daily_token_rows(
         "  COALESCE(cache_read_tokens, 0) + "
         "  COALESCE(cache_write_tokens, 0)"
         "), 0) AS day_backend_tokens "
-        f"FROM analytics_agent_runs{where} "
+        f"FROM analytics_agent_runs{daily_where} "
         "GROUP BY day, backend_label "
         "ORDER BY day ASC, backend_label ASC",
-        bindings,
+        daily_bindings,
     )
     return [_backend_daily_tokens_from_row(row) for row in rows]
 
@@ -1018,7 +1032,7 @@ def _hourly_heatmap_rows(
     filters: _WindowFilters,
     tz_offset_hours: int,
 ) -> list[HourlyHeatmapPoint]:
-    where, bindings = _build_window_where(filters)
+    heatmap_where, heatmap_bindings = _build_window_where(filters)
     offset = int(tz_offset_hours)
     rows = query.select(
         "SELECT "
@@ -1032,10 +1046,10 @@ def _hourly_heatmap_rows(
         "  COALESCE(cache_read_tokens, 0) + "
         "  COALESCE(cache_write_tokens, 0)"
         "), 0) AS cell_total_tokens "
-        f"FROM analytics_events{where} "
+        f"FROM analytics_events{heatmap_where} "
         "GROUP BY weekday, hour "
         "ORDER BY weekday ASC, hour ASC",
-        [offset, offset, *bindings],
+        [offset, offset, *heatmap_bindings],
     )
     return [_hourly_heatmap_from_row(row) for row in rows]
 

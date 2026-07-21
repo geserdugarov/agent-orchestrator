@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import html
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Callable, Optional, Sequence
 
 from orchestrator.analytics.read import SkillTriggerMatrixRow
@@ -52,6 +53,7 @@ _SKILL_MATRIX_EXTRA_CSS = """
   .orch-skillmatrix-sort { margin-left: 3px; color: var(--orch-accent); }
 """
 
+
 @dataclass(frozen=True)
 class _SkillMatrixColumn:
     key: str
@@ -78,9 +80,9 @@ _SKILL_MATRIX_COLUMNS = (
 # ascending (A→Z). Re-clicking the active column flips its direction.
 _SKILL_MATRIX_NUMERIC_KEYS = frozenset(("runs", "skill_runs", "rate"))
 
-_SKILL_MATRIX_SORT_KEYS: dict[str, Callable[[SkillTriggerMatrixRow], object]] = {
+_SKILL_MATRIX_SORT_KEYS = MappingProxyType({
     column.key: column.sort_value for column in _SKILL_MATRIX_COLUMNS
-}
+})
 
 # Query-param names the clickable headers write and the dashboard reads
 # back via `parse_skill_matrix_sort`.

@@ -65,6 +65,8 @@ _PARENT_NUMBER = "parent_number"
 _CREATED_AT = "created_at"
 _DONE = "done"
 
+_HeldChild = tuple[int, list[int]]
+
 
 @dataclass
 class _DecomposerRunPlan:
@@ -1145,7 +1147,7 @@ class _ChildActivation:
     gh: GitHubClient
     state: PinnedState
     scan: _ChildScan
-    held: list[tuple[int, list[int]]]
+    held: list[_HeldChild]
     relabeled: bool = False
 
     @classmethod

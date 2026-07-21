@@ -522,6 +522,16 @@ def _persist_dev_session_after_run(
 
 
 @dataclass(frozen=True)
+class _DevResumeRequest:
+    gh: GitHubClient
+    spec: config.RepoSpec
+    issue: Issue
+    resume_args: tuple
+    option_fields: dict
+    stage: Optional[str]
+
+
+@dataclass(frozen=True)
 class _DevResumeContext:
     gh: GitHubClient
     spec: config.RepoSpec
@@ -535,37 +545,65 @@ class _DevResumeContext:
 
     @classmethod
     def build(
-        cls,
-        gh: GitHubClient,
-        spec: config.RepoSpec,
-        issue: Issue,
-        resume_args: tuple,
-        option_fields: dict,
-        *,
-        stage: Optional[str] = None,
+        cls, request: _DevResumeRequest,
     ) -> _DevResumeContext:
-        if len(resume_args) != 2:
+        if len(request.resume_args) != 2:
             raise TypeError("expected state and followup_text")
-        state, followup_text = resume_args
-        options = _DevResumeOptions.from_fields(option_fields)
-        worktree = _ensure_resume_worktree(spec, issue, state)
-        plan = _resolve_dev_session_for_resume(issue, state)
+        state, followup_text = request.resume_args
+        options = _DevResumeOptions.from_fields(request.option_fields)
+        worktree = _ensure_resume_worktree(request.spec, request.issue, state)
+        plan = _resolve_dev_session_for_resume(request.issue, state)
         # An explicit `stage` wins over the label read off `issue`: a caller
         # that just relabeled the issue (validating -> fixing on
         # CHANGES_REQUESTED) holds an `Issue` whose cached `labels` PyGithub
         # did not refresh after `set_labels`, so `gh.workflow_label(issue)`
         # would still report the pre-flip stage and misattribute the run.
         return cls(
-            gh=gh,
-            spec=spec,
-            issue=issue,
+            gh=request.gh,
+            spec=request.spec,
+            issue=request.issue,
             state=state,
             followup_text=followup_text,
             options=options,
             worktree=worktree,
             plan=plan,
-            stage=stage or gh.workflow_label(issue) or _IMPLEMENTING_STAGE,
+            stage=(
+                request.stage
+                or request.gh.workflow_label(request.issue)
+                or _IMPLEMENTING_STAGE
+            ),
         )
+
+    def execute(self) -> Tuple[Path, AgentResult, bool]:
+        from orchestrator import workflow as _wf
+
+        agent_result, paused = self._run_attempt(
+            fresh=self.plan.fresh_spawn,
+            session_id=self.plan.session.session_id,
+        )
+        if paused:
+            return self.worktree, agent_result, True
+        fresh_spawn = self.plan.fresh_spawn
+        if self._needs_fresh_retry(agent_result):
+            _wf.log.info(
+                "issue=#%d dropping poisoned dev session %r after poisoned-session "
+                "marker (stale or context overflow); retrying once as a fresh spawn",
+                self.issue.number, self.plan.session.session_id,
+            )
+            _drop_poisoned_dev_session(self.state)
+            fresh_spawn = True
+            agent_result, paused = self._run_attempt(
+                fresh=True, session_id=None,
+            )
+            if paused:
+                return self.worktree, agent_result, True
+        _persist_dev_session_after_run(
+            self.state,
+            agent_result,
+            fresh_spawn=fresh_spawn,
+            resume_count=self.plan.resume_count,
+        )
+        return self.worktree, agent_result, False
 
     def _run_attempt(
         self, *, fresh: bool, session_id: Optional[str],
@@ -610,37 +648,6 @@ class _DevResumeContext:
                 self.plan.session.backend, agent_result,
             )
         )
-
-    def execute(self) -> Tuple[Path, AgentResult, bool]:
-        from orchestrator import workflow as _wf
-
-        agent_result, paused = self._run_attempt(
-            fresh=self.plan.fresh_spawn,
-            session_id=self.plan.session.session_id,
-        )
-        if paused:
-            return self.worktree, agent_result, True
-        fresh_spawn = self.plan.fresh_spawn
-        if self._needs_fresh_retry(agent_result):
-            _wf.log.info(
-                "issue=#%d dropping poisoned dev session %r after poisoned-session "
-                "marker (stale or context overflow); retrying once as a fresh spawn",
-                self.issue.number, self.plan.session.session_id,
-            )
-            _drop_poisoned_dev_session(self.state)
-            fresh_spawn = True
-            agent_result, paused = self._run_attempt(
-                fresh=True, session_id=None,
-            )
-            if paused:
-                return self.worktree, agent_result, True
-        _persist_dev_session_after_run(
-            self.state,
-            agent_result,
-            fresh_spawn=fresh_spawn,
-            resume_count=self.plan.resume_count,
-        )
-        return self.worktree, agent_result, False
 
 
 def _ensure_resume_worktree(
@@ -726,9 +733,15 @@ def _resume_dev_with_text(
     is propagated, not re-fetched, so there is no window where the caller reads
     the label differently than the helper did.
     """
-    return _DevResumeContext.build(
-        gh, spec, issue, resume_args, option_fields, stage=stage,
-    ).execute()
+    request = _DevResumeRequest(
+        gh=gh,
+        spec=spec,
+        issue=issue,
+        resume_args=resume_args,
+        option_fields=option_fields,
+        stage=stage,
+    )
+    return _DevResumeContext.build(request).execute()
 
 
 def _resume_developer_on_human_reply(

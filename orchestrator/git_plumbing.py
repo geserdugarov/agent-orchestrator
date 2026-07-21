@@ -57,14 +57,17 @@ import threading
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterator, Optional
+from types import MappingProxyType
+from typing import Iterator, Mapping, Optional
 
 from orchestrator import config
 
 log = logging.getLogger(__name__)
 
 # Disable git's /dev/tty fallback prompts in any subprocess we spawn.
-_GIT_NO_PROMPT_ENV = {"GIT_TERMINAL_PROMPT": "0"}
+_GIT_NO_PROMPT_ENV: Mapping[str, str] = MappingProxyType({
+    "GIT_TERMINAL_PROMPT": "0",
+})
 
 _GIT = "git"
 _FETCH = "fetch"

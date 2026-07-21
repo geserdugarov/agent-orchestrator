@@ -53,6 +53,9 @@ from orchestrator.git_plumbing import _git
 
 log = logging.getLogger(__name__)
 
+_SkillPaths = dict[str, list[str]]
+_SkillCatalog = tuple[list[str], _SkillPaths]
+
 # Skill roots scanned on the target repo's base ref. Both are passed as
 # pathspecs to a single `git ls-tree`; a root absent from the tree simply
 # contributes no lines (git does not error on it).
@@ -107,7 +110,7 @@ def _paths_by_skill(paths: Iterable[str]) -> dict[str, set[str]]:
 
 def _extract_skill_catalog(
     paths: Iterable[str],
-) -> tuple[list[str], dict[str, list[str]]]:
+) -> _SkillCatalog:
     """Extract the deduped skill catalog from `git ls-tree` path lines.
 
     Keeps only direct `<root>/<name>/SKILL.md` definitions for the two

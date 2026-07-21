@@ -21,11 +21,17 @@ from __future__ import annotations
 
 import html
 from dataclasses import dataclass
-from typing import Optional, Sequence
+from types import MappingProxyType
+from typing import Mapping, Optional, Sequence
 
 from orchestrator import dashboard_theme as theme
 from orchestrator import trajectory_reader as trajectory_reader
 from orchestrator.trajectory_reader import TrajectoryRun
+
+_TimelineUsagePair = tuple[
+    Optional[trajectory_reader.TurnUsageView],
+    trajectory_reader.TimelineEntry,
+]
 
 # Page-specific chrome layered on top of `theme.PAGE_CSS`. References the
 # `--orch-*` CSS custom properties that `PAGE_CSS` defines on `:root`, so the
@@ -366,14 +372,14 @@ def _runs_table_html(runs: Sequence[TrajectoryRun]) -> str:
 # assistant / user text turns each get their own so the operator can
 # tell the conversation's voices apart at a glance. Any unknown kind
 # falls through to the neutral result badge carrying the raw kind.
-_BADGE_BY_KIND: dict[str, tuple[str, str]] = {
+_BADGE_BY_KIND: Mapping[str, tuple[str, str]] = MappingProxyType({
     trajectory_reader.TIMELINE_PROMPT: ("prompt", "prompt"),
     trajectory_reader.TIMELINE_OUTPUT: ("output", "final output"),
     "tool_call": ("call", "tool call"),
     "tool_result": ("result", "tool result"),
     "assistant_message": ("assistant", "assistant"),
     "user_message": ("user", "user turn"),
-}
+})
 
 # Picker-label prefix flagging a synthetic test fixture, so the operator
 # can tell the inherited test-suite records from real runs in the run
@@ -528,10 +534,7 @@ def _turn_usage_html(usage: trajectory_reader.TurnUsageView) -> str:
 
 def _timeline_with_usage(
     run: TrajectoryRun,
-) -> list[
-    tuple[Optional[trajectory_reader.TurnUsageView],
-          trajectory_reader.TimelineEntry]
-]:
+) -> list[_TimelineUsagePair]:
     """Pair each timeline entry with the per-turn usage strip to draw above it.
 
     The strip belongs on the *first* entry of each assistant turn: a new turn
@@ -543,10 +546,7 @@ def _timeline_with_usage(
     re-probe for it. A codex or pre-usage run has `turn=None` throughout, so
     every entry pairs with `None` and no strip renders.
     """
-    paired: list[
-        tuple[Optional[trajectory_reader.TurnUsageView],
-              trajectory_reader.TimelineEntry]
-    ] = []
+    paired: list[_TimelineUsagePair] = []
     prev_turn: Optional[int] = None
     for entry in run.timeline:
         strip = None

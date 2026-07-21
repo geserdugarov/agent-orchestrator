@@ -29,6 +29,7 @@ surrounding Streamlit chrome instead of clashing with it.
 """
 from __future__ import annotations
 
+from types import MappingProxyType
 from typing import Any, Mapping, Optional, Sequence
 
 # Page chrome. Mirrors the standalone mock's :root tokens verbatim --
@@ -92,31 +93,31 @@ _BILLION = 1_000_000_000
 # Token-type segments for the hero spend & token usage chart. The
 # three hues are tuned to read against the cool gray page background
 # and stack in the order Input / Output / Cache from bottom to top.
-TOKEN_TYPE_COLORS: Mapping[str, str] = {
+TOKEN_TYPE_COLORS: Mapping[str, str] = MappingProxyType({
     "Input": "#5b6cf0",
     "Output": "#e0913a",
     "Cache": "#1aa39a",
-}
+})
 
 # Agent backends. `claude` is the developer / implementer; `codex` is
 # the reviewer. Keys match the strings `workflow._run_agent_tracked`
 # writes to `backend`. `unknown` covers NULL rows from the read model.
-BACKEND_COLORS: Mapping[str, str] = {
+BACKEND_COLORS: Mapping[str, str] = MappingProxyType({
     "claude": ACCENT,
     "codex": "#e0913a",
     "unknown": NEUTRAL,
-}
+})
 
 # Agent roles used by the review-cycle cost split. Keys match
 # `_run_agent_tracked(agent_role=...)`.
-AGENT_ROLE_COLORS: Mapping[str, str] = {
+AGENT_ROLE_COLORS: Mapping[str, str] = MappingProxyType({
     "developer": ACCENT,
     "reviewer": "#e0913a",
-}
+})
 
 # Review-round buckets, in the order the chart renders them: the
 # `0` bucket is the initial pass; everything past it is rework.
-REVIEW_ROUND_COLORS: Mapping[str, str] = {
+REVIEW_ROUND_COLORS: Mapping[str, str] = MappingProxyType({
     "0": "#5b6cf0",
     "1": "#e8a13a",
     "2": "#e07a3a",
@@ -126,7 +127,7 @@ REVIEW_ROUND_COLORS: Mapping[str, str] = {
     "3-5": "#d9534a",
     "6+": "#a8201e",
     "unknown": NEUTRAL,
-}
+})
 
 # Deterministic fallback palette for dimensions without an explicit
 # mapping. Order is significant -- `color_for("foo", ["foo", "bar"])`
@@ -146,16 +147,16 @@ CATEGORICAL_PALETTE: tuple[str, ...] = (
 )
 
 # Analytics event kinds written by `orchestrator.analytics.append_record`.
-EVENT_COLORS: Mapping[str, str] = {
+EVENT_COLORS: Mapping[str, str] = MappingProxyType({
     "stage_enter": ACCENT,
     "stage_evaluation": NEUTRAL,
     "agent_exit": SUCCESS,
-}
+})
 
 # Workflow stage labels. Mirror the labels carried on live GitHub
 # issues; renaming any one of them would also have to update the state
 # machine, so the mapping is a public contract.
-STAGE_COLORS: Mapping[str, str] = {
+STAGE_COLORS: Mapping[str, str] = MappingProxyType({
     "decomposing": "#8b5cf6",
     "blocked": NEUTRAL,
     "ready": "#5b6cf0",
@@ -169,16 +170,16 @@ STAGE_COLORS: Mapping[str, str] = {
     "question": "#6b7a99",
     "done": SUCCESS,
     "rejected": NEUTRAL,
-}
+})
 
 # `cost_source` values from `orchestrator.usage.UsageMetrics`.
-COST_SOURCE_COLORS: Mapping[str, str] = {
+COST_SOURCE_COLORS: Mapping[str, str] = MappingProxyType({
     "reported": SUCCESS,
     "estimated": WARNING,
     "unknown-price": DANGER,
     "unknown": NEUTRAL,
     "no-usage": NEUTRAL,
-}
+})
 
 
 def color_for(

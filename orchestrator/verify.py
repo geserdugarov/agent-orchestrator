@@ -45,6 +45,7 @@ import logging
 import os
 import signal
 import subprocess
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -183,10 +184,8 @@ def _kill_verify_group(proc: subprocess.Popen) -> None:
     `PermissionError` cover the race where the shell exited between the
     timeout firing and this call (nothing left to kill).
     """
-    try:
+    with suppress(ProcessLookupError, PermissionError):
         os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-    except (ProcessLookupError, PermissionError):
-        pass
 
 
 def _drain_verify_output(proc: subprocess.Popen) -> tuple[str, str]:

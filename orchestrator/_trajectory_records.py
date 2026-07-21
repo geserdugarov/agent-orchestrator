@@ -289,20 +289,6 @@ class TrajectoryRun:
         """Run-total tokens across all buckets, 0 on a pre-usage record."""
         return 0 if self.run_usage is None else self.run_usage.total_tokens
 
-    @cached_property
-    def _turn_map(self) -> dict[int, TurnUsageView]:
-        # Index turns by their 0-based `turn` for the O(1) `usage_for_turn`
-        # lookup the viewer does per turn boundary. Built once and cached on
-        # the instance's __dict__ (cached_property writes there directly, so
-        # it works on this frozen dataclass); turns with no index are skipped
-        # and a duplicate index keeps the last, mirroring the sink's
-        # last-record-per-id discipline.
-        return {
-            turn_usage.turn: turn_usage
-            for turn_usage in self.turns
-            if turn_usage.turn is not None
-        }
-
     def usage_for_turn(self, turn: Optional[int]) -> Optional[TurnUsageView]:
         """The per-turn usage for a 0-based `turn` index, or `None`.
 
@@ -407,6 +393,20 @@ class TrajectoryRun:
         then the `detail_label` cohort and the timestamp.
         """
         return f"#{self.issue} {self.repo} · {self.detail_label()}"
+
+    @cached_property
+    def _turn_map(self) -> dict[int, TurnUsageView]:
+        # Index turns by their 0-based `turn` for the O(1) `usage_for_turn`
+        # lookup the viewer does per turn boundary. Built once and cached on
+        # the instance's __dict__ (cached_property writes there directly, so
+        # it works on this frozen dataclass); turns with no index are skipped
+        # and a duplicate index keeps the last, mirroring the sink's
+        # last-record-per-id discipline.
+        return {
+            turn_usage.turn: turn_usage
+            for turn_usage in self.turns
+            if turn_usage.turn is not None
+        }
 
 
 def resolve_log_path() -> Optional[Path]:

@@ -988,6 +988,7 @@ def _recover_pending_auto_base_rebase(
     )
     return _recover_pending_auto_base_rebase_context(context)
 
+
 def _base_sync_issue(
     gh: GitHubClient, issue_number: int,
 ) -> Optional[Issue]:
@@ -1113,6 +1114,7 @@ def _sync_worktree_with_base(
         return
     if behind:
         _sync_pre_pr_worktree(spec, worktree, issue_number, behind)
+
 
 def _auto_rebase_label_is_eligible(context: _AutoRebaseContext) -> bool:
     """Clear stale recovery state and reject labels refresh does not drive."""

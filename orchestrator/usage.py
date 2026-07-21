@@ -52,3 +52,23 @@ from orchestrator._usage_trajectory import (
     parse_claude_trajectory as parse_claude_trajectory,
     parse_codex_trajectory as parse_codex_trajectory,
 )
+
+
+# This module is the stable attribute-level facade for all three parser leaves;
+# the inventory makes its indirect compatibility exports explicit.
+_COMPATIBILITY_EXPORTS = (
+    UsageMetrics,
+    parse_agent_usage,
+    parse_claude_usage,
+    parse_codex_usage,
+    SkillTriggers,
+    parse_agent_skills,
+    parse_claude_skills,
+    parse_codex_skills,
+    AgentTrajectory,
+    TrajectoryStep,
+    TurnUsage,
+    parse_agent_trajectory,
+    parse_claude_trajectory,
+    parse_codex_trajectory,
+)

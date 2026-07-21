@@ -75,6 +75,24 @@ from orchestrator._trajectory_records import (  # noqa: E402
 )
 
 
+# The facade intentionally keeps the record leaf's original attribute surface;
+# the inventory makes those indirect compatibility exports explicit.
+_COMPATIBILITY_EXPORTS = (
+    TIMELINE_OUTPUT,
+    TIMELINE_PROMPT,
+    TRAJECTORY_EVENT,
+    TimelineEntry,
+    TrajectoryStepView,
+    RunUsageView,
+    TurnUsageView,
+    UNCONFIGURED_LOG_MESSAGE,
+    log_unconfigured_message,
+    parse_record,
+    read_trajectories,
+    resolve_log_path,
+)
+
+
 @dataclass(frozen=True)
 class FilterOptions:
     """Distinct filter values across a set of runs, each sorted."""
