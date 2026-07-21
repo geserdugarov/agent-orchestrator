@@ -31,6 +31,30 @@ _CWD = Path("/tmp/agent-orchestrator-test-cwd-doesnt-matter")
 # A real directory for tests that spawn an actual subprocess (Popen rejects a
 # non-existent cwd); the mock-Popen tests above never touch the filesystem.
 _REAL_CWD = Path(tempfile.gettempdir())
+_POPEN_TARGET = "orchestrator.agents.subprocess.Popen"
+_OS_ENVIRON_TARGET = "os.environ"
+_CODEX = "codex"
+_CLAUDE = "claude"
+_PROMPT = "p"
+_CODEX_EXEC = "exec"
+_MODEL_FLAG = "-m"
+_CODEX_MODEL = "gpt-5.5"
+_CONFIG_FLAG = "-c"
+_PYTHON_COMMAND_FLAG = "-c"
+_CLAUDE_MODEL_FLAG = "--model"
+_CLAUDE_MODEL = "claude-opus-4-7"
+_RESUME_FLAG = "--resume"
+_PATH_ENV = "PATH"
+_SYSTEM_PATH = "/usr/bin"
+_ANTHROPIC_API_KEY = "ANTHROPIC_API_KEY"
+_ENV_KWARG = "env"
+_SUBPROCESS_TIMEOUT_SECONDS = 30
+_TERMINATION_GRACE_SECONDS = 0.05
+_KILLPG = "killpg"
+_AGENT_COMMAND = "agent"
+_PARTIAL_CLAUDE_OUTPUT = json.dumps({"type": "assistant", "message": {
+    "content": [{"type": "text", "text": "partial work so far"}],
+}})
 
 
 def _completed(stdout: str = "", stderr: str = "", returncode: int = 0) -> MagicMock:
@@ -56,7 +80,6 @@ def _killpg_group_alive(pid: int, sig: int) -> None:
     """`os.killpg` side_effect where the signal-0 liveness probe succeeds, so
     a descendant outlived the leader and the group must still be SIGKILLed.
     """
-    return None
 
 
 class ParseSessionIdTest(unittest.TestCase):
@@ -143,7 +166,7 @@ class ClaudeLastMessageTest(unittest.TestCase):
                     expected,
                 )
 
-    def test_ignores_diagnostics_and_invalid_content_blocks(self) -> None:
+    def test_ignores_diagnostics_and_bad_blocks(self) -> None:
         events = [
             "diagnostic text outside the JSON stream",
             json.dumps(["not", "an", "event"]),
@@ -191,15 +214,15 @@ class RunAgentDispatchTest(unittest.TestCase):
         # find; the codex runner doesn't care about claude shape.
         sid = "abcdef12-3456-7890-abcd-ef1234567890"
         with patch(
-            "orchestrator.agents.subprocess.Popen",
+            _POPEN_TARGET,
             return_value=_completed(stdout=json.dumps({"session_id": sid})),
         ) as run_mock:
-            result = run_agent("codex", "p", _CWD)
-        self.assertEqual(result.session_id, sid)
-        self.assertEqual(result.exit_code, 0)
+            agent_result = run_agent(_CODEX, _PROMPT, _CWD)
+        self.assertEqual(agent_result.session_id, sid)
+        self.assertEqual(agent_result.exit_code, 0)
         argv = run_mock.call_args.args[0]
         self.assertIn("--dangerously-bypass-approvals-and-sandbox", argv)
-        self.assertEqual(argv[1], "exec")
+        self.assertEqual(argv[1], _CODEX_EXEC)
 
     def test_dispatches_to_claude(self) -> None:
         sid = "cafe1234-5678-90ab-cdef-1234567890ab"
@@ -208,12 +231,12 @@ class RunAgentDispatchTest(unittest.TestCase):
             json.dumps({"type": "result", "result": "shipped"}),
         ]
         with patch(
-            "orchestrator.agents.subprocess.Popen",
+            _POPEN_TARGET,
             return_value=_completed(stdout="\n".join(events)),
         ) as run_mock:
-            result = run_agent("claude", "p", _CWD)
-        self.assertEqual(result.session_id, sid)
-        self.assertEqual(result.last_message, "shipped")
+            agent_result = run_agent(_CLAUDE, _PROMPT, _CWD)
+        self.assertEqual(agent_result.session_id, sid)
+        self.assertEqual(agent_result.last_message, "shipped")
         argv = run_mock.call_args.args[0]
         self.assertIn("--dangerously-skip-permissions", argv)
         self.assertIn("-p", argv)
@@ -229,18 +252,18 @@ class RunCodexEnvScrubTest(unittest.TestCase):
         env = {
             "GITHUB_TOKEN": "ghp_secret",
             "GH_TOKEN": "ghp_alt",
-            "ANTHROPIC_API_KEY": "sk-keep-me",
-            "PATH": "/usr/bin",
+            _ANTHROPIC_API_KEY: "sk-keep-me",
+            _PATH_ENV: _SYSTEM_PATH,
         }
-        with patch.dict("os.environ", env, clear=True), patch(
-            "orchestrator.agents.subprocess.Popen",
+        with patch.dict(_OS_ENVIRON_TARGET, env, clear=True), patch(
+            _POPEN_TARGET,
             return_value=_completed(),
         ) as run_mock:
-            _run_codex("p", _CWD)
-        passed_env = run_mock.call_args.kwargs["env"]
+            _run_codex(_PROMPT, _CWD)
+        passed_env = run_mock.call_args.kwargs[_ENV_KWARG]
         self.assertNotIn("GITHUB_TOKEN", passed_env)
         self.assertNotIn("GH_TOKEN", passed_env)
-        self.assertEqual(passed_env.get("ANTHROPIC_API_KEY"), "sk-keep-me")
+        self.assertEqual(passed_env.get(_ANTHROPIC_API_KEY), "sk-keep-me")
 
     def test_production_secret_shapes_are_stripped(self) -> None:
         # Issue #213: extend the env boundary so common production-secret-
@@ -261,18 +284,18 @@ class RunCodexEnvScrubTest(unittest.TestCase):
             "TOKEN": "bare-token",
             "PASSWORD": "bare-password",
             # Non-secret vars must pass through unchanged.
-            "PATH": "/usr/bin",
+            _PATH_ENV: _SYSTEM_PATH,
             "BUILD_NUMBER": "42",
             # Provider auth: must NOT be stripped.
-            "ANTHROPIC_API_KEY": "sk-keep-anthropic",
+            _ANTHROPIC_API_KEY: "sk-keep-anthropic",
             "OPENAI_API_KEY": "sk-keep-openai",
         }
-        with patch.dict("os.environ", env, clear=True), patch(
-            "orchestrator.agents.subprocess.Popen",
+        with patch.dict(_OS_ENVIRON_TARGET, env, clear=True), patch(
+            _POPEN_TARGET,
             return_value=_completed(),
         ) as run_mock:
-            _run_codex("p", _CWD)
-        passed_env = run_mock.call_args.kwargs["env"]
+            _run_codex(_PROMPT, _CWD)
+        passed_env = run_mock.call_args.kwargs[_ENV_KWARG]
         for stripped in (
             "STRIPE_API_KEY", "DATABASE_PASSWORD", "AWS_SECRET_ACCESS_KEY",
             "DEPLOY_TOKEN", "MY_CREDENTIAL", "PAGERDUTY_PAT", "VAULT_SECRET",
@@ -280,11 +303,11 @@ class RunCodexEnvScrubTest(unittest.TestCase):
         ):
             self.assertNotIn(stripped, passed_env)
         # Non-secret vars survive.
-        self.assertEqual(passed_env.get("PATH"), "/usr/bin")
+        self.assertEqual(passed_env.get(_PATH_ENV), _SYSTEM_PATH)
         self.assertEqual(passed_env.get("BUILD_NUMBER"), "42")
         # Provider auth survives.
         self.assertEqual(
-            passed_env.get("ANTHROPIC_API_KEY"), "sk-keep-anthropic",
+            passed_env.get(_ANTHROPIC_API_KEY), "sk-keep-anthropic",
         )
         self.assertEqual(passed_env.get("OPENAI_API_KEY"), "sk-keep-openai")
 
@@ -299,20 +322,20 @@ class RunCodexEnvScrubTest(unittest.TestCase):
             "SSH_ASKPASS": "/usr/lib/ssh/ssh-askpass",
             "GIT_ASKPASS": "/usr/share/git/askpass-helper",
             "GIT_SSH_COMMAND": "ssh -i ~/.ssh/deploy-key",
-            "PATH": "/usr/bin",
+            _PATH_ENV: _SYSTEM_PATH,
         }
-        with patch.dict("os.environ", env, clear=True), patch(
-            "orchestrator.agents.subprocess.Popen",
+        with patch.dict(_OS_ENVIRON_TARGET, env, clear=True), patch(
+            _POPEN_TARGET,
             return_value=_completed(),
         ) as run_mock:
-            _run_codex("p", _CWD)
-        passed_env = run_mock.call_args.kwargs["env"]
+            _run_codex(_PROMPT, _CWD)
+        passed_env = run_mock.call_args.kwargs[_ENV_KWARG]
         for stripped in _AGENT_WRITE_CREDENTIAL_LOCATORS:
             self.assertNotIn(
                 stripped, passed_env,
                 f"{stripped} must be stripped from the agent env",
             )
-        self.assertEqual(passed_env.get("PATH"), "/usr/bin")
+        self.assertEqual(passed_env.get(_PATH_ENV), _SYSTEM_PATH)
 
     def test_credential_file_locators_are_stripped(self) -> None:
         # Credential-file locators -- the env value is a filesystem path
@@ -337,12 +360,12 @@ class RunCodexEnvScrubTest(unittest.TestCase):
             "TMPDIR": "/tmp",
             "MY_CONFIG_FILE": "/etc/myapp/config.yaml",
         }
-        with patch.dict("os.environ", env, clear=True), patch(
-            "orchestrator.agents.subprocess.Popen",
+        with patch.dict(_OS_ENVIRON_TARGET, env, clear=True), patch(
+            _POPEN_TARGET,
             return_value=_completed(),
         ) as run_mock:
-            _run_codex("p", _CWD)
-        passed_env = run_mock.call_args.kwargs["env"]
+            _run_codex(_PROMPT, _CWD)
+        passed_env = run_mock.call_args.kwargs[_ENV_KWARG]
         for stripped in (
             "ORCHESTRATOR_TOKEN_FILE",
             "GOOGLE_APPLICATION_CREDENTIALS",
@@ -373,10 +396,10 @@ class FilterAgentEnvTest(unittest.TestCase):
         # The GitHub-token alias list contains entries that don't match
         # the secret-shape suffix (e.g. `GH_HOST`); they must still be
         # stripped via `_FORBIDDEN_AGENT_ENV`.
-        env = {"GH_HOST": "github.example.com", "PATH": "/usr/bin"}
+        env = {"GH_HOST": "github.example.com", _PATH_ENV: _SYSTEM_PATH}
         filtered_env = _filter_agent_env(env)
         self.assertNotIn("GH_HOST", filtered_env)
-        self.assertEqual(filtered_env.get("PATH"), "/usr/bin")
+        self.assertEqual(filtered_env.get(_PATH_ENV), _SYSTEM_PATH)
 
     def test_write_locators_stripped_in_both_modes(self) -> None:
         # `_AGENT_WRITE_CREDENTIAL_LOCATORS` is stripped regardless of
@@ -407,7 +430,7 @@ class FilterAgentEnvTest(unittest.TestCase):
         # dependency executed under the verify shell would otherwise
         # gain billable access to the operator's model account.
         env = {name: "value-long-enough" for name in _AGENT_PROVIDER_AUTH_ALLOWLIST}
-        env["PATH"] = "/usr/bin"
+        env[_PATH_ENV] = _SYSTEM_PATH
         filtered_env = _filter_agent_env(env, allow_provider_auth=False)
         for name in _AGENT_PROVIDER_AUTH_ALLOWLIST:
             self.assertNotIn(
@@ -415,7 +438,7 @@ class FilterAgentEnvTest(unittest.TestCase):
                 f"{name} must be stripped when allow_provider_auth=False",
             )
         # Non-secret entries still survive.
-        self.assertEqual(filtered_env.get("PATH"), "/usr/bin")
+        self.assertEqual(filtered_env.get(_PATH_ENV), _SYSTEM_PATH)
 
     def test_secret_shape_predicate(self) -> None:
         # Direct check on the predicate so the contract is documented
@@ -436,7 +459,7 @@ class FilterAgentEnvTest(unittest.TestCase):
                 _is_secret_shaped(name), f"{name} should look secret-shaped"
             )
         for name in (
-            "PATH", "HOME", "BUILD_NUMBER", "CI", "USER",
+            _PATH_ENV, "HOME", "BUILD_NUMBER", "CI", "USER",
             # Plain config-file locators (non-credential) must not match.
             "MY_CONFIG_FILE", "PROFILE_FILE",
         ):
@@ -457,10 +480,10 @@ class RunCodexCwdTest(unittest.TestCase):
         # derived from it) is relative.
         rel_cwd = Path("../wt-orchestrator/foo/issue-1")
         with patch(
-            "orchestrator.agents.subprocess.Popen",
+            _POPEN_TARGET,
             return_value=_completed(),
         ) as run_mock:
-            _run_codex("p", rel_cwd)
+            _run_codex(_PROMPT, rel_cwd)
         argv = run_mock.call_args.args[0]
         c_value = argv[argv.index("-C") + 1]
         self.assertTrue(
@@ -474,13 +497,13 @@ class RunClaudeResumeTest(unittest.TestCase):
     def test_resume_passes_resume_session_id_arg(self) -> None:
         sid = "deadbeef-1234-1234-1234-1234deadbeef"
         with patch(
-            "orchestrator.agents.subprocess.Popen",
+            _POPEN_TARGET,
             return_value=_completed(),
         ) as run_mock:
             _run_claude("followup", _CWD, resume_session_id=sid)
         argv = run_mock.call_args.args[0]
-        self.assertIn("--resume", argv)
-        self.assertEqual(argv[argv.index("--resume") + 1], sid)
+        self.assertIn(_RESUME_FLAG, argv)
+        self.assertEqual(argv[argv.index(_RESUME_FLAG) + 1], sid)
 
 
 class RunAgentExtraArgsTest(unittest.TestCase):
@@ -495,66 +518,74 @@ class RunAgentExtraArgsTest(unittest.TestCase):
         # subcommand; the parser rejects them after the subcommand. The
         # safety/output flags and prompt must remain on the argv tail.
         argv = self._argv_for(
-            "codex",
-            extra_args=("-m", "gpt-5.5", "-c", 'model_reasoning_effort="xhigh"'),
+            _CODEX,
+            extra_args=(
+                _MODEL_FLAG,
+                _CODEX_MODEL,
+                _CONFIG_FLAG,
+                'model_reasoning_effort="xhigh"',
+            ),
         )
         self.assertEqual(argv[1:5], [
-            "-m", "gpt-5.5", "-c", 'model_reasoning_effort="xhigh"',
+            _MODEL_FLAG,
+            _CODEX_MODEL,
+            _CONFIG_FLAG,
+            'model_reasoning_effort="xhigh"',
         ])
-        self.assertEqual(argv[5], "exec")
+        self.assertEqual(argv[5], _CODEX_EXEC)
         self.assertIn("--dangerously-bypass-approvals-and-sandbox", argv)
         self.assertIn("--json", argv)
-        self.assertEqual(argv[-1], "p")
+        self.assertEqual(argv[-1], _PROMPT)
 
     def test_codex_resume_adds_args_before_exec(self) -> None:
         sid = "11111111-2222-3333-4444-555555555555"
         argv = self._argv_for(
-            "codex",
-            extra_args=("-m", "gpt-5.5"),
+            _CODEX,
+            extra_args=(_MODEL_FLAG, _CODEX_MODEL),
             resume_session_id=sid,
         )
-        self.assertEqual(argv[1:3], ["-m", "gpt-5.5"])
-        self.assertEqual(argv[3:5], ["exec", "resume"])
+        self.assertEqual(argv[1:3], [_MODEL_FLAG, _CODEX_MODEL])
+        self.assertEqual(argv[3:5], [_CODEX_EXEC, "resume"])
         # Resume session id and prompt are still the last two tokens; the
         # extra args must NOT have displaced them.
-        self.assertEqual(argv[-2:], [sid, "p"])
+        self.assertEqual(argv[-2:], [sid, _PROMPT])
 
     def test_claude_fresh_adds_args_before_safety(self) -> None:
         argv = self._argv_for(
-            "claude",
-            extra_args=("--model", "claude-opus-4-7", "--effort", "high"),
+            _CLAUDE,
+            extra_args=(_CLAUDE_MODEL_FLAG, _CLAUDE_MODEL, "--effort", "high"),
         )
         self.assertEqual(argv[1:5], [
-            "--model", "claude-opus-4-7", "--effort", "high",
+            _CLAUDE_MODEL_FLAG, _CLAUDE_MODEL, "--effort", "high",
         ])
         # Safety + output flags survive immediately after the extra args.
         self.assertEqual(argv[5], "-p")
         self.assertIn("--dangerously-skip-permissions", argv)
         self.assertIn("--output-format", argv)
-        self.assertEqual(argv[-1], "p")
+        self.assertEqual(argv[-1], _PROMPT)
 
     def test_claude_resume_keeps_args_and_flag(self) -> None:
         sid = "deadbeef-1234-1234-1234-1234deadbeef"
         argv = self._argv_for(
-            "claude",
-            extra_args=("--model", "claude-opus-4-7"),
+            _CLAUDE,
+            extra_args=(_CLAUDE_MODEL_FLAG, _CLAUDE_MODEL),
             resume_session_id=sid,
         )
-        self.assertEqual(argv[1:3], ["--model", "claude-opus-4-7"])
+        self.assertEqual(argv[1:3], [_CLAUDE_MODEL_FLAG, _CLAUDE_MODEL])
         # `--resume <sid>` is appended after the safety flags and right
         # before the prompt, regardless of extra_args.
-        self.assertIn("--resume", argv)
-        self.assertEqual(argv[argv.index("--resume") + 1], sid)
-        self.assertEqual(argv[-1], "p")
+        self.assertIn(_RESUME_FLAG, argv)
+        self.assertEqual(argv[argv.index(_RESUME_FLAG) + 1], sid)
+        self.assertEqual(argv[-1], _PROMPT)
 
     def test_empty_default_keeps_argv_unchanged(self) -> None:
         # Backward compat: callers that don't pass `extra_args` still get
         # the legacy argv with no inserted tokens. Sanity-checks both
         # backends so a future refactor that changes argv shape under
         # default callers fails this test loudly.
-        codex_argv = self._argv_for("codex", extra_args=())
-        self.assertEqual(codex_argv[1], "exec")
-        claude_argv = self._argv_for("claude", extra_args=())
+        codex_argv = self._argv_for(_CODEX, extra_args=())
+        self.assertEqual(codex_argv[1], _CODEX_EXEC)
+        claude_argv = self._argv_for(_CLAUDE, extra_args=())
         self.assertEqual(claude_argv[1], "-p")
 
     def _argv_for(
@@ -565,11 +596,11 @@ class RunAgentExtraArgsTest(unittest.TestCase):
         resume_session_id=None,
     ) -> list[str]:
         with patch(
-            "orchestrator.agents.subprocess.Popen",
+            _POPEN_TARGET,
             return_value=_completed(),
         ) as run_mock:
             run_agent(
-                backend, "p", _CWD,
+                backend, _PROMPT, _CWD,
                 resume_session_id=resume_session_id,
                 extra_args=extra_args,
             )
@@ -586,7 +617,7 @@ class TerminateAllRunningTest(unittest.TestCase):
     def test_no_procs_is_noop(self) -> None:
         # Registry empty between tests (every spawn unregisters in a finally),
         # so this exercises the early return with no signals sent.
-        with patch.object(agents.os, "killpg") as killpg:
+        with patch.object(agents.os, _KILLPG) as killpg:
             self.assertEqual(agents.terminate_all_running(), 0)
         killpg.assert_not_called()
 
@@ -602,14 +633,14 @@ class TerminateAllRunningTest(unittest.TestCase):
 
         try:
             with patch.object(
-                agents.os, "killpg", side_effect=_killpg_group_empty,
-            ) as kp:
-                n = agents.terminate_all_running(grace=0.5)
+                agents.os, _KILLPG, side_effect=_killpg_group_empty,
+            ) as signal_mock:
+                terminated_count = agents.terminate_all_running(grace=0.5)
         finally:
             agents._unregister_proc(proc1)
             agents._unregister_proc(proc2)
-        self.assertEqual(n, 2)
-        sent = {c.args for c in kp.call_args_list}
+        self.assertEqual(terminated_count, 2)
+        sent = {call.args for call in signal_mock.call_args_list}
         self.assertIn((111, signal.SIGTERM), sent)
         self.assertIn((222, signal.SIGTERM), sent)
         self.assertNotIn((111, signal.SIGKILL), sent)
@@ -627,12 +658,12 @@ class TerminateAllRunningTest(unittest.TestCase):
 
         try:
             with patch.object(
-                agents.os, "killpg", side_effect=_killpg_group_alive,
-            ) as kp:
-                agents.terminate_all_running(grace=0.05)
+                agents.os, _KILLPG, side_effect=_killpg_group_alive,
+            ) as signal_mock:
+                agents.terminate_all_running(grace=_TERMINATION_GRACE_SECONDS)
         finally:
             agents._unregister_proc(proc)
-        sent = [c.args for c in kp.call_args_list]
+        sent = [call.args for call in signal_mock.call_args_list]
         self.assertIn((555, signal.SIGTERM), sent)
         self.assertIn((555, 0), sent)  # group liveness probed after leader exit
         self.assertIn((555, signal.SIGKILL), sent)
@@ -642,14 +673,16 @@ class TerminateAllRunningTest(unittest.TestCase):
         # shared grace deadline elapses.
         proc = MagicMock()
         proc.pid = 333
-        proc.wait.side_effect = subprocess.TimeoutExpired(cmd="agent", timeout=0.05)
+        proc.wait.side_effect = subprocess.TimeoutExpired(
+            cmd=_AGENT_COMMAND, timeout=_TERMINATION_GRACE_SECONDS,
+        )
         agents._register_proc(proc)
         try:
-            with patch.object(agents.os, "killpg") as killpg:
-                agents.terminate_all_running(grace=0.05)
+            with patch.object(agents.os, _KILLPG) as killpg:
+                agents.terminate_all_running(grace=_TERMINATION_GRACE_SECONDS)
         finally:
             agents._unregister_proc(proc)
-        calls = [c.args for c in killpg.call_args_list]
+        calls = [call.args for call in killpg.call_args_list]
         self.assertIn((333, signal.SIGTERM), calls)
         self.assertIn((333, signal.SIGKILL), calls)
 
@@ -662,9 +695,14 @@ class TerminateAllRunningTest(unittest.TestCase):
         agents._register_proc(proc)
         try:
             with patch.object(
-                agents.os, "killpg", side_effect=ProcessLookupError,
+                agents.os, _KILLPG, side_effect=ProcessLookupError,
             ):
-                self.assertEqual(agents.terminate_all_running(grace=0.05), 1)
+                self.assertEqual(
+                    agents.terminate_all_running(
+                        grace=_TERMINATION_GRACE_SECONDS,
+                    ),
+                    1,
+                )
         finally:
             agents._unregister_proc(proc)
 
@@ -673,7 +711,7 @@ class TerminateAllRunningTest(unittest.TestCase):
         # SIGKILL decision now relies on, so drive a real process group:
         # alive while the leader runs, empty once it is killed and reaped.
         proc = subprocess.Popen(
-            [sys.executable, "-c", "import time; time.sleep(120)"],
+            [sys.executable, _PYTHON_COMMAND_FLAG, "import time; time.sleep(120)"],
             start_new_session=True,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -706,10 +744,10 @@ class TerminateProcessGroupTest(unittest.TestCase):
         proc.wait.return_value = 0  # leader exits promptly on SIGTERM
 
         with patch.object(
-            agents.os, "killpg", side_effect=_killpg_group_alive,
-        ) as kp:
+            agents.os, _KILLPG, side_effect=_killpg_group_alive,
+        ) as signal_mock:
             agents._terminate_process_group(proc)
-        sent = [c.args for c in kp.call_args_list]
+        sent = [call.args for call in signal_mock.call_args_list]
         self.assertIn((777, signal.SIGTERM), sent)
         self.assertIn((777, 0), sent)  # group liveness probed after leader exit
         self.assertIn((777, signal.SIGKILL), sent)
@@ -722,10 +760,10 @@ class TerminateProcessGroupTest(unittest.TestCase):
         proc.wait.return_value = 0
 
         with patch.object(
-            agents.os, "killpg", side_effect=_killpg_group_empty,
-        ) as kp:
+            agents.os, _KILLPG, side_effect=_killpg_group_empty,
+        ) as signal_mock:
             agents._terminate_process_group(proc)
-        sent = [c.args for c in kp.call_args_list]
+        sent = [call.args for call in signal_mock.call_args_list]
         self.assertIn((778, signal.SIGTERM), sent)
         self.assertIn((778, 0), sent)
         self.assertNotIn((778, signal.SIGKILL), sent)
@@ -736,10 +774,12 @@ class TerminateProcessGroupTest(unittest.TestCase):
         # group).
         proc = MagicMock()
         proc.pid = 779
-        proc.wait.side_effect = subprocess.TimeoutExpired(cmd="agent", timeout=5)
-        with patch.object(agents.os, "killpg") as killpg:
+        proc.wait.side_effect = subprocess.TimeoutExpired(
+            cmd=_AGENT_COMMAND, timeout=5,
+        )
+        with patch.object(agents.os, _KILLPG) as killpg:
             agents._terminate_process_group(proc)
-        calls = [c.args for c in killpg.call_args_list]
+        calls = [call.args for call in killpg.call_args_list]
         self.assertIn((779, signal.SIGTERM), calls)
         self.assertIn((779, signal.SIGKILL), calls)
         self.assertNotIn((779, 0), calls)  # no probe when the leader is alive
@@ -750,11 +790,12 @@ class TerminateProcessGroupTest(unittest.TestCase):
         proc = MagicMock()
         proc.pid = 780
         with patch.object(
-            agents.os, "killpg", side_effect=ProcessLookupError,
-        ) as kp:
+            agents.os, _KILLPG, side_effect=ProcessLookupError,
+        ) as signal_mock:
             agents._terminate_process_group(proc)
         self.assertEqual(
-            [c.args for c in kp.call_args_list], [(780, signal.SIGTERM)]
+            [call.args for call in signal_mock.call_args_list],
+            [(780, signal.SIGTERM)],
         )
         proc.wait.assert_not_called()
 
@@ -769,14 +810,14 @@ class RunSubprocessRegistrationTest(unittest.TestCase):
         proc = _completed(stdout="{}", returncode=0)
         seen: dict[str, bool] = {}
 
-        def check_registered(*_a, **_k):
+        def check_registered(*unused_args, **unused_kwargs):
             with agents._running_procs_lock:
                 seen["during"] = proc in agents._running_procs
             return ("{}", "")
 
         proc.communicate.side_effect = check_registered
-        with patch("orchestrator.agents.subprocess.Popen", return_value=proc):
-            agents._run_subprocess(["agent"], _CWD, {}, 10)
+        with patch(_POPEN_TARGET, return_value=proc):
+            agents._run_subprocess([_AGENT_COMMAND], _CWD, {}, 10)
 
         self.assertTrue(seen["during"], "child not registered during the run")
         with agents._running_procs_lock:
@@ -798,7 +839,7 @@ class CommunicateBoundedTest(unittest.TestCase):
     def test_returns_none_on_timeout(self) -> None:
         proc = MagicMock()
         proc.communicate.side_effect = subprocess.TimeoutExpired(
-            cmd="agent", timeout=5,
+            cmd=_AGENT_COMMAND, timeout=5,
         )
         self.assertIsNone(agents._communicate_bounded(proc, 5))
 
@@ -823,9 +864,9 @@ class InterruptedClassificationTest(unittest.TestCase):
     def test_clean_exit_not_interrupted(self) -> None:
         # A normal non-zero failure (exit 3) is a completed run, NOT an
         # interruption -- the two must stay distinguishable downstream.
-        cmd = [sys.executable, "-c", "import sys; sys.exit(3)"]
+        cmd = [sys.executable, _PYTHON_COMMAND_FLAG, "import sys; sys.exit(3)"]
         *_, exit_code, timed_out, interrupted = agents._run_subprocess(
-            cmd, _REAL_CWD, dict(os.environ), 30
+            cmd, _REAL_CWD, dict(os.environ), _SUBPROCESS_TIMEOUT_SECONDS,
         )
         self.assertEqual(exit_code, 3)
         self.assertFalse(timed_out)
@@ -837,7 +878,7 @@ class InterruptedClassificationTest(unittest.TestCase):
         # `timed_out=True`, `interrupted=False`, exit_code=-1 -- distinct from
         # the shutdown-sweep interruption above even though both signal the
         # group. Real child + 1s timeout so the whole flatten path is exercised.
-        cmd = [sys.executable, "-c", "import time; time.sleep(30)"]
+        cmd = [sys.executable, _PYTHON_COMMAND_FLAG, "import time; time.sleep(30)"]
         *_, exit_code, timed_out, interrupted = agents._run_subprocess(
             cmd, _REAL_CWD, dict(os.environ), 1
         )
@@ -847,35 +888,35 @@ class InterruptedClassificationTest(unittest.TestCase):
 
     def test_run_codex_threads_interrupted_through(self) -> None:
         with patch(
-            "orchestrator.agents.subprocess.Popen",
+            _POPEN_TARGET,
             return_value=_completed(returncode=-signal.SIGTERM),
         ):
-            result = _run_codex("p", _CWD)
-        self.assertTrue(result.interrupted)
-        self.assertFalse(result.timed_out)
-        self.assertEqual(result.exit_code, -signal.SIGTERM)
+            agent_result = _run_codex(_PROMPT, _CWD)
+        self.assertTrue(agent_result.interrupted)
+        self.assertFalse(agent_result.timed_out)
+        self.assertEqual(agent_result.exit_code, -signal.SIGTERM)
 
     def test_run_claude_threads_interrupted_through(self) -> None:
         with patch(
-            "orchestrator.agents.subprocess.Popen",
+            _POPEN_TARGET,
             return_value=_completed(returncode=-signal.SIGKILL),
         ):
-            result = _run_claude("p", _CWD)
-        self.assertTrue(result.interrupted)
-        self.assertFalse(result.timed_out)
+            agent_result = _run_claude(_PROMPT, _CWD)
+        self.assertTrue(agent_result.interrupted)
+        self.assertFalse(agent_result.timed_out)
 
     def test_clean_run_reports_not_interrupted(self) -> None:
         with patch(
-            "orchestrator.agents.subprocess.Popen",
+            _POPEN_TARGET,
             return_value=_completed(returncode=0),
         ):
-            result = run_agent("codex", "p", _CWD)
-        self.assertFalse(result.interrupted)
+            agent_result = run_agent(_CODEX, _PROMPT, _CWD)
+        self.assertFalse(agent_result.interrupted)
 
     def test_agent_result_interrupted_defaults_false(self) -> None:
         # Backwards-compat: existing positional/keyword constructions that omit
         # the new field still build and read `interrupted` as False.
-        result = AgentResult(
+        agent_result = AgentResult(
             session_id=None,
             last_message="",
             exit_code=0,
@@ -883,17 +924,22 @@ class InterruptedClassificationTest(unittest.TestCase):
             stdout="",
             stderr="",
         )
-        self.assertFalse(result.interrupted)
+        self.assertFalse(agent_result.interrupted)
 
     def _kill_self(self, sig: signal.Signals) -> tuple[str, str, int, bool, bool]:
         # Drive a REAL child that signals itself, so the negative returncode is
         # produced by the kernel + Popen exactly as it is when the shutdown
         # sweep SIGTERMs/SIGKILLs the group, not synthesized by a mock.
         cmd = [
-            sys.executable, "-c",
+            sys.executable, _PYTHON_COMMAND_FLAG,
             f"import os, signal; os.kill(os.getpid(), {int(sig)})",
         ]
-        return agents._run_subprocess(cmd, _REAL_CWD, dict(os.environ), 30)
+        return agents._run_subprocess(
+            cmd,
+            _REAL_CWD,
+            dict(os.environ),
+            _SUBPROCESS_TIMEOUT_SECONDS,
+        )
 
 
 class ClaudeLastMessageGatingTest(unittest.TestCase):
@@ -903,18 +949,17 @@ class ClaudeLastMessageGatingTest(unittest.TestCase):
     the last streamed chunk as the agent's considered final answer.
     """
 
-    _PARTIAL = json.dumps({"type": "assistant", "message": {
-        "content": [{"type": "text", "text": "partial work so far"}],
-    }})
-
     def test_fallback_gated_off_directly(self) -> None:
         # With the fallback disabled, a transcript carrying only assistant
         # chunks yields ""; a terminal result event is still honored.
         self.assertEqual(
-            _claude_last_message(self._PARTIAL, allow_assistant_fallback=False),
+            _claude_last_message(
+                _PARTIAL_CLAUDE_OUTPUT,
+                allow_assistant_fallback=False,
+            ),
             "",
         )
-        with_result = self._PARTIAL + "\n" + json.dumps(
+        with_result = _PARTIAL_CLAUDE_OUTPUT + "\n" + json.dumps(
             {"type": "result", "result": "final"}
         )
         self.assertEqual(
@@ -924,51 +969,51 @@ class ClaudeLastMessageGatingTest(unittest.TestCase):
 
     def test_interrupted_no_result_is_empty(self) -> None:
         with patch(
-            "orchestrator.agents.subprocess.Popen",
+            _POPEN_TARGET,
             return_value=_completed(
-                stdout=self._PARTIAL, returncode=-signal.SIGTERM,
+                stdout=_PARTIAL_CLAUDE_OUTPUT, returncode=-signal.SIGTERM,
             ),
         ):
-            result = _run_claude("p", _CWD)
-        self.assertTrue(result.interrupted)
-        self.assertEqual(result.last_message, "")
+            agent_result = _run_claude(_PROMPT, _CWD)
+        self.assertTrue(agent_result.interrupted)
+        self.assertEqual(agent_result.last_message, "")
 
     def test_nonzero_no_result_is_empty(self) -> None:
         with patch(
-            "orchestrator.agents.subprocess.Popen",
-            return_value=_completed(stdout=self._PARTIAL, returncode=1),
+            _POPEN_TARGET,
+            return_value=_completed(stdout=_PARTIAL_CLAUDE_OUTPUT, returncode=1),
         ):
-            result = _run_claude("p", _CWD)
-        self.assertFalse(result.interrupted)
-        self.assertEqual(result.exit_code, 1)
-        self.assertEqual(result.last_message, "")
+            agent_result = _run_claude(_PROMPT, _CWD)
+        self.assertFalse(agent_result.interrupted)
+        self.assertEqual(agent_result.exit_code, 1)
+        self.assertEqual(agent_result.last_message, "")
 
     def test_interrupted_result_is_kept(self) -> None:
         # A run that emitted the terminal result before being killed still
         # surfaces that result -- the gate only suppresses the partial-chunk
         # fallback, never the documented final-message channel.
-        out = self._PARTIAL + "\n" + json.dumps(
+        out = _PARTIAL_CLAUDE_OUTPUT + "\n" + json.dumps(
             {"type": "result", "result": "done before kill"}
         )
         with patch(
-            "orchestrator.agents.subprocess.Popen",
+            _POPEN_TARGET,
             return_value=_completed(stdout=out, returncode=-signal.SIGKILL),
         ):
-            result = _run_claude("p", _CWD)
-        self.assertTrue(result.interrupted)
-        self.assertEqual(result.last_message, "done before kill")
+            agent_result = _run_claude(_PROMPT, _CWD)
+        self.assertTrue(agent_result.interrupted)
+        self.assertEqual(agent_result.last_message, "done before kill")
 
     def test_clean_run_still_uses_assistant_fallback(self) -> None:
         # The clean-completion path keeps the forward-compat fallback so a
         # schema drift that drops the result event does not silently blank the
         # final message on a successful run.
         with patch(
-            "orchestrator.agents.subprocess.Popen",
-            return_value=_completed(stdout=self._PARTIAL, returncode=0),
+            _POPEN_TARGET,
+            return_value=_completed(stdout=_PARTIAL_CLAUDE_OUTPUT, returncode=0),
         ):
-            result = _run_claude("p", _CWD)
-        self.assertFalse(result.interrupted)
-        self.assertEqual(result.last_message, "partial work so far")
+            agent_result = _run_claude(_PROMPT, _CWD)
+        self.assertFalse(agent_result.interrupted)
+        self.assertEqual(agent_result.last_message, "partial work so far")
 
 
 if __name__ == "__main__":

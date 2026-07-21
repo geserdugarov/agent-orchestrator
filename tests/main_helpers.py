@@ -11,7 +11,32 @@ from __future__ import annotations
 
 import threading
 from pathlib import Path
+from types import MappingProxyType
 from unittest.mock import MagicMock
+
+
+_REPOS_ENV = "REPOS"
+_ALPHA_REPO = "alpha/one"
+_BETA_REPO = "beta/two"
+_LEGACY_REPO = "owner/legacy"
+_REPO = "owner/repo"
+_GITHUB_CLIENT_ATTR = "GitHubClient"
+_TICK_ATTR = "tick"
+_SHUTDOWN_GRACE_ATTR = "SHUTDOWN_GRACE_SECONDS"
+_COUNT_FIELD = "n"
+_ONCE_ARGS = ("--once",)
+_LEGACY_ENV = MappingProxyType({
+    "REPO": _LEGACY_REPO,
+    "TARGET_REPO_ROOT": "/tmp",
+    "BASE_BRANCH": "trunk",
+})
+_WORKER_WAIT_SECONDS = 5.0
+_FAST_WAIT_SECONDS = 2.0
+_SCHEDULER_POLL_SECONDS = 0.01
+_SHORT_SHUTDOWN_GRACE_SECONDS = 0.05
+_SHUTDOWN_GRACE_SECONDS = 30
+_SIGNAL_EXIT_BASE = 128
+_UNUSED_ISSUE_NUMBER = 999
 
 
 class _ClientFactory:
