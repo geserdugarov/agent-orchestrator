@@ -40,6 +40,11 @@ from orchestrator._usage_metrics import (
 )
 
 
+_FoldedCounts = tuple[list[str], dict[str, int]]
+_CommandSkillNames = tuple[list[str], list[str]]
+_CodexTokenClassification = tuple[list[str], list[str], bool]
+
+
 # Skill/trajectory JSONL protocol field and message-type values this module
 # reads on top of the shared usage vocabulary re-used from ``_usage_metrics``.
 # The sibling ``_usage_trajectory`` classifier re-imports both.
@@ -111,7 +116,7 @@ class SkillTriggers:
     incidental_counts: dict[str, int] = field(default_factory=dict)
 
 
-def _fold_counts(names: Iterable[str]) -> tuple[list[str], dict[str, int]]:
+def _fold_counts(names: Iterable[str]) -> _FoldedCounts:
     """Fold first-seen names into (order, name -> count)."""
     order: list[str] = []
     counts: dict[str, int] = {}
@@ -313,7 +318,7 @@ _CODEX_SKILL_PATH_RE = re.compile(r"(?<!\w)skills/([^/\s\"']+)/SKILL\.md\b")
 # that quoted string back to the inner script bash actually runs -- preserving
 # the script's own quoting rather than blindly stripping the outer quotes.
 _CODEX_SHELL_WRAPPER_RE = re.compile(
-    r"""^\s*(?:\S*/)?(?:ba)?sh\s+-[a-z]*c\s+""",
+    r"^\s*(?:\S*/)?(?:ba)?sh\s+-[a-z]*c\s+",
 )
 
 # A leading ``NAME=value`` environment assignment (``GIT_PAGER=cat git diff``);
@@ -341,13 +346,13 @@ _CODEX_SED_INPLACE_RE = re.compile(r"^(?:-[a-zA-Z]*i|--in-place)")
 # and other write-capable programs are deliberately excluded -- they can modify
 # the file rather than load it, the same reason the redirect / ``sed -i``
 # guards demote a reader whose SKILL.md is a write target.
-_CODEX_READER_VERBS = frozenset({
+_CODEX_READER_VERBS = frozenset((
     "cat", "sed", "head", "tail", "less", "more", "bat", "nl",
-})
+))
 
 
 def _read_quoted(text: str) -> str:
-    """Decode the leading shell-quoted string of ``text``, dropping the quotes.
+    r"""Decode the leading shell-quoted string of ``text``, dropping the quotes.
 
     ``text`` starts at the opening quote. A single-quoted string is literal up
     to the next ``'``; a double-quoted string decodes the escapes bash honors
@@ -376,7 +381,7 @@ def _read_quoted(text: str) -> str:
 
 
 def _unwrap_codex_command(command: str) -> str:
-    """Peel a ``bash -lc "<script>"`` wrapper, returning the inner script.
+    r"""Peel a ``bash -lc "<script>"`` wrapper, returning the inner script.
 
     A codex ``command`` is usually a shell wrapper around the real script; the
     outer quote spans the whole script, so classifying the raw command would
@@ -396,8 +401,60 @@ def _unwrap_codex_command(command: str) -> str:
     return command
 
 
+@dataclass
+class _ShellSegmentScanner:
+    script: str
+    segments: list[str] = field(default_factory=list)
+    segment_start: int = 0
+    quote: str = ""
+    index: int = 0
+
+    def split(self) -> list[str]:
+        while self.index < len(self.script):
+            self._advance()
+        self.segments.append(self.script[self.segment_start:])
+        return self.segments
+
+    def _advance(self) -> None:
+        if self._skip_escaped_char():
+            return
+        char = self.script[self.index]
+        if self.quote:
+            if char == self.quote:
+                self.quote = ""
+            self.index += 1
+            return
+        if char in ("'", '"'):
+            self.quote = char
+            self.index += 1
+            return
+        operator_width = self._operator_width()
+        if operator_width:
+            self.segments.append(self.script[self.segment_start:self.index])
+            self.index += operator_width
+            self.segment_start = self.index
+            return
+        self.index += 1
+
+    def _skip_escaped_char(self) -> bool:
+        if self.script[self.index] != "\\" or self.quote == "'":
+            return False
+        if self.index + 1 >= len(self.script):
+            return False
+        self.index += 2
+        return True
+
+    def _operator_width(self) -> int:
+        operator_end = self.index + 2
+        if self.script[self.index:operator_end] in ("&&", "||"):
+            return 2
+        if self.script[self.index] in (";", "\n", "|"):
+            return 1
+        return 0
+
+
 def _split_codex_segments(script: str) -> list[str]:
-    """Split a shell script into sub-commands on *unquoted* control operators.
+    r"""Split a shell script into sub-commands on *unquoted* control operators.
 
     Walks the string tracking single / double quote state so a shell
     metacharacter inside a quoted argument (``rg 'foo|bar' path``) does not
@@ -410,31 +467,7 @@ def _split_codex_segments(script: str) -> list[str]:
     ``_unwrap_codex_command``) so the wrapper's own quotes never swallow the
     operators.
     """
-    segments: list[str] = []
-    start = 0
-    quote = ""
-    index = 0
-    length = len(script)
-    while index < length:
-        char = script[index]
-        if char == "\\" and quote != "'" and index + 1 < length:
-            index += 2
-            continue
-        if quote:
-            if char == quote:
-                quote = ""
-            index += 1
-            continue
-        if char in ("'", '"'):
-            quote = char
-        elif char in (";", "\n", "|") or script[index:index + 2] == "&&":
-            segments.append(script[start:index])
-            index += 2 if script[index:index + 2] in ("&&", "||") else 1
-            start = index
-            continue
-        index += 1
-    segments.append(script[start:])
-    return segments
+    return _ShellSegmentScanner(script).split()
 
 
 def _codex_reads(tokens: list[str]) -> bool:
@@ -472,17 +505,37 @@ def _classify_codex_segment(
     inspection / search, an env-prefixed inspection, a generic path-only
     command -- is an incidental reference. Names keep first-seen order.
     """
-    tokens = segment.split()
+    _extend_codex_classification(segment.split(), inferred, incidental)
+
+
+def _extend_codex_classification(
+    tokens: list[str], inferred: list[str], incidental: list[str],
+) -> None:
     reads = _codex_reads(tokens)
-    prev_is_redirect_op = False
+    previous_redirect = False
     for token in tokens:
-        redirect = _CODEX_OUTPUT_REDIRECT_RE.match(token)
-        for name in _CODEX_SKILL_PATH_RE.findall(token):
-            attached_redirect = redirect is not None and redirect.end() < len(token)
-            is_target = prev_is_redirect_op or attached_redirect
-            bucket = inferred if reads and not is_target else incidental
-            bucket.append(name)
-        prev_is_redirect_op = redirect is not None and redirect.end() == len(token)
+        loaded, referenced, previous_redirect = _classify_codex_token(
+            token, reads, previous_redirect,
+        )
+        inferred.extend(loaded)
+        incidental.extend(referenced)
+
+
+def _classify_codex_token(
+    token: str, reads: bool, previous_redirect: bool,
+) -> _CodexTokenClassification:
+    redirect_match = _CODEX_OUTPUT_REDIRECT_RE.match(token)
+    redirect_end = -1
+    if redirect_match:
+        redirect_end = redirect_match.end()
+    names = _CODEX_SKILL_PATH_RE.findall(token)
+    is_target = previous_redirect or 0 <= redirect_end < len(token)
+    next_is_redirect = redirect_end == len(token)
+    if is_target:
+        return [], names, next_is_redirect
+    if reads:
+        return names, [], next_is_redirect
+    return [], names, next_is_redirect
 
 
 def _classify_codex_command(command: str) -> tuple[list[str], list[str]]:
@@ -555,7 +608,7 @@ def parse_codex_skills(stdout: str) -> SkillTriggers:
 class _CodexSkillCollector:
     # item.id -> (inferred names, incidental names) for that command; the last
     # frame per id wins (started/completed echo the same command).
-    by_id: dict[str, tuple[list[str], list[str]]] = field(default_factory=dict)
+    by_id: dict[str, _CommandSkillNames] = field(default_factory=dict)
     id_order: list[str] = field(default_factory=list)
     anon_inferred: list[str] = field(default_factory=list)
     anon_incidental: list[str] = field(default_factory=list)

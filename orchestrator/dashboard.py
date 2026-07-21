@@ -147,7 +147,7 @@ from typing import Any, Optional, Sequence
 # which loads the helper from the script's own directory WITHOUT importing
 # the `orchestrator` package before the repo root is on the path (doing so
 # would bind the parent to any stale/installed copy already importable).
-if globals().get("__package__"):
+if __package__:
     from orchestrator.script_launch import ensure_repo_root_on_path
 else:  # script-launched: only `orchestrator/` is on sys.path
     from script_launch import ensure_repo_root_on_path

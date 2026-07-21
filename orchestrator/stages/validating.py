@@ -41,6 +41,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import re
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, Optional, Tuple
 
 from github.Issue import Issue
@@ -50,6 +51,8 @@ from orchestrator.agents import AgentResult
 from orchestrator.comment_trust import filter_trusted
 from orchestrator.state_machine import WorkflowLabel
 from orchestrator.github import GitHubClient, PinnedState
+
+_ReviewRoundsCommand = Tuple[int, Optional[str]]
 
 
 # Operator escape hatch for `park_reason=review_cap`. Resets the review
@@ -116,7 +119,7 @@ def _dev_fix_run(context_args: tuple, fields: dict) -> tuple[PinnedState, _DevFi
 
 def _parse_add_review_rounds(
     comments: list,
-) -> Optional[Tuple[int, Optional[str]]]:
+) -> Optional[_ReviewRoundsCommand]:
     """Find the latest `/orchestrator add-review-rounds N` command across
     `comments`.
 
@@ -669,12 +672,12 @@ def _state_int(state: PinnedState, key: str) -> Optional[int]:
     return state_value if isinstance(state_value, int) else None
 
 
-_VERIFY_STATUS_TO_REASON = {
+_VERIFY_STATUS_TO_REASON = MappingProxyType({
     "failed": "verify_failed",
     "timeout": "verify_timeout",
     "dirty": "verify_dirty",
     "head_changed": "verify_head_changed",
-}
+})
 
 
 def _verify_failure_detail(verify) -> str:

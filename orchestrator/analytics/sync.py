@@ -722,12 +722,12 @@ def _print_cli_result(sync_result: SyncResult, cli_start: float) -> None:
     duration_s = sync_result.duration_s or round(
         time.monotonic() - cli_start, 3
     )
-    print(
+    sys.stdout.write(
         f"{timestamp} analytics_sync: inserted={sync_result.inserted} "
         f"duplicate={sync_result.skipped_duplicate} "
         f"malformed={sync_result.skipped_malformed} "
         f"total_lines={sync_result.total_lines} "
-        f"duration_s={duration_s:.3f}"
+        f"duration_s={duration_s:.3f}\n"
     )
 
 

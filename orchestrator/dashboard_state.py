@@ -17,10 +17,13 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
-from typing import Any, Callable, Optional, Sequence
+from types import MappingProxyType
+from typing import Any, Callable, Mapping, Optional, Sequence
 
 from orchestrator import analytics
 from orchestrator.analytics.read import DataExtent
+
+_NamedReader = tuple[str, Callable[[], Any]]
 
 DEFAULT_WINDOW_DAYS = 7
 
@@ -34,18 +37,18 @@ PRESET_7D = "7d"
 PRESET_ALL = "All"
 PRESET_CUSTOM = "Custom"
 PRESET_OPTIONS: tuple[str, ...] = (PRESET_3D, PRESET_7D, PRESET_ALL, PRESET_CUSTOM)
-PRESET_LABELS: dict[str, str] = {
+PRESET_LABELS: Mapping[str, str] = MappingProxyType({
     PRESET_3D: "Last 3 days",
     PRESET_7D: "Last 7 days",
     PRESET_ALL: "All time",
     PRESET_CUSTOM: "Custom range",
-}
-PRESET_INLINE_LABELS: dict[str, str] = {
+})
+PRESET_INLINE_LABELS: Mapping[str, str] = MappingProxyType({
     PRESET_3D: "3D",
     PRESET_7D: "7D",
     PRESET_ALL: "All",
-}
-PRESET_DAYS: dict[str, int] = {PRESET_3D: 3, PRESET_7D: 7}
+})
+PRESET_DAYS: Mapping[str, int] = MappingProxyType({PRESET_3D: 3, PRESET_7D: 7})
 DEFAULT_PRESET = PRESET_7D
 
 # UTC-offset selector for the "When agents run" heatmap and the
@@ -230,7 +233,7 @@ def dashboard_parallel_reads_enabled() -> bool:
 
 
 def _fan_out_reads(
-    readers: Sequence[tuple[str, Callable[[], Any]]],
+    readers: Sequence[_NamedReader],
     *,
     parallel: bool,
     max_workers: int = PARALLEL_READS_MAX_WORKERS,

@@ -327,7 +327,7 @@ def _as_blockquote(text: str) -> str:
 def _format_stderr_diagnostics(
     agent_result: AgentResult, label: str = "Agent",
 ) -> str:
-    """Render a stderr/exit-code diagnostic block to append to a park comment.
+    r"""Render a stderr/exit-code diagnostic block to append to a park comment.
 
     Returns "" when the agent produced no stderr -- callers can concatenate
     unconditionally without a trailing dead section. Otherwise returns a
@@ -353,7 +353,7 @@ def _format_stderr_diagnostics(
 
 
 def _stderr_log_tail(agent_result: AgentResult, max_chars: int = 400) -> str:
-    """Short stderr tail for log lines -- tighter than the park-comment cap
+    r"""Short stderr tail for log lines -- tighter than the park-comment cap
     so a single WARNING fits on one screen.
 
     Redact before trimming for the same reason as `_format_stderr_diagnostics`:

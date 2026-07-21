@@ -45,7 +45,7 @@ Do not mark a stage complete until its completion gate is satisfied.
 | 4 | Remaining production style and structure | 5/5 | [x] |
 | 5 | Test structure and complexity | 7/7 | [x] |
 | 6 | Test literals and naming | 7/7 | [x] |
-| 7 | Long-tail cleanup and final verification | 1/5 | [ ] |
+| 7 | Long-tail cleanup and final verification | 2/5 | [ ] |
 
 ## Finding-count progress
 
@@ -54,12 +54,12 @@ signal between scans.
 
 | Metric | Initial | Current | Target |
 |---|---:|---:|---:|
-| Parsed findings | 7,683 | 1,968 | 0 |
-| Unique findings | 7,660 | 1,943 | 0 |
-| Production findings | 1,468 | 347 | 0 |
+| Parsed findings | 7,683 | 1,844 | 0 |
+| Unique findings | 7,660 | 1,819 | 0 |
+| Production findings | 1,468 | 223 | 0 |
 | Test findings | 6,215 | 1,621 | 0 |
-| Affected files | 172 | 168 | 0 |
-| Standard `E...` findings | 29 | 53 | 0 |
+| Affected files | 172 | 166 | 0 |
+| Standard `E...` findings | 29 | 50 | 0 |
 
 Minimum acceptable fallback: reduce the total by at least 90%, leave no production correctness or formatting
 findings, and explain every retained finding in the accepted-remainder register.
@@ -427,9 +427,9 @@ packages and accepted-remainder review.
 
 ### Package 7.2 — Clear production remainder
 
-- [ ] Resolve every remaining production finding that can be fixed without changing a public contract.
-- [ ] Add focused tests for any late behavioral refactor.
-- [ ] Resolve the refreshed production findings not present in the initial inventory: `E302` (3), `F401` (43),
+- [x] Resolve every remaining production finding that can be fixed without changing a public contract.
+- [x] Add focused tests for any late behavioral refactor.
+- [x] Resolve the refreshed production findings not present in the initial inventory: `E302` (3), `F401` (43),
   `WPS322` (1), and `WPS462` (1).
 
 ### Package 7.3 — Clear test remainder
@@ -504,8 +504,8 @@ considered.
 ### Dashboard analytics facade readers
 
 - File and symbols: `orchestrator/analytics/read_dashboard.py`: `get_review_round_breakdown`,
-  `get_skill_trigger_rates`, `get_skill_trigger_matrix`, `get_cost_coverage`, `get_backend_daily_tokens`, and
-  `get_hourly_heatmap`.
+  `get_skill_trigger_rates`, `get_skill_trigger_matrix`, `get_skill_adoption`, `get_cost_coverage`,
+  `get_backend_daily_tokens`, and `get_hourly_heatmap`.
 - Rule: `WPS211`
 - Reason: These public readers expose one consistent keyword filter contract. A request object would break callers and
   `**kwargs` would weaken the API; each function delegates to a small filter/query helper.
@@ -616,7 +616,8 @@ considered.
 
 - File and symbols: `orchestrator/dashboard_theme.py` (`fmt_money`, `fmt_money_exact`, `fmt_tokens`, `fmt_num`:
   `value`), `orchestrator/dashboard_charts_cost.py` (`cost_horizontal_bars`: `items`), and
-  `orchestrator/dashboard_skill_matrix.py` (`parse_skill_matrix_sort`: `params`).
+  `orchestrator/dashboard_skill_matrix.py` (`parse_skill_matrix_sort`: `params`) and
+  `orchestrator/dashboard_skill_adoption.py` (`parse_skill_adoption_sort`: `params`).
 - Rule: `WPS110`
 - Reason: These are public dashboard functions whose parameter name is a keyword-call contract -- a caller may pass
   `fmt_money(value=...)`, `cost_horizontal_bars(items=...)`, or `parse_skill_matrix_sort(params=...)`. Renaming the
@@ -688,14 +689,15 @@ considered.
   `context.state.set(_PENDING_PUSH_SHA, None)` in `orchestrator/base_sync.py`;
   `_wf._resolve_branch_name(state, spec, issue.number)` in `orchestrator/stages/implementing.py`;
   `str(wt)` in `orchestrator/worktree_lifecycle.py`; and `row[0]` / `row[1]` in
-  `orchestrator/analytics/read_dashboard.py` / `orchestrator/analytics/read_rollup.py`.
+  `orchestrator/analytics/read_dashboard.py` / `orchestrator/analytics/read_rollup.py`; and the independent
+  `st.container(border=True)` card boundaries in `orchestrator/dashboard_widgets.py`.
 - Rule: `WPS204`
 - Reason: These are void terminal calls (persist the pinned state) or
-  trivial value expressions that each independent branch -- or each single-column row mapper --
-  issues exactly once. Wrapping a repeated call in a helper produces the SAME repeated call
-  expression and still trips `WPS204`; there is no single scope to hoist a `row[0]` / `str(wt)`
-  intermediate into. The stateless-persist design (write pinned state before every branch return) is
-  the source of the repetition.
+  trivial value expressions that each independent branch, card, or single-column row mapper issues exactly once.
+  Wrapping a repeated call in a helper produces the SAME repeated call expression and still trips `WPS204`; there is
+  no single scope to hoist a `row[0]` / `str(wt)` intermediate into, and a shared Streamlit context-manager instance
+  cannot delimit independent cards. The stateless-persist design (write pinned state before every branch return) is
+  the source of the stage repetition.
 - Protected by: the stage-handler suites (`tests/test_workflow_<stage>.py` family),
   `tests/test_workflow_base_sync_unit.py`, `tests/test_analytics_read_*.py`, and the dashboard tests.
 - Reviewed: [ ]
@@ -851,7 +853,7 @@ considered.
 
 ### Core workflow and worktree compatibility facades
 
-- File and symbols: `orchestrator/workflow.py` (`WPS201` imports 127, `WPS202` members 57, `WPS203` imported names 137,
+- File and symbols: `orchestrator/workflow.py` (`WPS201` imports 129, `WPS202` members 57, `WPS203` imported names 140,
   `WPS410` `__all__`) and `orchestrator/worktrees.py` (`WPS201` 52, `WPS203` 52, `WPS410` `__all__`).
 - Rule: `WPS201`, `WPS202`, `WPS203`, `WPS410`
 - Reason: These two modules are the historical `workflow.<name>` / `worktrees.<name>` re-export surfaces -- the same
@@ -876,16 +878,80 @@ considered.
 - Protected by: package import and `orchestrator.__version__` consumers.
 - Reviewed: [x]
 
+### Analytics and dashboard compatibility facades
+
+- File and symbols: `orchestrator/analytics/__init__.py` (`__all__` and package initialization),
+  `orchestrator/analytics/read.py` (`__all__`), and `orchestrator/dashboard.py` (34 imports, 147 imported names,
+  21 members, 24 compatibility `noqa` comments, and `__all__`).
+- Rule: `WPS201`, `WPS202`, `WPS203`, `WPS402`, `WPS410`, and `WPS412`
+- Reason: These modules are stable compatibility facades. The analytics package binds reload-sensitive settings after
+  evicting its private sink leaves; moving that initialization changes the package reload contract. The dashboard's
+  import fan-in and `__all__` are its historical re-export surface, while its `E402` suppressions are attached to the
+  imports that deliberately follow the direct-script path bootstrap. Removing names or moving imports would break
+  callers and patch targets; blanket suppression is forbidden, so the individual compatibility annotations remain.
+- Protected by: `tests/test_analytics.py`, `tests/test_analytics_read_*.py`, `tests/test_dashboard.py`, and
+  `tests/test_reexport_surface.py`.
+- Reviewed: [ ]
+
+### Developer-resume compatibility helper
+
+- File and symbol: `orchestrator/stages/implementing.py: _resume_dev_with_text`
+- Rule: `WPS211`
+- Reason: This helper is re-exported through `orchestrator.workflow` and called or patched throughout every
+  agent-resume stage. Its positional `(gh, spec, issue, state, followup_text)` call and keyword run controls are an
+  established compatibility contract. The implementation now groups those inputs immediately in `_DevResumeRequest`
+  and delegates to `_DevResumeContext`; changing the facade itself would break direct callers and patch targets.
+- Protected by: the implementing, fixing, validating, in-review, documenting, conflict, usage-accumulator, and prompt
+  regression suites.
+- Reviewed: [ ]
+
+### Target-root lock registry
+
+- File and symbol: `orchestrator/git_plumbing.py: _TARGET_ROOT_LOCKS`
+- Rule: `WPS407`
+- Reason: This is a process-local, lazily populated registry of re-entrant locks keyed by clone path. It must remain
+  mutable so independently constructed `RepoSpec` objects serialize access to the same parent repository; a mapping
+  proxy cannot support lazy insertion. The object is also re-exported through `orchestrator.worktrees`, where the real
+  concurrency tests clear the same registry between cases. Hiding replacement state behind a setter would weaken that
+  identity guarantee without removing the underlying mutation.
+- Protected by: `tests/test_workflow_worktree_serialization.py` and the worktree compatibility facade.
+- Reviewed: [ ]
+
+### Cohesive production classes
+
+- File and symbols: `orchestrator/_trajectory_records.py: TrajectoryRun` (12 methods),
+  `orchestrator/github.py: GitHubClient` (36 methods), and `orchestrator/scheduler.py: IssueScheduler` (16 methods).
+- Rule: `WPS214`
+- Reason: The methods are the cohesive behavior of one public run model, one repository client, and one scheduler.
+  Public methods cannot move without changing those call surfaces; the private parsing, check-state, scheduling, and
+  formatting helpers have already moved to module functions or small models where that creates a real boundary.
+  Further mixins would distribute one object's invariants across artificial base classes solely to meet a seven-method
+  threshold.
+- Protected by: the trajectory-reader/dashboard, GitHub/state-machine, scheduler, and parallel-workflow suites.
+- Reviewed: [ ]
+
+### GitHub client stateless public helpers
+
+- File and symbols: `orchestrator/github.py: GitHubClient.workflow_label`, `pr_has_label`, `pr_state`, and
+  `pr_is_mergeable`.
+- Rule: `WPS602`
+- Reason: These helpers intentionally need no client state and support both class-level and instance-level calls.
+  Converting them to instance methods would break class callers; converting them to class methods would add a
+  semantically false class dependency and change descriptor/signature behavior; moving them to module scope would
+  break the public `GitHubClient` surface.
+- Protected by: the state-machine, PR-lifecycle, community-contribution, in-review, base-sync, and workflow suites.
+- Reviewed: [ ]
+
 ### Cohesive core, orchestration, and stage-handler module magnitude
 
 - File and symbols: the git / worktree and shared-workflow modules `orchestrator/base_sync.py` (60 members / 18
   imports), `orchestrator/workflow_messages.py` (51), `orchestrator/agents.py` (40 / 16), `orchestrator/main.py`
   (25 / 17), `orchestrator/worktree_lifecycle.py` (24), `orchestrator/branch_publication.py` (21 / 13),
-  `orchestrator/config.py` (18), `orchestrator/github.py` (17 / 15), `orchestrator/git_plumbing.py` (14),
+  `orchestrator/config.py` (18), `orchestrator/github.py` (18 / 15), `orchestrator/git_plumbing.py` (14),
   `orchestrator/skill_catalog.py` (12), `orchestrator/verify.py` (12), `orchestrator/_repo_config.py` (11),
   `orchestrator/state_machine.py` (10), and `orchestrator/workflow_drift.py` (9); and the per-stage handlers
-  `orchestrator/stages/implementing.py` (68 / 47, plus `WPS203` imported names 51), `stages/validating.py` (59 / 42),
-  `stages/decomposition.py` (54 / 40), `stages/documenting.py` (36 / 35), `stages/fixing.py` (33 / 25),
+  `orchestrator/stages/implementing.py` (69 / 47, plus `WPS203` imported names 51), `stages/validating.py` (59 / 43),
+  `stages/decomposition.py` (54 / 40), `stages/documenting.py` (36 / 36), `stages/fixing.py` (33 / 25),
   `stages/conflicts.py` (32 / 32), `stages/in_review.py` (25 / 22), and `stages/question.py` (22 / 20).
 - Rule: `WPS201` (imports), `WPS202` (members), and `WPS203` (imported names, `stages/implementing.py`)
 - Reason: Each is a single-responsibility unit already reduced to its cohesive minimum by the Stage 2--3 complexity work
@@ -901,6 +967,25 @@ considered.
 - Protected by: `tests/test_workflow_*`, `tests/test_main.py`, `tests/test_agents.py`, `tests/test_config.py`,
   `tests/test_state_machine.py`, and the git / worktree suites.
 - Reviewed: [x]
+
+### Cohesive analytics, dashboard, usage, and trajectory module magnitude
+
+- File and symbols: the usage / trajectory leaves `_trajectory_dashboard_html.py` (19 members),
+  `_trajectory_records.py` (19), `_usage_metrics.py` (45), `_usage_skills.py` (21), and `_usage_trajectory.py` (25);
+  the analytics leaves `_recording.py` (27 / 14 imports), `_retention.py` (13), `_sync_rows.py` (13),
+  `_trajectories.py` (16), `connection.py` (11), `predicates.py` (10), `read_dashboard.py` (41), `read_models.py`
+  (19), `read_raw.py` (22), `read_rollup.py` (33), and `sync.py` (27 / 14 imports); the dashboard leaves
+  `dashboard_cards.py` (13), `dashboard_charts_cost.py` (24), `dashboard_charts_usage.py` (20), `dashboard_html.py`
+  (31), `dashboard_kpi_strip.py` (12), `dashboard_reads.py` (32), `dashboard_skill_adoption.py` (16),
+  `dashboard_skill_matrix.py` (14), `dashboard_state.py` (15), and `dashboard_widgets.py` (34 / 27 imports / 53
+  imported names); and `trajectory_dashboard.py` (26) / `trajectory_reader.py` (17).
+- Rule: `WPS201`, `WPS202`, and `WPS203`
+- Reason: These are the focused leaves produced by the earlier module-structure packages. Each owns one parser,
+  read-model family, page/card family, or rendering concern, and the seven-member / twelve-import thresholds sit below
+  the cohesive surface that remains. Another split would move helpers into still more private files, duplicate local
+  context, or replace direct dependencies with indirection without removing behavior or improving ownership.
+- Protected by: the usage, analytics-read/sync, dashboard/chart/theme, and trajectory suites.
+- Reviewed: [ ]
 
 ### Per-test module-reload idiom
 
@@ -1246,6 +1331,22 @@ Add one row for every implementation session, including partial sessions.
 | 2026-07-21 | 6.6 | Complete | WPS 1161->227; target 933->0; 282f; 2204p/3s | None | Start 6.7 |
 | 2026-07-21 | 6.7 | Complete | WPS 650->138; target 508->0; 353f; 2204p/3s | None | Start 7.1 |
 | 2026-07-21 | 7.1 | Complete | Scan 1968/1943; Ruff/diff; tracked gate 2204p/3s | Not committed | Start 7.2 |
+| 2026-07-21 | 7.2 | Complete | Prod 347->223; 1190 focused; Ruff/diff; tracked 2204p/3s | Not committed | Start 7.3 |
+
+Package 7.2 is **complete**. The production scan fell from 347 to 223 findings. All 124 removals preserve public
+facades and call shapes: `E302` (3), `F401` (43), `WPS210` (3), `WPS212` (1), `WPS220` (1), `WPS221` (4),
+`WPS231` (3), `WPS234` (14), `WPS322` (1), `WPS338` (5), `WPS339` (2), `WPS342` (5), `WPS420` (8), `WPS421`
+(4), `WPS462` (1), and `WPS527` (1) were cleared; `WPS204`, `WPS211`, and `WPS602` each fell by one,
+`WPS226` fell by two, and `WPS407` fell from 21 to the one intentionally mutable target-root lock registry. The
+remaining production findings are structural or contract-bound and are covered by the accepted-remainder register;
+there are no production `E...` or `F...` findings.
+
+The late parser, aggregation, dispatch, scheduler, GitHub-client, and immutable-lookup refactors are covered by the
+existing focused scenarios, so no duplicate test was added. All 1,190 focused tests passed (three live-Postgres
+skips), as did Ruff, both working-tree and committed-range diff checks, and the complete tracked suite (2,204 passed,
+3 skipped). Bare repository-root collection still encounters the ignored, externally owned `analytics-db/data`
+volume and receives `PermissionError`; `pytest tests` is the established full tracked-tree gate. The refreshed full
+scan is 1,844 parsed / 1,819 unique findings across 166 files: production 223, tests 1,621, and standard `E...` 50.
 
 Package 6.7 is **complete**. The pass covered the shared GitHub fake and workflow harness plus the remaining
 state-machine, metadata, trust, routing, analytics, drift, lifecycle, terminal, prompt, and parallel-tick tests.

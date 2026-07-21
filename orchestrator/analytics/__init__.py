@@ -116,6 +116,20 @@ from orchestrator.analytics._retention import (  # noqa: E402
     prune_with_retention_logging as prune_with_retention_logging,
 )
 
+# These attributes remain bound for established test and compatibility patch
+# targets even though the package facade does not call them directly.
+_COMPATIBILITY_EXPORTS = (
+    AgentResult,
+    usage,
+    _FILE_LOCK,
+    log,
+    os,
+    _TRAJECTORY_FIELD_HEAD,
+    _TRAJECTORY_FIELD_TAIL,
+    _TRAJECTORY_FILE_LOCK,
+    _TRAJECTORY_RECORD_BUDGET,
+)
+
 __all__ = [
     "ANALYTICS_DB_URL",
     "ANALYTICS_LOG_PATH",

@@ -36,13 +36,15 @@ import contextlib
 import functools
 import logging
 import subprocess  # noqa: F401 -- re-exported so tests can `patch.object(workflow.subprocess, "run", ...)`
+import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from types import MappingProxyType
+from typing import Any, Mapping, Optional
 
 from github.Issue import Issue
 
@@ -1536,7 +1538,7 @@ def _dispatch_via_scheduler(
     _submit_scheduler_fanout_issues(gh, spec, scheduler, partition, per_repo_cap)
 
 
-_ISSUE_HANDLER_NAMES: dict[Optional[str], str] = {
+_ISSUE_HANDLER_NAMES: Mapping[Optional[str], str] = MappingProxyType({
     None: "_handle_pickup",
     "decomposing": "_handle_decomposing",
     "ready": "_handle_ready",
@@ -1549,7 +1551,7 @@ _ISSUE_HANDLER_NAMES: dict[Optional[str], str] = {
     "fixing": "_handle_fixing",
     "resolving_conflict": "_handle_resolving_conflict",
     "question": "_handle_question",
-}
+})
 
 
 def _route_issue_to_handler(
@@ -1566,7 +1568,8 @@ def _route_issue_to_handler(
     """
     handler_name = _ISSUE_HANDLER_NAMES.get(label)
     if handler_name is not None:
-        globals()[handler_name](gh, spec, issue)
+        issue_handler = getattr(sys.modules[__name__], handler_name)
+        issue_handler(gh, spec, issue)
     elif label not in ("done", "rejected"):
         log.warning(
             "repo=%s issue=#%s label=%r not implemented yet; leaving alone",

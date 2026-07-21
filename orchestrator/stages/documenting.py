@@ -77,6 +77,7 @@ defeat the patch.
 """
 from __future__ import annotations
 
+from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any
 
@@ -345,10 +346,8 @@ def _documenting_drift_probe(ctx: _DocumentingContext, wt):
     )
     parts = (probe.stdout or "").strip().split()
     if probe.returncode == 0 and len(parts) == 2:
-        try:
+        with suppress(ValueError):
             return int(parts[1]), int(parts[0])
-        except ValueError:
-            pass
     _wf.log.error(
         "issue=#%d documenting drift ahead/behind probe "
         "failed (rc=%s stderr=%s stdout=%s)",

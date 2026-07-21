@@ -36,6 +36,8 @@ from orchestrator.analytics.read import (
 )
 from orchestrator.dashboard_charts_base import _empty_figure
 
+_DailyTokenValues = dict[date, dict[str, float]]
+
 # Number of equal gridline steps the twin token / cost y-axes are split into
 # so a tokens gridline and its USD counterpart land on the same pixel row.
 _USAGE_GRID_STEPS = 5
@@ -117,8 +119,8 @@ def _add_token_stack_trace(
 
 def _roll_up_time_series(
     points: Sequence[TimeSeriesPoint],
-) -> dict[date, dict[str, float]]:
-    daily: dict[date, dict[str, float]] = {}
+) -> _DailyTokenValues:
+    daily: _DailyTokenValues = {}
     for point in points:
         bucket = daily.setdefault(
             point.day,
@@ -138,8 +140,8 @@ def _roll_up_time_series(
 
 
 def _ensure_backend_days(
-    daily: dict[date, dict[str, float]],
-    backend_rows_by_day: dict[date, dict[str, float]],
+    daily: _DailyTokenValues,
+    backend_rows_by_day: _DailyTokenValues,
 ) -> None:
     for day in backend_rows_by_day:
         daily.setdefault(
@@ -149,7 +151,7 @@ def _ensure_backend_days(
 
 
 def _backend_names(
-    backend_rows_by_day: dict[date, dict[str, float]],
+    backend_rows_by_day: _DailyTokenValues,
 ) -> list[str]:
     return sorted({
         backend
@@ -160,9 +162,9 @@ def _backend_names(
 
 def _usage_stack_totals(
     days: Sequence[date],
-    daily: dict[date, dict[str, float]],
+    daily: _DailyTokenValues,
     *,
-    backend_rows_by_day: Optional[dict[date, dict[str, float]]],
+    backend_rows_by_day: Optional[_DailyTokenValues],
     mode: str,
 ) -> list[float]:
     if mode == "backend" and backend_rows_by_day:
@@ -176,7 +178,7 @@ def _daily_token_total(bucket: dict[str, float]) -> float:
 
 @dataclass(frozen=True)
 class _UsageChartData:
-    daily: dict[date, dict[str, float]]
+    daily: _DailyTokenValues
     days: Sequence[date]
 
 
@@ -188,7 +190,7 @@ class _UsageAxisRanges:
 
 def _prepare_usage_data(
     points: Sequence[TimeSeriesPoint],
-    backend_rows_by_day: Optional[dict[date, dict[str, float]]],
+    backend_rows_by_day: Optional[_DailyTokenValues],
     mode: str,
 ) -> Optional[_UsageChartData]:
     if not points and not backend_rows_by_day:
@@ -205,7 +207,7 @@ def _prepare_usage_data(
 def _add_backend_usage_traces(
     fig: go.Figure,
     usage: _UsageChartData,
-    backend_rows_by_day: dict[date, dict[str, float]],
+    backend_rows_by_day: _DailyTokenValues,
 ) -> None:
     backends = _backend_names(backend_rows_by_day)
     for backend in backends:
@@ -245,7 +247,7 @@ def _add_token_type_usage_traces(
 def _add_usage_stack_traces(
     fig: go.Figure,
     usage: _UsageChartData,
-    backend_rows_by_day: Optional[dict[date, dict[str, float]]],
+    backend_rows_by_day: Optional[_DailyTokenValues],
     mode: str,
 ) -> None:
     if mode == "backend" and backend_rows_by_day:
@@ -271,7 +273,7 @@ def _add_usage_cost_trace(fig: go.Figure, usage: _UsageChartData) -> None:
 
 def _usage_axis_ranges(
     usage: _UsageChartData,
-    backend_rows_by_day: Optional[dict[date, dict[str, float]]],
+    backend_rows_by_day: Optional[_DailyTokenValues],
     mode: str,
 ) -> _UsageAxisRanges:
     stack_totals = _usage_stack_totals(
@@ -293,7 +295,7 @@ def _usage_axis_ranges(
 
 def _usage_layout(
     usage: _UsageChartData,
-    backend_rows_by_day: Optional[dict[date, dict[str, float]]],
+    backend_rows_by_day: Optional[_DailyTokenValues],
     mode: str,
     title: Optional[str],
 ) -> dict[str, object]:
@@ -335,7 +337,7 @@ def _usage_layout(
 def usage_over_time(
     points: Sequence[TimeSeriesPoint],
     *,
-    backend_rows_by_day: Optional[dict[date, dict[str, float]]] = None,
+    backend_rows_by_day: Optional[_DailyTokenValues] = None,
     mode: str = "type",
     title: Optional[str] = "Spend & token usage over time",
 ) -> go.Figure:

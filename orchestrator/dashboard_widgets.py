@@ -127,6 +127,7 @@ EMPTY_WINDOW_MESSAGE = (
     "No analytics events match the current filters. Broaden the window "
     "or clear a filter to see activity."
 )
+NO_AGENT_EXITS_MESSAGE = "No `agent_exit` rows match the current filters."
 
 
 # Data-table sizing (px): per-row height plus fixed header/padding base.
@@ -628,7 +629,7 @@ def _render_issues_and_backends(
                         unsafe_allow_html=True,
                     )
             else:
-                st.info("No `agent_exit` rows match the current filters.")
+                st.info(NO_AGENT_EXITS_MESSAGE)
             if cost_coverage_rows:
                 st.markdown(
                     _cost_coverage_bar_html(cost_coverage_rows, theme=theme),
@@ -846,6 +847,12 @@ def _skill_adoption_zero_caption(
             "Skills were available to sessions this window but none loaded "
             "one -- a genuine 0% adoption, not missing tracking."
         )
+    return _skill_adoption_evidence_caption(skill_adoption_rows)
+
+
+def _skill_adoption_evidence_caption(
+    skill_adoption_rows: Sequence[SkillAdoptionRow],
+) -> str:
     loaded = any(row.load_rows for row in skill_adoption_rows)
     incidental = any(row.incidental for row in skill_adoption_rows)
     if loaded and incidental:
@@ -950,7 +957,7 @@ def _render_skill_triggers(
             unsafe_allow_html=True,
         )
         if not skill_rows:
-            st.info("No `agent_exit` rows match the current filters.")
+            st.info(NO_AGENT_EXITS_MESSAGE)
             return
 
         st.markdown(
@@ -1037,7 +1044,7 @@ def _render_recent_runs(
             ])
             st.dataframe(df_exits, use_container_width=True)
         else:
-            st.info("No `agent_exit` rows match the current filters.")
+            st.info(NO_AGENT_EXITS_MESSAGE)
 
 
 def _render_drilldown_view(

@@ -59,13 +59,13 @@ def _shutdown(signum, _frame) -> None:
     blocks on the executor + runs the trailing reap, so failures from
     the workers that DID start are still logged.
     """
-    global running, received_signal
-    if received_signal is not None:
+    main_module = sys.modules[__name__]
+    if main_module.received_signal is not None:
         return
-    received_signal = signum
+    main_module.received_signal = signum
     log.info("signal %s received; will stop after this tick", signum)
-    running = False
-    sched = active_scheduler
+    main_module.running = False
+    sched = main_module.active_scheduler
     if sched is not None:
         try:
             sched.shutdown(wait=False)
@@ -86,10 +86,8 @@ def _shutdown(signum, _frame) -> None:
     # we exit within `SHUTDOWN_GRACE_SECONDS` no matter what any thread is
     # blocked on.
     _arm_shutdown_watchdog(signum)
-    try:
+    with contextlib.suppress(OSError, ValueError):
         signal.signal(signum, signal.SIG_DFL)
-    except (OSError, ValueError):
-        pass
 
 
 def _arm_shutdown_watchdog(signum: int) -> None:
@@ -274,8 +272,7 @@ def _activate_scheduler(scheduler: IssueScheduler) -> None:
     # `running=False` but cannot close the scheduler -- that window is
     # the brief gap between scheduler construction and this line and is
     # acceptable because no tick has dispatched anything yet.
-    global active_scheduler
-    active_scheduler = scheduler
+    sys.modules[__name__].active_scheduler = scheduler
 
 
 def _wait_for_next_tick() -> None:
@@ -313,7 +310,6 @@ def _drive_main_loop(
 
 def _drain_scheduler(scheduler: IssueScheduler) -> None:
     """Stop agent groups when signaled, then wait for every worker."""
-    global active_scheduler
     if received_signal is not None:
         # Worker threads cannot drain while their agent subprocess is still
         # allowed to run up to `AGENT_TIMEOUT`.
@@ -321,7 +317,7 @@ def _drain_scheduler(scheduler: IssueScheduler) -> None:
     # Repeatable after `_shutdown`'s `wait=False` close; this call owns the
     # final worker wait and completion reap.
     scheduler.shutdown(wait=True)
-    active_scheduler = None
+    sys.modules[__name__].active_scheduler = None
     _shutdown_complete.set()
 
 

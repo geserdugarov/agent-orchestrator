@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import html
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Callable, Optional, Sequence
 
 from orchestrator.analytics.read import SkillAdoptionRow
@@ -95,9 +96,9 @@ _SKILL_ADOPTION_NUMERIC_KEYS = frozenset(
     ("sessions", "adopted", "rate", "loads", "incidental"),
 )
 
-_SKILL_ADOPTION_SORT_KEYS: dict[str, Callable[[SkillAdoptionRow], object]] = {
+_SKILL_ADOPTION_SORT_KEYS = MappingProxyType({
     column.key: column.sort_value for column in _SKILL_ADOPTION_COLUMNS
-}
+})
 
 # Query-param names the clickable headers write and the dashboard reads
 # back via `parse_skill_adoption_sort`.

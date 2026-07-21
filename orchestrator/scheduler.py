@@ -312,6 +312,55 @@ class IssueScheduler:
         # log captures workers that raised on the way out.
         self.reap()
 
+    @contextlib.contextmanager
+    def track_active(
+        self, repo_slug: str, issue_number: int,
+    ) -> Iterator[bool]:
+        """Register ``(repo_slug, issue_number)`` as in-flight for the block.
+
+        Used by the family-bucket drain in ``_dispatch_via_scheduler``: the
+        bucket itself owns the family slot via the parent submit's
+        ``family=True``, but the parent submit is keyed on a sentinel
+        issue number, NOT on the issue currently being processed inside
+        the drain. Without per-iteration tracking, ``is_active(repo, n)``
+        would report False for the family issue actually being worked on
+        -- and ``_refresh_base_and_worktrees`` would race the agent by
+        rebasing the worktree under the live worker.
+
+        The marker lives in a SEPARATE set (``_tracked``) so it does NOT
+        count toward the global cap (``len(self._active)``) or the
+        per-repo counter. The bucket's parent submit already accounts
+        for the one executor worker; folding the inner claim into the
+        cap counters would let a single bucket starve unrelated fanout
+        submits under tight ``global_cap`` (e.g. 2) even though only
+        one worker thread is actually executing.
+
+        Yields a bool ``claimed``: True if this call reserved the marker,
+        False if the key was already in flight (active or tracked) by
+        another owner. The drain must check the yielded value and skip
+        ``_process_issue`` when ``claimed`` is False -- otherwise two
+        workers could run the same issue handler concurrently. The
+        bucket dispatch path classifies issues by a fresh label read on
+        the tick thread, so within one tick this race is impossible;
+        the guard catches the cross-tick window where tick N classified
+        ``#X`` as fanout and submitted it, tick N+1 reclassified
+        ``#X`` as family-aware (after a relabel) and folded it into the
+        bucket, and the bucket reached ``#X`` before the fanout worker
+        from tick N exited.
+        """
+        key = (repo_slug, int(issue_number))
+        claimed = False
+        with self._lock:
+            if key not in self._active and key not in self._tracked:
+                self._tracked.add(key)
+                claimed = True
+        try:
+            yield claimed
+        finally:
+            if claimed:
+                with self._lock:
+                    self._tracked.discard(key)
+
     # -- internals ---------------------------------------------------
 
     def _cap_skip_reason_locked(
@@ -446,52 +495,3 @@ class IssueScheduler:
         with self._lock:
             self._release_slot_locked(submission)
             self._completed.append(future)
-
-    @contextlib.contextmanager
-    def track_active(
-        self, repo_slug: str, issue_number: int,
-    ) -> Iterator[bool]:
-        """Register ``(repo_slug, issue_number)`` as in-flight for the block.
-
-        Used by the family-bucket drain in ``_dispatch_via_scheduler``: the
-        bucket itself owns the family slot via the parent submit's
-        ``family=True``, but the parent submit is keyed on a sentinel
-        issue number, NOT on the issue currently being processed inside
-        the drain. Without per-iteration tracking, ``is_active(repo, n)``
-        would report False for the family issue actually being worked on
-        -- and ``_refresh_base_and_worktrees`` would race the agent by
-        rebasing the worktree under the live worker.
-
-        The marker lives in a SEPARATE set (``_tracked``) so it does NOT
-        count toward the global cap (``len(self._active)``) or the
-        per-repo counter. The bucket's parent submit already accounts
-        for the one executor worker; folding the inner claim into the
-        cap counters would let a single bucket starve unrelated fanout
-        submits under tight ``global_cap`` (e.g. 2) even though only
-        one worker thread is actually executing.
-
-        Yields a bool ``claimed``: True if this call reserved the marker,
-        False if the key was already in flight (active or tracked) by
-        another owner. The drain must check the yielded value and skip
-        ``_process_issue`` when ``claimed`` is False -- otherwise two
-        workers could run the same issue handler concurrently. The
-        bucket dispatch path classifies issues by a fresh label read on
-        the tick thread, so within one tick this race is impossible;
-        the guard catches the cross-tick window where tick N classified
-        ``#X`` as fanout and submitted it, tick N+1 reclassified
-        ``#X`` as family-aware (after a relabel) and folded it into the
-        bucket, and the bucket reached ``#X`` before the fanout worker
-        from tick N exited.
-        """
-        key = (repo_slug, int(issue_number))
-        claimed = False
-        with self._lock:
-            if key not in self._active and key not in self._tracked:
-                self._tracked.add(key)
-                claimed = True
-        try:
-            yield claimed
-        finally:
-            if claimed:
-                with self._lock:
-                    self._tracked.discard(key)

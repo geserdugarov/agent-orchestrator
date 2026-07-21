@@ -64,6 +64,8 @@ _CHECK_STATE_PENDING = "pending"
 _REVIEW_CHANGES_REQUESTED = "CHANGES_REQUESTED"
 _ISSUE_STATE_OPEN = "open"
 
+_ReviewStateForHead = tuple[str, tuple[int, str]]
+
 # (name, hex color, description) for each workflow label. Order roughly
 # tracks the happy-path lifecycle (implementing -> validating ->
 # documenting -> in_review) but is otherwise only the order in which
@@ -341,7 +343,7 @@ def _fold_check_states(
 
 def _review_state_for_head(
     review: Any, head_sha: str,
-) -> Optional[tuple[str, tuple[int, str]]]:
+) -> Optional[_ReviewStateForHead]:
     """Return a reviewer-keyed state record when a review applies to HEAD."""
     if (getattr(review, "commit_id", "") or "") != head_sha:
         return None
@@ -353,6 +355,27 @@ def _review_state_for_head(
         return None
     review_id = getattr(review, "id", 0) or 0
     return reviewer_login, (review_id, review_state)
+
+
+def _latest_review_states_for_head(
+    pr: PullRequest, *, head_sha: str,
+) -> list[str]:
+    """Return each reviewer's latest state on the current PR head.
+
+    Approvals on older commits are stale: a pushed commit must not advertise
+    the PR as ready until the human reviews that new head.
+    """
+    if not head_sha:
+        return []
+    latest_per_user: dict[str, tuple[int, str]] = {}
+    for review in pr.get_reviews():
+        candidate = _review_state_for_head(review, head_sha)
+        if candidate is not None:
+            _record_latest_review(latest_per_user, candidate)
+    return [
+        review_state
+        for _, review_state in latest_per_user.values()
+    ]
 
 
 def _record_latest_review(
@@ -452,70 +475,6 @@ class GitHubClient:
         # tick counter and drives the closed-issue-sweep cadence throttle
         # (`config.CLOSED_ISSUE_SWEEP_EVERY_N_TICKS`).
         self._pollable_calls = 0
-
-    def _for_worker_thread(self) -> "GitHubClient":
-        """Build a fresh GitHubClient for a single worker thread.
-
-        PyGithub's `Requester` holds mutable per-request state (the URL,
-        headers and body being assembled for the next call, the active
-        connection, the last-seen rate-limit headers) and the library does
-        not document its objects as thread-safe. Sharing one GitHubClient
-        across `workflow.tick`'s parallel-path worker threads can interleave
-        two concurrent calls' request setup and corrupt the operations the
-        orchestrator issues against GitHub (the wrong issue's labels
-        updated, comment bodies cross-pollinated, rate-limit accounting
-        trampled). A fresh `Github` + `Requester` + `Repository` per worker
-        isolates each thread to its own requester so any in-flight HTTP
-        call is the sole consumer of that requester's state.
-
-        Token + slug are reused so the new instance has identical auth and
-        target repo. `bot_login` is threaded through so the clone authenticates
-        pinned state against the same account without re-issuing `GET /user`
-        per worker. The in-memory `recorded_events` tail starts empty per
-        worker; the durable JSONL sink at `config.EVENT_LOG_PATH` is the
-        cross-worker record and write_event_record's open/append is what
-        carries event ordering across threads.
-        """
-        return GitHubClient(
-            token=self._token,
-            repo_slug=self._repo_slug,
-            bot_login=self._bot_login,
-        )
-
-    def _cached_label(self, name: str) -> Optional[Label]:
-        """Resolve a workflow Label object, caching successes for this client.
-
-        The closed-issue sweep in `list_pollable_issues` needs Label OBJECTS
-        because PyGithub's `get_issues(labels=...)` reads `label.name`.
-        Workflow labels are created once by `ensure_workflow_labels` and are
-        never mutated by the orchestrator, so re-fetching each one every tick
-        is pure waste -- on a multi-repo deployment those
-        `GET /repos/.../labels/<name>` calls are a large fraction of the
-        per-tick request volume that exhausts the GitHub primary rate limit.
-        Cache the resolved object so each label is fetched at most once per
-        repo client.
-
-        Failures are NOT cached: a missing label (under-scoped PAT, or one not
-        yet created) keeps being retried every tick exactly as before, so
-        fixing the PAT or creating the label takes effect without a restart.
-        Returns None on a lookup failure so the caller can skip that label's
-        sweep instead of raising out of the generator.
-        """
-        cached = self._label_cache.get(name)
-        if cached is not None:
-            return cached
-        try:
-            label_obj = self.repo.get_label(name)
-        except GithubException as error:
-            log.warning(
-                "could not look up %r label for closed-issue sweep "
-                "(HTTP %s); skipping. Externally-merged %s issues will "
-                "not finalize to `done` until the label exists.",
-                name, error.status, name,
-            )
-            return None
-        self._label_cache[name] = label_obj
-        return label_obj
 
     def list_pollable_issues(self, since: Optional[datetime] = None) -> Iterable[Issue]:
         """Open issues plus closed issues still labeled with any non-terminal
@@ -662,29 +621,6 @@ class GitHubClient:
         if len(self.recorded_events) > _RECORDED_EVENTS_CAP:
             self.recorded_events = self.recorded_events[-_RECORDED_EVENTS_CAP:]
         _write_event_record(record)
-
-    def _emit_stage_enter(self, issue: Issue, stage: str) -> None:
-        """Record a `stage_enter` event for `issue` transitioning to `stage`.
-
-        Centralized hook called from `set_workflow_label` so every callsite
-        emits identically without per-handler bookkeeping. The audit event
-        lands on `EVENT_LOG_PATH` via `emit_event`; an analytics-compatible
-        copy lands on `ANALYTICS_LOG_PATH` so non-agent stages contribute
-        timing context to the same sink `_run_agent_tracked` writes to.
-        Both sinks are independently opt-in/out via their respective
-        config knobs; pinned GitHub state stays authoritative regardless.
-        """
-        issue_number = getattr(issue, "number", 0) or 0
-        self.emit_event(
-            "stage_enter",
-            issue_number=issue_number,
-            stage=stage,
-        )
-        analytics.record_stage_enter(
-            repo=self._repo_slug,
-            issue=issue_number,
-            stage=stage,
-        )
 
     def comment(self, issue: Issue, body: str) -> IssueComment:
         return issue.create_comment(body)
@@ -882,69 +818,6 @@ class GitHubClient:
             ),
         )
 
-    def _read_combined_status(self, head_sha: str) -> _CheckSurfaceRead:
-        """Read and normalize the legacy commit-status surface."""
-        try:
-            combined = self.repo.get_commit(head_sha).get_combined_status()
-        except GithubException as error:
-            log.warning(
-                "could not read combined status for %s (HTTP %s); ignoring",
-                head_sha, error.status,
-            )
-            return _CheckSurfaceRead(read_failed=True)
-        return _CheckSurfaceRead(state=_normalize_combined_status(combined))
-
-    def _read_check_runs(self, head_sha: str) -> _CheckSurfaceRead:
-        """Read and normalize the check-runs surface."""
-        try:
-            return _CheckSurfaceRead(state=_normalize_check_runs(
-                self.repo.get_commit(head_sha).get_check_runs(),
-            ))
-        except GithubException as error:
-            # 403 here almost always means the fine-grained PAT is missing
-            # 'Checks: read'. For Actions-only PRs (no commit statuses,
-            # only check-runs), swallowing this silently leaves
-            # `pr_combined_check_state` at 'none' despite the PR actually
-            # being green; surface the remediation prominently so an
-            # operator can fix the scope.
-            if error.status == _HTTP_FORBIDDEN:
-                log.error(
-                    "could not read check-runs for %s (HTTP 403). The "
-                    "orchestrator PAT needs 'Checks: read' to evaluate "
-                    "GitHub Actions PRs. Without it, check_state is "
-                    "reported as 'none' on Actions-only PRs. Add the "
-                    "permission and restart.",
-                    head_sha,
-                )
-            else:
-                log.warning(
-                    "could not read check-runs for %s (HTTP %s); ignoring",
-                    head_sha, error.status,
-                )
-            return _CheckSurfaceRead(read_failed=True)
-
-    @staticmethod
-    def _latest_review_states_for_head(
-        pr: PullRequest, *, head_sha: str
-    ) -> list[str]:
-        """Latest review state per reviewer, restricted to `head_sha`.
-
-        Approvals on older commits are treated as stale -- a commit pushed
-        after a human approval must not advertise the PR as ready unless
-        the human re-reviews the new head.
-        """
-        if not head_sha:
-            return []
-        latest_per_user: dict[str, tuple[int, str]] = {}
-        for review in pr.get_reviews():
-            candidate = _review_state_for_head(review, head_sha)
-            if candidate is not None:
-                _record_latest_review(latest_per_user, candidate)
-        return [
-            review_state
-            for _, review_state in latest_per_user.values()
-        ]
-
     @classmethod
     def pr_has_changes_requested(
         cls, pr: PullRequest, *, head_sha: str
@@ -1109,3 +982,137 @@ class GitHubClient:
                 )
                 return
             log.info("created label %r", name)
+
+    def _for_worker_thread(self) -> "GitHubClient":
+        """Build a fresh GitHubClient for a single worker thread.
+
+        PyGithub's `Requester` holds mutable per-request state (the URL,
+        headers and body being assembled for the next call, the active
+        connection, the last-seen rate-limit headers) and the library does
+        not document its objects as thread-safe. Sharing one GitHubClient
+        across `workflow.tick`'s parallel-path worker threads can interleave
+        two concurrent calls' request setup and corrupt the operations the
+        orchestrator issues against GitHub (the wrong issue's labels
+        updated, comment bodies cross-pollinated, rate-limit accounting
+        trampled). A fresh `Github` + `Requester` + `Repository` per worker
+        isolates each thread to its own requester so any in-flight HTTP
+        call is the sole consumer of that requester's state.
+
+        Token + slug are reused so the new instance has identical auth and
+        target repo. `bot_login` is threaded through so the clone authenticates
+        pinned state against the same account without re-issuing `GET /user`
+        per worker. The in-memory `recorded_events` tail starts empty per
+        worker; the durable JSONL sink at `config.EVENT_LOG_PATH` is the
+        cross-worker record and write_event_record's open/append is what
+        carries event ordering across threads.
+        """
+        return GitHubClient(
+            token=self._token,
+            repo_slug=self._repo_slug,
+            bot_login=self._bot_login,
+        )
+
+    def _cached_label(self, name: str) -> Optional[Label]:
+        """Resolve a workflow Label object, caching successes for this client.
+
+        The closed-issue sweep in `list_pollable_issues` needs Label OBJECTS
+        because PyGithub's `get_issues(labels=...)` reads `label.name`.
+        Workflow labels are created once by `ensure_workflow_labels` and are
+        never mutated by the orchestrator, so re-fetching each one every tick
+        is pure waste -- on a multi-repo deployment those
+        `GET /repos/.../labels/<name>` calls are a large fraction of the
+        per-tick request volume that exhausts the GitHub primary rate limit.
+        Cache the resolved object so each label is fetched at most once per
+        repo client.
+
+        Failures are NOT cached: a missing label (under-scoped PAT, or one not
+        yet created) keeps being retried every tick exactly as before, so
+        fixing the PAT or creating the label takes effect without a restart.
+        Returns None on a lookup failure so the caller can skip that label's
+        sweep instead of raising out of the generator.
+        """
+        cached = self._label_cache.get(name)
+        if cached is not None:
+            return cached
+        try:
+            label_obj = self.repo.get_label(name)
+        except GithubException as error:
+            log.warning(
+                "could not look up %r label for closed-issue sweep "
+                "(HTTP %s); skipping. Externally-merged %s issues will "
+                "not finalize to `done` until the label exists.",
+                name, error.status, name,
+            )
+            return None
+        self._label_cache[name] = label_obj
+        return label_obj
+
+    def _emit_stage_enter(self, issue: Issue, stage: str) -> None:
+        """Record a `stage_enter` event for `issue` transitioning to `stage`.
+
+        Centralized hook called from `set_workflow_label` so every callsite
+        emits identically without per-handler bookkeeping. The audit event
+        lands on `EVENT_LOG_PATH` via `emit_event`; an analytics-compatible
+        copy lands on `ANALYTICS_LOG_PATH` so non-agent stages contribute
+        timing context to the same sink `_run_agent_tracked` writes to.
+        Both sinks are independently opt-in/out via their respective
+        config knobs; pinned GitHub state stays authoritative regardless.
+        """
+        issue_number = getattr(issue, "number", 0) or 0
+        self.emit_event(
+            "stage_enter",
+            issue_number=issue_number,
+            stage=stage,
+        )
+        analytics.record_stage_enter(
+            repo=self._repo_slug,
+            issue=issue_number,
+            stage=stage,
+        )
+
+    def _read_combined_status(self, head_sha: str) -> _CheckSurfaceRead:
+        """Read and normalize the legacy commit-status surface."""
+        try:
+            combined = self.repo.get_commit(head_sha).get_combined_status()
+        except GithubException as error:
+            log.warning(
+                "could not read combined status for %s (HTTP %s); ignoring",
+                head_sha, error.status,
+            )
+            return _CheckSurfaceRead(read_failed=True)
+        return _CheckSurfaceRead(state=_normalize_combined_status(combined))
+
+    def _read_check_runs(self, head_sha: str) -> _CheckSurfaceRead:
+        """Read and normalize the check-runs surface."""
+        try:
+            return _CheckSurfaceRead(state=_normalize_check_runs(
+                self.repo.get_commit(head_sha).get_check_runs(),
+            ))
+        except GithubException as error:
+            # 403 here almost always means the fine-grained PAT is missing
+            # 'Checks: read'. For Actions-only PRs (no commit statuses,
+            # only check-runs), swallowing this silently leaves
+            # `pr_combined_check_state` at 'none' despite the PR actually
+            # being green; surface the remediation prominently so an
+            # operator can fix the scope.
+            if error.status == _HTTP_FORBIDDEN:
+                log.error(
+                    "could not read check-runs for %s (HTTP 403). The "
+                    "orchestrator PAT needs 'Checks: read' to evaluate "
+                    "GitHub Actions PRs. Without it, check_state is "
+                    "reported as 'none' on Actions-only PRs. Add the "
+                    "permission and restart.",
+                    head_sha,
+                )
+            else:
+                log.warning(
+                    "could not read check-runs for %s (HTTP %s); ignoring",
+                    head_sha, error.status,
+                )
+            return _CheckSurfaceRead(read_failed=True)
+
+    @classmethod
+    def _latest_review_states_for_head(
+        cls, pr: PullRequest, *, head_sha: str,
+    ) -> list[str]:
+        return _latest_review_states_for_head(pr, head_sha=head_sha)

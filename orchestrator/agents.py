@@ -19,7 +19,7 @@ import subprocess
 import tempfile
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator, NamedTuple, Optional, TypedDict, Unpack
@@ -132,10 +132,8 @@ def _sigkill_unless_group_gone(proc: subprocess.Popen, timeout: float) -> None:
         leader_exited = False
     if leader_exited and not _process_group_alive(proc.pid):
         return
-    try:
+    with suppress(ProcessLookupError):
         os.killpg(proc.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
 
 
 def terminate_all_running(grace: float = 5.0) -> int:
@@ -161,10 +159,8 @@ def terminate_all_running(grace: float = 5.0) -> int:
     if not procs:
         return 0
     for proc in procs:
-        try:
+        with suppress(ProcessLookupError):
             os.killpg(proc.pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
     deadline = time.monotonic() + grace
     for proc in procs:
         remaining = max(0, deadline - time.monotonic())
