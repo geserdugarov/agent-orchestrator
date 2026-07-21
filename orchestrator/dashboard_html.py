@@ -5,9 +5,11 @@
 The page renders several panels directly from HTML strings (rather
 than Plotly figures or `st.dataframe`) -- the topbar, filter meta,
 KPI strip, the inline SVG sparkline / delta pill, the "Most expensive
-issues" table, and the "Skill trigger rates" aggregate table. The
-per-skill trigger matrix that sits under that table lives in
-`orchestrator.dashboard_skill_matrix`, which reuses this module's
+issues" table, and the skill-trigger-rates aggregate table (a per-run
+diagnostic beneath the primary session-adoption matrix). That adoption
+matrix lives in `orchestrator.dashboard_skill_adoption` and the
+invocation-level per-skill trigger matrix in
+`orchestrator.dashboard_skill_matrix`, both reusing this module's
 shared compact-table primitives (`_table_css` / `_table_html`); the
 insight / backend-efficiency / cost-coverage / reliability-tile card
 family lives in `orchestrator.dashboard_cards`. Each builder takes
@@ -512,10 +514,11 @@ def _skill_trigger_row_html(
 
 
 def _skill_triggers_html(rows: Sequence[SkillTriggerRateRow]) -> str:
-    """Render the "Skill trigger rates" table to inline HTML.
+    """Render the skill-trigger-rates aggregate table to inline HTML.
 
-    One row per `(agent_role, backend)` group in the order the read
-    model returned them (skill-active groups first). Each Trigger-rate
+    The per-run trigger-rate table under the skill panel's invocation-level
+    diagnostics: one row per `(agent_role, backend)` group in the order the
+    read model returned them (skill-active groups first). Each Trigger-rate
     cell carries a thin bar whose width is the group's rate relative to
     the busiest group, so the operator can eyeball which roles actually
     pull their skills without comparing percentages row by row.

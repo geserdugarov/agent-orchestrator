@@ -60,6 +60,7 @@ _RELOAD_POP_MODULES = (
     "orchestrator.dashboard_html",
     DASHBOARD_CARDS_MODULE,
     DASHBOARD_KPI_STRIP_MODULE,
+    "orchestrator.dashboard_skill_adoption",
     "orchestrator.dashboard_skill_matrix",
     DASHBOARD_READS_MODULE,
     DASHBOARD_WIDGETS_MODULE,
@@ -92,7 +93,8 @@ def _reload(env: dict[str, str] | None = None):
 
     The extracted helper modules (`dashboard_state` / `dashboard_kpis`
     / `dashboard_html` / `dashboard_cards` / `dashboard_kpi_strip` /
-    `dashboard_skill_matrix` / `dashboard_reads` / `dashboard_widgets`)
+    `dashboard_skill_adoption` / `dashboard_skill_matrix` /
+    `dashboard_reads` / `dashboard_widgets`)
     are popped alongside `dashboard` so the re-imported facade re-binds
     them too -- otherwise a cached `dashboard_state` would keep its
     pre-patch `from orchestrator import analytics` reference and its
@@ -178,7 +180,8 @@ FIRST_WAVE_READER_NAMES = (
 SECOND_WAVE_READER_NAMES = (
     "stage_rows", "agent_exits", "issues_rows",
     "backend_rows", "repo_rows", "heatmap_rows",
-    "backend_daily_rows", "skill_rows", "skill_matrix_rows",
+    "backend_daily_rows", "skill_adoption_rows", "skill_rows",
+    "skill_matrix_rows",
 )
 STATIC_METADATA_READER_NAMES = (
     "_read_data_extent",
@@ -198,6 +201,7 @@ WIDGET_READER_WRAPPER_NAMES = (
     "_read_hourly_heatmap",
     "_read_throughput",
     "_read_backend_daily_tokens",
+    "_read_skill_adoption",
     "_read_skill_trigger_rates",
     "_read_skill_trigger_matrix",
 )
@@ -251,6 +255,7 @@ SECOND_WAVE_READERS_MEMBER = "_second_wave_readers"
 RUN_READ_WAVES_MEMBER = "_run_read_waves"
 RENDER_FIRST_WAVE_MEMBER = "_render_first_wave"
 SKILL_MATRIX_READER_MEMBER = "_read_skill_trigger_matrix"
+SKILL_ADOPTION_READER_MEMBER = "_read_skill_adoption"
 DISPATCH_FIRST_WAVE = "reads.first_wave"
 DISPATCH_SECOND_WAVE = "reads.second_wave"
 
@@ -272,6 +277,18 @@ MTX_SORT_KEYS = (
 # The numeric-column sort key the header-click and parse tests exercise
 # most; named so the repeated query-param value stays a single token.
 SORT_KEY_RUNS = "runs"
+
+# Skill-adoption sort contract: the query-param names the clickable
+# adoption headers write, and the column keys in header order.
+ADOPT_SORT_PARAM = "adopt_sort"
+ADOPT_DIR_PARAM = "adopt_dir"
+ADOPT_SORT_KEYS = (
+    "repo", "role", "backend", "skill",
+    "sessions", "adopted", "rate", "loads", "incidental",
+)
+# The session-denominator sort key the adoption header-click / parse tests
+# exercise; named so the repeated query-param value stays a single token.
+SORT_KEY_SESSIONS = "sessions"
 
 
 def _is_orchestrator_module(name: str) -> bool:
@@ -1188,10 +1205,11 @@ class IssuesTableHtmlTest(unittest.TestCase):
 
 
 class SkillTriggersHtmlTest(unittest.TestCase):
-    """The "Skill trigger rates" panel is hand-rolled HTML (matching
-    the backend-efficiency cards and cost-coverage bar) so the small,
-    categorical per-(role, backend) table reads cleanly even when every
-    rate is 0% -- the `TRACK_SKILL_TRIGGERS=off` baseline.
+    """The skill-trigger-rates aggregate table (the invocation-level
+    diagnostic beneath the session-adoption matrix) is hand-rolled HTML
+    (matching the backend-efficiency cards and cost-coverage bar) so the
+    small, categorical per-(role, backend) table reads cleanly even when
+    every rate is 0% -- the `TRACK_SKILL_TRIGGERS=off` baseline.
     """
 
     def test_columns_present(self) -> None:
@@ -1248,9 +1266,9 @@ class SkillTriggersHtmlTest(unittest.TestCase):
 
 
 class SkillMatrixHtmlTest(unittest.TestCase):
-    """The per-skill trigger matrix is the second table under the
-    "Skill trigger rates" panel -- a hand-rolled HTML table over
-    `get_skill_trigger_matrix` with one row per
+    """The per-skill trigger matrix is the second table in the skill
+    panel's invocation-level diagnostics expander -- a hand-rolled HTML
+    table over `get_skill_trigger_matrix` with one row per
     `(repo, agent_role, backend, skill)` cell. It folds each repo's
     skill catalog into the observed triggers so an offered-but-never-
     triggered skill renders as an explicit `0` cell, and degrades to a
@@ -1489,6 +1507,542 @@ class SkillMatrixSortTest(unittest.TestCase):
             self._row("a/repo", "beta", ROLE_REVIEWER, BACKEND_CODEX, 9, 9),
             self._row("c/repo", "gamma", ROLE_DEVELOPER, BACKEND_CLAUDE, 5, 0),
         ]
+
+
+class SkillAdoptionHtmlTest(unittest.TestCase):
+    """The primary per-session skill-adoption matrix -- a hand-rolled HTML
+    table over `get_skill_adoption` with one row per
+    `(repo, agent_role, backend, skill)` cell. It counts skill use by
+    logical agent session, so an incidental `SKILL.md` reference surfaces as
+    its own diagnostic column and can never raise the adoption rate, and it
+    degrades to a clear fallback notice when no session evidence exists.
+    """
+
+    def test_columns_match_issue_spec(self) -> None:
+        _, dashboard = _reload()
+        rows = [self._row("owner/repo", "develop", ROLE_DEVELOPER, BACKEND_CLAUDE, 3, 2)]
+        html = dashboard._skill_adoption_html(rows)
+        for header in ("Repo", "Role", "Backend", "Skill", "Sessions",
+                       "Sessions using skill", "Adoption rate",
+                       "Invocation loads", "Incidental references"):
+            self.assertIn(f">{header}<", html)
+
+    def test_cell_values_rendered(self) -> None:
+        _, dashboard = _reload()
+        # Distinct session denominator / numerator / diagnostics so every
+        # column is exercised independently.
+        rows = [self._row(
+            "owner/repo", "develop", ROLE_DEVELOPER, BACKEND_CLAUDE,
+            41, 37, invocations=122, load_rows=38, incidental=2,
+        )]
+        html = dashboard._skill_adoption_html(rows)
+        # Full repo path (not just the trailing component) so two repos that
+        # share a short name stay distinct in a cross-repo matrix.
+        self.assertIn(">owner/repo<", html)
+        self.assertIn(">developer<", html)
+        self.assertIn(">claude<", html)
+        self.assertIn(">develop<", html)
+        self.assertIn('<td class="r">41</td>', html)
+        self.assertIn('<td class="r">37</td>', html)
+        # Adoption rate is derived from the two session counts (37/41) and
+        # rounds to a whole percent.
+        self.assertIn('<td class="r">90%</td>', html)
+        self.assertIn('<td class="r">38</td>', html)
+        self.assertIn('<td class="r">2</td>', html)
+
+    def test_incidental_reference_never_raises_adoption(self) -> None:
+        # A purely-incidental cell -- the skill's `SKILL.md` was referenced
+        # but never loaded, and no session had it available -- carries zero
+        # sessions / zero adopted and an undefined (em-dash) rate, so its
+        # incidental count can never be mistaken for adoption.
+        _, dashboard = _reload()
+        rows = [self._row(
+            "owner/repo", "review", ROLE_DEVELOPER, BACKEND_CLAUDE,
+            0, 0, invocations=1, load_rows=0, incidental=1,
+        )]
+        html = dashboard._skill_adoption_html(rows)
+        # No available session -> the rate is undefined, rendered as a muted
+        # em-dash rather than a misleading percentage.
+        self.assertIn('<span class="orch-skilladopt-zero">—</span>', html)
+        # The incidental reference is its own diagnostic column, visible as a
+        # plain count while sessions / adopted stay a muted zero.
+        self.assertIn('<td class="r">1</td>', html)
+        self.assertIn('<span class="orch-skilladopt-zero">0</span>', html)
+        # An incidental mention never produces an adoption percentage.
+        self.assertNotIn("%</td>", html)
+        self.assertNotIn("%</span>", html)
+
+    def test_available_but_unadopted_renders_muted_zero_percent(self) -> None:
+        # A skill available to sessions that none loaded is a real "offered
+        # but ignored" signal: its adoption rate renders as an explicit
+        # (muted) 0% rather than the undefined em-dash.
+        _, dashboard = _reload()
+        rows = [self._row(
+            "owner/repo", "review", ROLE_DEVELOPER, BACKEND_CLAUDE, 5, 0,
+        )]
+        html = dashboard._skill_adoption_html(rows)
+        self.assertIn('<span class="orch-skilladopt-zero">0%</span>', html)
+        # The session denominator is a real count, not muted.
+        self.assertIn('<td class="r">5</td>', html)
+
+    def test_repo_role_backend_skill_html_escaped(self) -> None:
+        # Every free-text cell is HTML-escaped so a skill / repo / role name
+        # carrying markup cannot break out of the table.
+        _, dashboard = _reload()
+        rows = [self._row("o/<r&>", "sk<i>ll", ROLE_WITH_MARKUP, "back<end>", 1, 1)]
+        html = dashboard._skill_adoption_html(rows)
+        self.assertIn("o/&lt;r&amp;&gt;", html)
+        self.assertIn("sk&lt;i&gt;ll", html)
+        self.assertIn("dev&lt;&amp;&gt;", html)
+        self.assertIn("back&lt;end&gt;", html)
+        self.assertNotIn("<r&>", html)
+        self.assertNotIn(ROLE_WITH_MARKUP, html)
+
+    def test_empty_rows_render_fallback_not_table(self) -> None:
+        # No session evidence -> a clear fallback notice renders in place of
+        # the table, naming the opt-in switch so a quiet panel is not
+        # mistaken for a bug.
+        _, dashboard = _reload()
+        html = dashboard._skill_adoption_html([])
+        self.assertIn("orch-skilladopt-empty", html)
+        self.assertIn("No per-session skill adoption", html)
+        self.assertIn("TRACK_SKILL_TRIGGERS", html)
+        # The table markup itself is not emitted on the fallback path.
+        self.assertNotIn("<table", html)
+
+    def test_fallback_message_is_html_escaped(self) -> None:
+        # The fallback message is escaped before it lands in the div, so the
+        # apostrophe-carrying copy renders without breaking out.
+        _, dashboard = _reload()
+        html = dashboard._skill_adoption_html([])
+        self.assertIn("&#x27;", html)
+
+    def _row(
+        self, repo, skill, role, backend, sessions, adopted,
+        *, invocations=None, load_rows=0, incidental=0,
+    ):
+        from orchestrator.analytics.read import SkillAdoptionRow
+        return SkillAdoptionRow(
+            repo=repo,
+            skill=skill,
+            agent_role=role,
+            backend=backend,
+            sessions=sessions,
+            adopted=adopted,
+            invocations=sessions if invocations is None else invocations,
+            load_rows=load_rows,
+            incidental=incidental,
+        )
+
+
+class SkillAdoptionSortTest(unittest.TestCase):
+    """The per-session adoption matrix column headers are clickable sort
+    controls: each is an anchor writing `adopt_sort` / `adopt_dir` query
+    params, and the caller feeds the parsed `(column, direction)` back into
+    `_skill_adoption_html` so the rows re-sort on that column and the active
+    header shows a ▲ / ▼ indicator.
+    """
+
+    def test_headers_link_to_self_for_sorting(self) -> None:
+        _, dashboard = _reload()
+        html = dashboard._skill_adoption_html(self._rows())
+        # Every column is an in-tab anchor pointing at its own sort param.
+        for key in ADOPT_SORT_KEYS:
+            self.assertIn(f"?{ADOPT_SORT_PARAM}={key}&{ADOPT_DIR_PARAM}=", html)
+        self.assertIn('target="_self"', html)
+        # Text columns default a first click to ascending, numeric ones to
+        # descending (largest first is the interesting end for counts).
+        self.assertIn(f"?{ADOPT_SORT_PARAM}=repo&{ADOPT_DIR_PARAM}={SORT_ASC}", html)
+        self.assertIn(
+            f"?{ADOPT_SORT_PARAM}=sessions&{ADOPT_DIR_PARAM}={SORT_DESC}", html
+        )
+        # With no active sort no header carries a direction indicator.
+        self.assertNotIn('<span class="orch-skilladopt-sort">', html)
+
+    def test_descending_shows_down_arrow_and_flips(self) -> None:
+        _, dashboard = _reload()
+        html = dashboard._skill_adoption_html(
+            self._rows(), sort_key=SORT_KEY_SESSIONS, descending=True,
+        )
+        # Exactly one column is marked active, and it shows the ▼ arrow.
+        self.assertEqual(
+            html.count('<span class="orch-skilladopt-sort">'), 1,
+        )
+        self.assertIn(
+            '<span class="orch-skilladopt-sort">▼</span>', html,
+        )
+        # Re-clicking the active (descending) column flips it to ascending.
+        self.assertIn(
+            f"?{ADOPT_SORT_PARAM}=sessions&{ADOPT_DIR_PARAM}={SORT_ASC}", html
+        )
+
+    def test_ascending_shows_up_arrow_and_flips(self) -> None:
+        _, dashboard = _reload()
+        html = dashboard._skill_adoption_html(
+            self._rows(), sort_key="repo", descending=False,
+        )
+        self.assertIn(
+            '<span class="orch-skilladopt-sort">▲</span>', html,
+        )
+        self.assertIn(
+            f"?{ADOPT_SORT_PARAM}=repo&{ADOPT_DIR_PARAM}={SORT_DESC}", html
+        )
+
+    def test_rows_render_in_selected_column_order(self) -> None:
+        _, dashboard = _reload()
+        asc = dashboard._skill_adoption_html(
+            self._rows(), sort_key=SORT_KEY_SESSIONS, descending=False,
+        )
+        # sessions 2 < 5 < 9 -> repos b, c, a in that order.
+        self.assertLess(asc.index(">b/repo<"), asc.index(REPO_C_CELL_FRAGMENT))
+        self.assertLess(asc.index(REPO_C_CELL_FRAGMENT), asc.index(">a/repo<"))
+        desc = dashboard._skill_adoption_html(
+            self._rows(), sort_key=SORT_KEY_SESSIONS, descending=True,
+        )
+        self.assertLess(desc.index(">a/repo<"), desc.index(REPO_C_CELL_FRAGMENT))
+        self.assertLess(desc.index(REPO_C_CELL_FRAGMENT), desc.index(">b/repo<"))
+
+    def test_unsorted_defaults_repo_asc_rate_desc(self) -> None:
+        # No sort key -> the default view orders rows by repo ascending, then
+        # adoption rate descending within each repo, so each repo's
+        # most-adopted skills lead. Two rows share a repo with different
+        # rates so both keys are exercised (skills identify the rows).
+        _, dashboard = _reload()
+        rows = [
+            self._row("b/repo", "alpha", ROLE_DEVELOPER, BACKEND_CLAUDE, 4, 1),
+            self._row("a/repo", "beta", ROLE_DEVELOPER, BACKEND_CLAUDE, 4, 1),
+            self._row("a/repo", "gamma", ROLE_REVIEWER, BACKEND_CODEX, 4, 3),
+        ]
+        html = dashboard._skill_adoption_html(rows)
+        # Within a/repo, rate descending: gamma (75%) precedes beta (25%).
+        self.assertLess(
+            html.index(">gamma<"), html.index(">beta<"),
+        )
+        # Repo ascending: the a/repo rows precede the b/repo row.
+        self.assertLess(
+            html.index(">beta<"), html.index(">alpha<"),
+        )
+
+    def test_sort_helper_unknown_key_is_identity(self) -> None:
+        from orchestrator import dashboard_skill_adoption
+        rows = self._rows()
+        sorted_rows = dashboard_skill_adoption._sort_skill_adoption_rows(
+            rows, None, False,
+        )
+        self.assertEqual(sorted_rows, rows)
+        sorted_rows = dashboard_skill_adoption._sort_skill_adoption_rows(
+            rows, "bogus", True,
+        )
+        self.assertEqual(sorted_rows, rows)
+
+    def test_parse_adoption_sort_from_query_params(self) -> None:
+        _, dashboard = _reload()
+        cases = [
+            ({}, (None, False)),
+            ({ADOPT_SORT_PARAM: SORT_KEY_SESSIONS}, (SORT_KEY_SESSIONS, False)),
+            (
+                {ADOPT_SORT_PARAM: SORT_KEY_SESSIONS, ADOPT_DIR_PARAM: SORT_DESC},
+                (SORT_KEY_SESSIONS, True),
+            ),
+            (
+                {ADOPT_SORT_PARAM: SORT_KEY_SESSIONS, ADOPT_DIR_PARAM: SORT_ASC},
+                (SORT_KEY_SESSIONS, False),
+            ),
+            ({ADOPT_SORT_PARAM: "rate", ADOPT_DIR_PARAM: SORT_DESC}, ("rate", True)),
+            # An unknown / stale column degrades to the default order rather
+            # than raising.
+            ({ADOPT_SORT_PARAM: "bogus", ADOPT_DIR_PARAM: SORT_DESC}, (None, False)),
+            ({ADOPT_DIR_PARAM: SORT_DESC}, (None, False)),
+        ]
+        for query_params, expected in cases:
+            with self.subTest(params=query_params):
+                self.assertEqual(
+                    dashboard.parse_skill_adoption_sort(query_params), expected,
+                )
+        # `params` is the public keyword; callers may pass it by name.
+        self.assertEqual(
+            dashboard.parse_skill_adoption_sort(
+                params={ADOPT_SORT_PARAM: SORT_KEY_SESSIONS},
+            ),
+            (SORT_KEY_SESSIONS, False),
+        )
+
+    def _row(self, repo, skill, role, backend, sessions, adopted):
+        from orchestrator.analytics.read import SkillAdoptionRow
+        return SkillAdoptionRow(
+            repo=repo,
+            skill=skill,
+            agent_role=role,
+            backend=backend,
+            sessions=sessions,
+            adopted=adopted,
+            invocations=sessions,
+        )
+
+    def _rows(self):
+        # Distinct repo / session values per row so an ordering assertion can
+        # key off either without ambiguity.
+        return [
+            self._row("b/repo", "alpha", ROLE_DEVELOPER, BACKEND_CLAUDE, 2, 1),
+            self._row("a/repo", "beta", ROLE_REVIEWER, BACKEND_CODEX, 9, 9),
+            self._row("c/repo", "gamma", ROLE_DEVELOPER, BACKEND_CLAUDE, 5, 0),
+        ]
+
+
+class _SkillPanelStreamlit:
+    """Fake `st` recording the calls the skill-panel renderers make.
+
+    Records the markdown / caption / info payloads and the expander labels,
+    and hands back a null context for `container` / `expander`, so the
+    render runs end-to-end without the optional Streamlit dependency.
+    """
+
+    def __init__(self, query_params=None):
+        self.query_params = query_params or {}
+        self.markdowns: list = []
+        self.captions: list = []
+        self.infos: list = []
+        self.expanders: list = []
+
+    def container(self, **kwargs):
+        return _NullContext()
+
+    def expander(self, label, **kwargs):
+        self.expanders.append(label)
+        return _NullContext()
+
+    def markdown(self, html, **kwargs) -> None:
+        self.markdowns.append(html)
+
+    def caption(self, text) -> None:
+        self.captions.append(text)
+
+    def info(self, text) -> None:
+        self.infos.append(text)
+
+
+class SkillAdoptionRenderTest(unittest.TestCase):
+    """`_render_skill_adoption` leads with the session-adoption matrix and
+    only nags to enable `TRACK_SKILL_TRIGGERS` when there is genuinely no
+    evidence. A present row proves tracking is on -- `sessions > 0` means
+    availability was recorded, an incidental reference means the stream was
+    parsed -- so a zero-adoption window with rows captions a neutral
+    genuine-0% result instead. Streamlit is faked so the render runs
+    end-to-end and its captions can be observed.
+    """
+
+    def _render(self, adoption_rows, *, skill_rows=None):
+        _, dashboard = _reload()
+        st = _SkillPanelStreamlit()
+        if skill_rows is None:
+            skill_rows = [self._rate_row()]
+        dashboard._render_skill_adoption(
+            st=st,
+            skill_adoption_rows=adoption_rows,
+            skill_rows=skill_rows,
+            skill_matrix_rows=[],
+        )
+        return st
+
+    def test_available_but_unadopted_captions_genuine_zero(self) -> None:
+        # sessions > 0 proves availability was tracked, so a 0-adoption
+        # window reads as a genuine 0%, never a "turn on tracking" nag.
+        st = self._render([self._adopt_row(sessions=5, adopted=0)])
+        self.assertEqual(len(st.captions), 1)
+        caption = st.captions[0]
+        self.assertIn("genuine 0% adoption", caption)
+        self.assertNotIn("Enable", caption)
+        self.assertNotIn("TRACK_SKILL_TRIGGERS", caption)
+
+    def test_incidental_only_captions_neutral_not_tracking_nag(self) -> None:
+        # Incidental evidence with no availability still proves the stream
+        # was parsed, so the caption stays neutral rather than recommending
+        # the already-on switch.
+        st = self._render([self._adopt_row(sessions=0, adopted=0, incidental=1)])
+        self.assertEqual(len(st.captions), 1)
+        caption = st.captions[0]
+        self.assertIn("incidental", caption)
+        self.assertNotIn("Enable", caption)
+        self.assertNotIn("TRACK_SKILL_TRIGGERS", caption)
+
+    def test_adopted_window_has_no_caption(self) -> None:
+        st = self._render([self._adopt_row(sessions=5, adopted=3)])
+        self.assertEqual(st.captions, [])
+
+    def test_empty_rows_leave_switch_hint_to_the_table(self) -> None:
+        # No adoption rows -> the table itself renders the
+        # `TRACK_SKILL_TRIGGERS` fallback; the panel adds no caption so the
+        # switch reminder is not doubled.
+        st = self._render([])
+        self.assertEqual(st.captions, [])
+        blob = "".join(st.markdowns)
+        self.assertIn("orch-skilladopt-empty", blob)
+        self.assertIn("TRACK_SKILL_TRIGGERS", blob)
+
+    def test_no_agent_exit_rows_shows_single_info(self) -> None:
+        st = self._render([], skill_rows=[])
+        self.assertEqual(len(st.infos), 1)
+        self.assertIn("No `agent_exit` rows", st.infos[0])
+
+    def test_load_only_diagnostic_captions_loads_not_incidental(self) -> None:
+        # sessions=0, load_rows>0, incidental=0: a session loaded a skill it
+        # did not report available. The caption must name the loads (matching
+        # the Invocation loads column), never "only incidental references".
+        st = self._render([self._adopt_row(sessions=0, adopted=0, load_rows=2)])
+        self.assertEqual(len(st.captions), 1)
+        caption = st.captions[0]
+        self.assertIn("loaded", caption)
+        self.assertNotIn("Only incidental", caption)
+        self.assertNotIn("Enable", caption)
+
+    def test_mixed_evidence_captions_loads_and_incidental(self) -> None:
+        # sessions=0 with both load and incidental evidence: the caption
+        # names both so it matches the Invocation loads and Incidental
+        # references columns.
+        st = self._render(
+            [self._adopt_row(sessions=0, adopted=0, load_rows=2, incidental=1)],
+        )
+        self.assertEqual(len(st.captions), 1)
+        caption = st.captions[0]
+        self.assertIn("loaded", caption)
+        self.assertIn("incidental", caption)
+        self.assertNotIn("Enable", caption)
+
+    def test_zero_trigger_diagnostic_stays_neutral_with_adoption_evidence(
+        self,
+    ) -> None:
+        # A window with adoption evidence (sessions>0) but no run triggering a
+        # skill must not tell the operator to enable a switch the adoption
+        # caption just confirmed is on -- no caption in the panel nags to
+        # enable tracking, and the diagnostic reports the genuine no-trigger.
+        quiet = self._quiet_rate_row()
+        st = self._render(
+            [self._adopt_row(sessions=5, adopted=0)], skill_rows=[quiet],
+        )
+        joined = " ".join(st.captions)
+        self.assertNotIn("Enable", joined)
+        self.assertNotIn("TRACK_SKILL_TRIGGERS", joined)
+        self.assertTrue(
+            any("No agent run triggered a skill" in c for c in st.captions),
+        )
+
+    def _adopt_row(self, *, sessions, adopted, load_rows=0, incidental=0):
+        from orchestrator.analytics.read import SkillAdoptionRow
+        return SkillAdoptionRow(
+            repo="owner/repo",
+            skill="develop",
+            agent_role=ROLE_DEVELOPER,
+            backend=BACKEND_CLAUDE,
+            sessions=sessions,
+            adopted=adopted,
+            invocations=max(sessions, 1),
+            load_rows=load_rows,
+            incidental=incidental,
+        )
+
+    def _rate_row(self):
+        # skill_runs > 0 so the invocation-level diagnostics expander adds no
+        # caption of its own -- the assertions then observe only the
+        # adoption panel's own caption.
+        from orchestrator.analytics.read import SkillTriggerRateRow
+        return SkillTriggerRateRow(
+            agent_role=ROLE_DEVELOPER,
+            backend=BACKEND_CLAUDE,
+            runs=5,
+            skill_runs=2,
+            total_triggers=2,
+        )
+
+    def _quiet_rate_row(self):
+        # skill_runs == 0 so the diagnostics zero-trigger caption is exercised.
+        from orchestrator.analytics.read import SkillTriggerRateRow
+        return SkillTriggerRateRow(
+            agent_role=ROLE_DEVELOPER,
+            backend=BACKEND_CLAUDE,
+            runs=5,
+            skill_runs=0,
+            total_triggers=0,
+        )
+
+
+class SkillTriggersCompatShimTest(unittest.TestCase):
+    """`_render_skill_triggers` / `_render_skill_matrix_expander` are stable
+    compatibility entry points on the `orchestrator.dashboard` facade:
+    keyword-only signatures rendering the "Skill trigger rates" card and its
+    fold-out matrix, reachable by name for external callers and patch points.
+    """
+
+    def test_shims_are_reexported_from_the_facade(self) -> None:
+        _, dashboard = _reload()
+        self.assertTrue(hasattr(dashboard, "_render_skill_triggers"))
+        self.assertTrue(hasattr(dashboard, "_render_skill_matrix_expander"))
+
+    def test_shim_signatures_preserved(self) -> None:
+        import inspect
+
+        _, dashboard = _reload()
+        triggers = inspect.signature(dashboard._render_skill_triggers)
+        self.assertEqual(
+            list(triggers.parameters), ["st", "skill_rows", "skill_matrix_rows"],
+        )
+        for name in triggers.parameters:
+            self.assertEqual(
+                triggers.parameters[name].kind,
+                inspect.Parameter.KEYWORD_ONLY,
+            )
+        expander = inspect.signature(dashboard._render_skill_matrix_expander)
+        self.assertEqual(
+            list(expander.parameters), ["st", "skill_matrix_rows"],
+        )
+
+    def test_triggers_shim_renders_trigger_rates_card(self) -> None:
+        _, dashboard = _reload()
+        st = _SkillPanelStreamlit()
+        dashboard._render_skill_triggers(
+            st=st,
+            skill_rows=[self._rate_row()],
+            skill_matrix_rows=[self._matrix_row()],
+        )
+        blob = "".join(st.markdowns)
+        # The original card header, aggregate table, and fold-out matrix.
+        self.assertIn("Skill trigger rates", blob)
+        self.assertIn("orch-skills", blob)
+        self.assertIn("orch-skillmatrix", blob)
+        self.assertTrue(
+            any("Per-skill trigger matrix" in label for label in st.expanders),
+        )
+
+    def test_matrix_expander_shim_opens_collapsed_matrix(self) -> None:
+        _, dashboard = _reload()
+        st = _SkillPanelStreamlit()
+        dashboard._render_skill_matrix_expander(
+            st=st, skill_matrix_rows=[self._matrix_row()],
+        )
+        self.assertTrue(
+            any("Per-skill trigger matrix" in label for label in st.expanders),
+        )
+        self.assertIn("orch-skillmatrix", "".join(st.markdowns))
+
+    def _rate_row(self):
+        from orchestrator.analytics.read import SkillTriggerRateRow
+        return SkillTriggerRateRow(
+            agent_role=ROLE_DEVELOPER,
+            backend=BACKEND_CLAUDE,
+            runs=4,
+            skill_runs=1,
+            total_triggers=1,
+        )
+
+    def _matrix_row(self):
+        from orchestrator.analytics.read import SkillTriggerMatrixRow
+        return SkillTriggerMatrixRow(
+            repo="owner/repo",
+            skill="develop",
+            agent_role=ROLE_DEVELOPER,
+            backend=BACKEND_CLAUDE,
+            runs=4,
+            skill_runs=1,
+        )
 
 
 class DeltaPillTest(unittest.TestCase):
@@ -1945,6 +2499,8 @@ _MOVED_WIDGET_MEMBERS = (
     "_render_issues_and_backends",
     "_render_repo_and_reliability",
     "_render_activity_heatmap",
+    "_render_skill_adoption",
+    "_render_skill_invocation_diagnostics",
     "_render_skill_triggers",
     "_render_skill_matrix_expander",
     "_render_recent_runs",
@@ -2268,7 +2824,7 @@ class CachedReadConnectionScopingTest(_MainSourceTest):
         # never lands in the cache key.
         readers_src = self._readers_source()
         self.assertGreaterEqual(
-            readers_src.count("_read_filtered("), 15,
+            readers_src.count("_read_filtered("), 16,
             "every widget read should route through `_read_filtered`",
         )
         # The two static-metadata reads route through it too.
@@ -2638,7 +3194,7 @@ class MainRenderDispatchTest(_MainSourceTest):
 
         remaining_src = self._source_of("_render_remaining_widgets")
         remaining_order = [
-            "_render_skill_triggers(",
+            "_render_skill_adoption(",
             "_render_recent_runs(",
             "_render_drilldown_view(",
             "_render_dashboard_footer(",
@@ -2738,12 +3294,13 @@ class MainParallelFanOutWiringTest(_MainSourceTest):
 
 
 class SkillMatrixWiringTest(_MainSourceTest):
-    """The per-skill trigger matrix rides the same cached / fan-out
-    read pattern as every other widget (its wrapper lives in
-    `_widget_readers`) and renders as the second table under the
-    "Skill trigger rates" aggregate. Streamlit is
-    not installed for the default sync, so these inspect the rendered
-    sources rather than driving the page under Streamlit.
+    """The invocation-level per-skill trigger matrix rides the same cached
+    / fan-out read pattern as every other widget (its wrapper lives in
+    `_widget_readers`) and renders as the second table inside the
+    invocation-level diagnostics expander, beneath the session-adoption
+    matrix. Streamlit is not installed for the default sync, so these
+    inspect the rendered sources rather than driving the page under
+    Streamlit.
     """
 
     def test_matrix_read_calls_matrix_read_model(self) -> None:
@@ -2782,40 +3339,94 @@ class SkillMatrixWiringTest(_MainSourceTest):
             src,
         )
 
-    def test_matrix_is_second_aggregate_table(self) -> None:
-        # The matrix is the SECOND table: it renders after the aggregate
-        # `_skill_triggers_html(skill_rows)` table, inside the same card.
-        src = self._source_of("_render_skill_triggers")
+    def test_matrix_is_second_diagnostic_table(self) -> None:
+        # Inside the diagnostics expander the matrix is the SECOND table:
+        # it renders after the aggregate `_skill_triggers_html(skill_rows)`
+        # trigger-rate table.
+        src = self._source_of("_render_skill_invocation_diagnostics")
         agg = src.index("_skill_triggers_html(skill_rows)")
-        matrix = src.index("_render_skill_matrix_expander(")
+        matrix = src.index("_skill_matrix_html(")
         self.assertLess(agg, matrix)
 
-    def test_matrix_needs_aggregate_rows(self) -> None:
-        # The matrix render sits after the empty aggregate's early return,
-        # so the no-rows path still shows the single notice rather than a
-        # fallback for each table.
-        src = self._source_of("_render_skill_triggers")
+    def test_diagnostics_in_collapsed_expander(self) -> None:
+        # The invocation-level views fold into a collapsed expander
+        # (mirroring the "Recent agent runs" block) so they do not dominate
+        # the card beneath the primary adoption matrix. Both the aggregate
+        # table and the matrix render after an `st.expander(...,
+        # expanded=False)` clearly named an invocation-level diagnostic.
+        src = self._source_of("_render_skill_invocation_diagnostics")
+        expander = src.index('with st.expander(\n        "Invocation-level')
+        aggregate = src.index("_skill_triggers_html(")
+        matrix = src.index("_skill_matrix_html(")
+        self.assertLess(expander, aggregate)
+        self.assertLess(expander, matrix)
+        # The expander block carrying the diagnostics opens collapsed.
+        block = src[expander:matrix]
+        self.assertIn("expanded=False", block)
+
+
+class SkillAdoptionWiringTest(_MainSourceTest):
+    """The primary per-session skill-adoption matrix rides the same cached
+    / fan-out read pattern as every other widget (its wrapper lives in
+    `_widget_readers`) and renders as the headline table of the skill
+    panel, above the invocation-level diagnostics. Streamlit is not
+    installed for the default sync, so these inspect the rendered sources
+    rather than driving the page under Streamlit.
+    """
+
+    def test_adoption_read_calls_adoption_read_model(self) -> None:
+        src = self._source_of(SKILL_ADOPTION_READER_MEMBER)
+        self.assertIn("analytics_read.get_skill_adoption", src)
+
+    def test_adoption_read_forwards_scoped_connection(self) -> None:
+        # Reuse the cached-read pattern: the adoption wrapper delegates via
+        # `_read_filtered` to `_scoped_read`, which checks out the
+        # thread-local connection and forwards it to the read helper, so the
+        # adoption read shares the open socket rather than opening its own.
+        src = self._source_of(SKILL_ADOPTION_READER_MEMBER)
+        self.assertIn("_read_filtered(", src)
+        self.assertIn("analytics_read.get_skill_adoption", src)
+
+    def test_adoption_read_cache_key_omits_connection(self) -> None:
+        # `conn` must not appear in the wrapper's parameter list -- it
+        # would land in the `st.cache_data` key and crash on the
+        # unhashable psycopg connection.
+        src = self._source_of(SKILL_ADOPTION_READER_MEMBER)
+        marker = "def _read_skill_adoption("
+        head = src.index(marker)
+        tail = src.index("):", head)
+        self.assertNotIn(" conn", src[head:tail])
+
+    def test_adoption_dispatched_in_second_wave(self) -> None:
+        src = self._source_of(SECOND_WAVE_READERS_MEMBER)
+        self.assertIn(
+            '_widget_task(st, "skill_adoption_rows", '
+            "_read_skill_adoption, key)",
+            src,
+        )
+
+    def test_adoption_is_primary_render(self) -> None:
+        # The session-adoption matrix is the headline table: it renders
+        # before the invocation-level diagnostics expander, inside the same
+        # card.
+        src = self._source_of("_render_skill_adoption")
+        adoption = src.index("_skill_adoption_html(")
+        diagnostics = src.index("_render_skill_invocation_diagnostics(")
+        self.assertLess(adoption, diagnostics)
+
+    def test_adoption_needs_aggregate_rows(self) -> None:
+        # The adoption render sits after the empty early return, so a window
+        # with no `agent_exit` rows shows the single notice rather than an
+        # empty-state per table.
+        src = self._source_of("_render_skill_adoption")
         branch = src.index("if not skill_rows:")
         else_branch = src.index(
             'st.info("No `agent_exit` rows match the current filters.")',
             branch,
         )
-        matrix = src.index("_render_skill_matrix_expander(")
-        self.assertLess(branch, matrix)
-        self.assertLess(else_branch, matrix)
-
-    def test_matrix_is_in_collapsed_expander(self) -> None:
-        # The matrix folds into a collapsed expander (mirroring the
-        # "Recent agent runs" block) so it does not dominate the card by
-        # default. The `_skill_matrix_html` render must sit after an
-        # `st.expander(..., expanded=False)` opened for the matrix.
-        src = self._source_of("_render_skill_matrix_expander")
-        expander = src.index('with st.expander(\n        "Per-skill')
-        matrix = src.index("_skill_matrix_html(")
-        self.assertLess(expander, matrix)
-        # The expander block carrying the matrix opens collapsed.
-        block = src[expander:matrix]
-        self.assertIn("expanded=False", block)
+        adoption = src.index("_skill_adoption_html(")
+        self.assertLess(branch, adoption)
+        self.assertLess(else_branch, adoption)
 
 
 class StaticMetadataCacheTest(_MainSourceTest):

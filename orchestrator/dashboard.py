@@ -37,8 +37,12 @@ file stays the Streamlit orchestration layer:
 - `orchestrator.dashboard_cards` -- the inline-HTML card family: the
   computed-insight stack, the per-card header, the backend-efficiency
   cards, the cost-coverage bar, and the reliability-tile strip.
+- `orchestrator.dashboard_skill_adoption` -- the `adopt_sort` /
+  `adopt_dir` sort-param parser and the sortable inline-HTML table for
+  the primary per-skill session-adoption matrix.
 - `orchestrator.dashboard_skill_matrix` -- the sort-param parser and
-  the sortable inline-HTML table for the per-skill trigger matrix.
+  the sortable inline-HTML table for the invocation-level per-skill
+  trigger matrix (rendered as a diagnostic beneath the adoption matrix).
 - `orchestrator.dashboard_reads` -- the read-orchestration layer: the
   filter-to-query adapters, the cached data-extent / filter-option and
   per-filter widget readers, the two-wave reader registries, the staged
@@ -68,8 +72,10 @@ The historical `orchestrator.dashboard.*` entry points that
 `dashboard_state` / `dashboard_kpis` / `dashboard_html` /
 `dashboard_cards` / `dashboard_kpi_strip` / `dashboard_reads` own are
 re-exported below under their original name; from
-`dashboard_skill_matrix` only its two public entry points
-(`_skill_matrix_html` and `parse_skill_matrix_sort`) are.
+`dashboard_skill_adoption` and `dashboard_skill_matrix` only their two
+public entry points each (`_skill_adoption_html` /
+`parse_skill_adoption_sort` and `_skill_matrix_html` /
+`parse_skill_matrix_sort`) are.
 Together with the `dashboard_widgets` widget / page-state members the
 page pipeline and the existing dashboard tests reach through
 `orchestrator.dashboard.*`, each re-export is listed in
@@ -82,7 +88,8 @@ math (`_safe_ratio` / `_backend_efficiency_metrics`), the
 `dashboard_kpi_strip` KPI-total aggregations (`_kpi_totals` and its
 siblings), the `dashboard_html` sparkline / table internals, the
 `dashboard_widgets` token / layout math helpers, and the
-`dashboard_skill_matrix` sort / header / row helpers.
+`dashboard_skill_adoption` / `dashboard_skill_matrix` sort / header /
+row helpers.
 
 Reads go through `orchestrator.analytics.read` (which already
 handles unset DB, connection errors, and lazy psycopg import) and
@@ -98,8 +105,9 @@ of blocking on every widget: the first wave covers `summary`,
 `prev_summary`, `ts_points`, `throughput_rows`, `review_round_rows`,
 and `cost_coverage_rows` (the only reads the topbar / filter meta
 / insight banners / KPI strip consume), and the second wave covers
-the nine remaining widget reads (including the skill-trigger
-aggregate and the per-skill trigger matrix). Worker threads only
+the ten remaining widget reads (including the per-session
+skill-adoption matrix, the skill-trigger aggregate, and the per-skill
+trigger matrix). Worker threads only
 return data back to the main render thread; every `st` / placeholder
 write runs on the main thread.
 
@@ -112,7 +120,8 @@ the dashboard's dependency footprint. The module loads without
 orchestrator/dashboard.py` (or a direct `main()` call) materializes
 the imports. The extracted helper modules (`dashboard_state` /
 `dashboard_kpis` / `dashboard_html` / `dashboard_cards` /
-`dashboard_kpi_strip` / `dashboard_skill_matrix` / `dashboard_reads` /
+`dashboard_kpi_strip` / `dashboard_skill_adoption` /
+`dashboard_skill_matrix` / `dashboard_reads` /
 `dashboard_widgets`) are import-light (stdlib plus `orchestrator.analytics`)
 so they preserve this invariant; it is asserted by `tests/test_dashboard.py`.
 
@@ -151,6 +160,7 @@ from orchestrator.analytics.read import (  # noqa: E402
     CostCoverageRow as CostCoverageRow,
     DataExtent as DataExtent,
     IssueSummaryRow as IssueSummaryRow,
+    SkillAdoptionRow as SkillAdoptionRow,
     SkillTriggerMatrixRow as SkillTriggerMatrixRow,
     SkillTriggerRateRow as SkillTriggerRateRow,
     Summary as Summary,
@@ -158,15 +168,17 @@ from orchestrator.analytics.read import (  # noqa: E402
 
 # Compatibility re-exports. The pure helpers moved to the focused
 # `dashboard_state` / `dashboard_kpis` / `dashboard_html` /
-# `dashboard_cards` / `dashboard_kpi_strip` / `dashboard_skill_matrix` /
-# `dashboard_reads` / `dashboard_widgets`
+# `dashboard_cards` / `dashboard_kpi_strip` / `dashboard_skill_adoption` /
+# `dashboard_skill_matrix` / `dashboard_reads` / `dashboard_widgets`
 # modules; we import each one back under its original name so `main()`
 # calls them as bare names, the historical `orchestrator.dashboard.*`
 # surface stays intact, and the existing tests (which reach the helpers
 # via `dashboard.<name>` and inspect `main()`'s source) keep working.
-# From `dashboard_skill_matrix` only its two public entry points
-# (`_skill_matrix_html` / `parse_skill_matrix_sort`) are re-exported;
-# its internal sort / header / row helpers stay private to that module.
+# From `dashboard_skill_adoption` / `dashboard_skill_matrix` only their two
+# public entry points each (`_skill_adoption_html` /
+# `parse_skill_adoption_sort` and `_skill_matrix_html` /
+# `parse_skill_matrix_sort`) are re-exported; their internal sort / header
+# / row helpers stay private to those modules.
 # The redundant `as` alias marks each as an intentional re-export so ruff
 # does not flag the unused import; the E402 suppression covers the
 # post-`sys.path` placement the script-launch fix forces.
@@ -254,11 +266,22 @@ from orchestrator.dashboard_html import (  # noqa: E402
     _topbar_html as _topbar_html,
 )
 
-# The per-skill trigger matrix -- its sort-param parser and the sortable
-# inline-HTML table -- lives in `orchestrator.dashboard_skill_matrix`.
-# Both members are re-exported below under their original names so the
-# page pipeline and the historical `orchestrator.dashboard.*` surface
-# keep resolving to the same objects.
+# The primary per-skill session-adoption matrix -- its `adopt_sort` /
+# `adopt_dir` sort-param parser and the sortable inline-HTML table -- lives
+# in `orchestrator.dashboard_skill_adoption`. Both members are re-exported
+# below under their original names so the page pipeline and the historical
+# `orchestrator.dashboard.*` surface keep resolving to the same objects.
+from orchestrator.dashboard_skill_adoption import (  # noqa: E402
+    _skill_adoption_html as _skill_adoption_html,
+    parse_skill_adoption_sort as parse_skill_adoption_sort,
+)
+
+# The invocation-level per-skill trigger matrix -- its sort-param parser and
+# the sortable inline-HTML table, rendered as a diagnostic beneath the
+# adoption matrix -- lives in `orchestrator.dashboard_skill_matrix`. Both
+# members are re-exported below under their original names so the page
+# pipeline and the historical `orchestrator.dashboard.*` surface keep
+# resolving to the same objects.
 from orchestrator.dashboard_skill_matrix import (  # noqa: E402
     _skill_matrix_html as _skill_matrix_html,
     parse_skill_matrix_sort as parse_skill_matrix_sort,
@@ -301,14 +324,15 @@ from orchestrator.dashboard_reads import (  # noqa: E402
 from orchestrator.dashboard_reads import (  # noqa: E402
     _read_repo_breakdown as _read_repo_breakdown,
     _read_review_round as _read_review_round,
+    _read_skill_adoption as _read_skill_adoption,
     _read_skill_trigger_matrix as _read_skill_trigger_matrix,
     _read_skill_trigger_rates as _read_skill_trigger_rates,
     _read_stage_breakdown as _read_stage_breakdown,
     _read_static_metadata as _read_static_metadata,
     _read_summary as _read_summary,
-    _read_throughput as _read_throughput,
 )
 from orchestrator.dashboard_reads import (  # noqa: E402
+    _read_throughput as _read_throughput,
     _read_time_series as _read_time_series,
     _read_top_cost_issues as _read_top_cost_issues,
     _scoped_read as _scoped_read,
@@ -365,6 +389,8 @@ from orchestrator.dashboard_widgets import (  # noqa: E402
 )
 from orchestrator.dashboard_widgets import (  # noqa: E402
     _render_repo_and_reliability as _render_repo_and_reliability,
+    _render_skill_adoption as _render_skill_adoption,
+    _render_skill_invocation_diagnostics as _render_skill_invocation_diagnostics,
     _render_skill_matrix_expander as _render_skill_matrix_expander,
     _render_skill_triggers as _render_skill_triggers,
     _render_stage_review_bars as _render_stage_review_bars,
@@ -374,8 +400,8 @@ from orchestrator.dashboard_widgets import (  # noqa: E402
 # Canonical inventory of the `orchestrator.dashboard.*` surface: the page
 # entrypoint (`main`) and its drill-down helper, and every name re-exported
 # above from `dashboard_state` / `dashboard_kpis` / `dashboard_html` /
-# `dashboard_cards` / `dashboard_kpi_strip` / `dashboard_skill_matrix` /
-# `dashboard_reads` / `dashboard_widgets` (plus
+# `dashboard_cards` / `dashboard_kpi_strip` / `dashboard_skill_adoption` /
+# `dashboard_skill_matrix` / `dashboard_reads` / `dashboard_widgets` (plus
 # the `analytics` / `analytics_read` module handles). Keeping the list explicit makes the
 # compatibility surface auditable in one place and governs
 # `from orchestrator.dashboard import *`; every `X as X` re-export above
@@ -409,6 +435,7 @@ __all__ = [
     "PRESET_OPTIONS",
     "REWORK_BUCKETS",
     "STATIC_METADATA_TTL_SECONDS",
+    "SkillAdoptionRow",
     "SkillTriggerMatrixRow",
     "SkillTriggerRateRow",
     "Summary",
@@ -454,6 +481,7 @@ __all__ = [
     "_read_recent_agent_exits",
     "_read_repo_breakdown",
     "_read_review_round",
+    "_read_skill_adoption",
     "_read_skill_trigger_matrix",
     "_read_skill_trigger_rates",
     "_read_stage_breakdown",
@@ -477,6 +505,8 @@ __all__ = [
     "_render_recent_runs",
     "_render_remaining_widgets",
     "_render_repo_and_reliability",
+    "_render_skill_adoption",
+    "_render_skill_invocation_diagnostics",
     "_render_skill_matrix_expander",
     "_render_skill_triggers",
     "_render_stage_review_bars",
@@ -484,6 +514,7 @@ __all__ = [
     "_run_read_waves",
     "_scoped_read",
     "_second_wave_readers",
+    "_skill_adoption_html",
     "_skill_matrix_html",
     "_skill_triggers_html",
     "_sparkline_svg",
@@ -501,6 +532,7 @@ __all__ = [
     "kpi_delta",
     "main",
     "parse_issue_number",
+    "parse_skill_adoption_sort",
     "parse_skill_matrix_sort",
     "preset_window",
     "previous_window",

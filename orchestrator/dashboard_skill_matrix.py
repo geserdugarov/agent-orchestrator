@@ -1,13 +1,13 @@
 # Copyright 2026 Geser Dugarov
 # SPDX-License-Identifier: Apache-2.0
-"""Inline-HTML rendering for the per-skill trigger matrix.
+"""Inline-HTML rendering for the invocation-level per-skill trigger matrix.
 
-The fold-out table under the "Skill trigger rates" panel pairs each
-repo's offered-skill catalog with the skills its runs triggered. Its
-column headers are clickable sort controls that write `mtx_sort` /
-`mtx_dir` query params (`parse_skill_matrix_sort` reads them back), so
-this module owns both the sort-param parsing and the sortable-table
-markup.
+The fold-out table under the skill panel's invocation-level diagnostics
+expander (beneath the primary session-adoption matrix) pairs each repo's
+offered-skill catalog with the skills its runs triggered. Its column
+headers are clickable sort controls that write `mtx_sort` / `mtx_dir`
+query params (`parse_skill_matrix_sort` reads them back), so this module
+owns both the sort-param parsing and the sortable-table markup.
 
 The shared compact-table CSS / wrapper primitives (`_table_css`,
 `_table_html`) and the `_UNKNOWN` placeholder stay in
@@ -259,9 +259,10 @@ def _skill_matrix_html(
 ) -> str:
     """Render the per-skill trigger matrix to inline HTML.
 
-    The fold-out table under the "Skill trigger rates" panel: one row
-    per `(repo, agent_role, backend, skill)` cell from
-    `get_skill_trigger_matrix`, with columns Repo / Role / Backend /
+    The fold-out table under the skill panel's invocation-level
+    diagnostics expander: one row per `(repo, agent_role, backend,
+    skill)` cell from `get_skill_trigger_matrix`, with columns Repo /
+    Role / Backend /
     Skill / Runs / Runs with skill / Trigger rate. `Runs` is the total
     agent-exit runs in the cell's cohort, `Runs with skill` the subset
     that fired this skill, and `Trigger rate` the share of the two
