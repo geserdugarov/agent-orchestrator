@@ -8,6 +8,7 @@ hit, the handler returns before `_post_user_content_change_result`, the in_revie
 watermark bump, or any relabel / pinned-state write -- so the drift stays
 unconsumed (the stale hash stands) and the committed work stays on the branch
 until the label is removed."""
+
 from __future__ import annotations
 
 import unittest
@@ -18,6 +19,8 @@ from orchestrator.github import PAUSED_LABEL
 from tests.fakes import FakeGitHubClient, FakeLabel, FakePR, make_issue
 from tests.workflow_helpers import _PatchedWorkflowMixin, _agent
 
+ISSUE = 85
+PR_NUMBER = 805
 BRANCH = "orchestrator/geserdugarov__agent-orchestrator/issue-85"
 
 
@@ -37,15 +40,15 @@ class InReviewLivePauseDriftTest(unittest.TestCase, _PatchedWorkflowMixin):
         # happens (and the stale hash survives) proves the guard reads
         # `gh.get_issue` and honors it, leaving the drift for a later tick.
         gh = FakeGitHubClient()
-        issue = make_issue(85, label="in_review", body="new acceptance")
+        issue = make_issue(ISSUE, label="in_review", body="new acceptance")
         gh.add_issue(issue)
-        gh.add_pr(FakePR(number=805, head_branch=BRANCH))
+        gh.add_pr(FakePR(number=PR_NUMBER, head_branch=BRANCH))
         gh.seed_state(
-            85,
+            ISSUE,
             user_content_hash="stale-hash",
             dev_agent="claude",
             dev_session_id="dev-sess",
-            pr_number=805,
+            pr_number=PR_NUMBER,
             pr_last_comment_id=0,
             pr_last_review_comment_id=0,
             pr_last_review_summary_id=0,
@@ -54,10 +57,11 @@ class InReviewLivePauseDriftTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
         before_writes = gh.write_state_calls
 
-        get_issue_mock = MagicMock(return_value=_paused_view(85))
+        get_issue_mock = MagicMock(return_value=_paused_view(ISSUE))
         with patch.object(gh, "get_issue", get_issue_mock):
             mocks = self._run_in_review(
-                gh, issue,
+                gh,
+                issue,
                 run_agent=_agent(session_id="dev-sess", last_message="addressed"),
                 has_new_commits=True,
                 dirty_files=(),
@@ -66,16 +70,16 @@ class InReviewLivePauseDriftTest(unittest.TestCase, _PatchedWorkflowMixin):
             )
 
         mocks["run_agent"].assert_called_once()
-        get_issue_mock.assert_called_with(85)
+        get_issue_mock.assert_called_with(ISSUE)
         mocks["_push_branch"].assert_not_called()
         # Nothing persisted, no relabel: the drift stays unconsumed.
         self.assertEqual(gh.write_state_calls, before_writes)
-        self.assertNotIn((85, "validating"), gh.label_history)
-        self.assertNotIn((85, "documenting"), gh.label_history)
-        data = gh.pinned_data(85)
-        self.assertEqual(data.get("user_content_hash"), "stale-hash")
-        self.assertEqual(data.get("review_round"), 2)
-        self.assertFalse(data.get("awaiting_human"))
+        self.assertNotIn((ISSUE, "validating"), gh.label_history)
+        self.assertNotIn((ISSUE, "documenting"), gh.label_history)
+        pinned_state = gh.pinned_data(ISSUE)
+        self.assertEqual(pinned_state.get("user_content_hash"), "stale-hash")
+        self.assertEqual(pinned_state.get("review_round"), 2)
+        self.assertFalse(pinned_state.get("awaiting_human"))
 
 
 if __name__ == "__main__":

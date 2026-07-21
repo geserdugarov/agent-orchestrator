@@ -23,9 +23,37 @@ from tests.workflow_helpers import (
     _agent,
 )
 
+PR_NUMBER_OFFSET = 2_000
+PUSHED_FIX_ISSUE = 301
+QUESTION_ISSUE = 302
+HUMAN_RESUME_ISSUE = 303
+DRIFT_FIX_ISSUE = 304
+DRIFT_ACK_ISSUE = 305
+REVIEWER_RECOVERY_ISSUE = 306
+CLEAN_DEV_RECOVERY_ISSUE = 307
+PUSHED_DEV_RECOVERY_ISSUE = 308
+RECOVERY_WATERMARK = 10_000
+PICKUP_COMMENT_ID = 900
+PR_OPEN_COMMENT_ID = 901
+REVIEW_DEBOUNCE_SECONDS = 600
+HANDOFF_ISSUE = 5
+HANDOFF_PR = 11
+HANDOFF_BRANCH = "orchestrator/geserdugarov__agent-orchestrator/issue-5"
+SECOND_HANDOFF_ISSUE = 99
+SECOND_HANDOFF_PR = 50
+SECOND_HANDOFF_BRANCH = "orchestrator/geserdugarov__agent-orchestrator/issue-99"
+CONSUMED_FEEDBACK_ID = 2000
+REVIEW_FEEDBACK_WATERMARK = 4242
+DEV_SESSION = "dev-sess"
+BEFORE_FIX_SHA = "aaa"
+REVIEW_ROUND = "review_round"
+LABEL_DOCUMENTING = "documenting"
+LABEL_IN_REVIEW = "in_review"
+AWAITING_HUMAN = "awaiting_human"
+BOT_LOGIN = "orchestrator"
+
 
 class _ValidatingHandoffFixtureMixin(_PatchedWorkflowMixin):
-
     def _validating_issue(
         self,
         *,
@@ -36,15 +64,17 @@ class _ValidatingHandoffFixtureMixin(_PatchedWorkflowMixin):
     ):
         gh = FakeGitHubClient()
         issue = make_issue(
-            issue_number, label="validating", body=body,
+            issue_number,
+            label="validating",
+            body=body,
             comments=list(comments),
         )
         gh.add_issue(issue)
         defaults = dict(
-            pr_number=2_000 + issue_number,
+            pr_number=PR_NUMBER_OFFSET + issue_number,
             branch=f"orchestrator/geserdugarov__agent-orchestrator/issue-{issue_number}",
             dev_agent="claude",
-            dev_session_id="dev-sess",
+            dev_session_id=DEV_SESSION,
             review_round=0,
         )
         defaults.update(state)
@@ -53,108 +83,113 @@ class _ValidatingHandoffFixtureMixin(_PatchedWorkflowMixin):
 
 
 class ValidatingPushedFixesStayOnValidatingTest(
-    unittest.TestCase, _ValidatingHandoffFixtureMixin,
+    unittest.TestCase,
+    _ValidatingHandoffFixtureMixin,
 ):
     """Keep pushed fixes on validating for another review pass."""
 
     def test_pushed_fix_stays_validating(self) -> None:
-        gh, issue = self._validating_issue(issue_number=301, review_round=1)
+        gh, issue = self._validating_issue(issue_number=PUSHED_FIX_ISSUE, review_round=1)
         review = _agent(
             session_id="rev-sess",
-            last_message="please tighten the docstring\n\n"
-                         "VERDICT: CHANGES_REQUESTED",
+            last_message="please tighten the docstring\n\nVERDICT: CHANGES_REQUESTED",
         )
-        dev_fix = _agent(session_id="dev-sess", last_message="fixed")
+        dev_fix = _agent(session_id=DEV_SESSION, last_message="fixed")
 
         self._run_validating(
-            gh, issue,
+            gh,
+            issue,
             run_agent=[review, dev_fix],
             dirty_files=(),
             push_branch=True,
             # before_sha + after_sha (push landed).
-            head_shas=["aaa", "bbb"],
+            head_shas=[BEFORE_FIX_SHA, "bbb"],
         )
 
-        state = gh.pinned_data(301)
-        self.assertEqual(state.get("review_round"), 2)
-        self.assertNotIn((301, "documenting"), gh.label_history)
-        self.assertNotIn((301, "in_review"), gh.label_history)
+        state = gh.pinned_data(PUSHED_FIX_ISSUE)
+        self.assertEqual(state.get(REVIEW_ROUND), 2)
+        self.assertNotIn((PUSHED_FIX_ISSUE, LABEL_DOCUMENTING), gh.label_history)
+        self.assertNotIn((PUSHED_FIX_ISSUE, LABEL_IN_REVIEW), gh.label_history)
 
     def test_no_commit_stays_validating(self) -> None:
         # The dev asked a question instead of committing -- no push, no
         # round bump, no documenting handoff. The issue parks awaiting
         # human via `_on_question`.
-        gh, issue = self._validating_issue(issue_number=302, review_round=1)
+        gh, issue = self._validating_issue(issue_number=QUESTION_ISSUE, review_round=1)
         review = _agent(
             session_id="rev-sess",
             last_message="why does foo do X?\n\nVERDICT: CHANGES_REQUESTED",
         )
-        dev = _agent(session_id="dev-sess", last_message="not sure, ideas?")
+        dev = _agent(session_id=DEV_SESSION, last_message="not sure, ideas?")
 
         self._run_validating(
-            gh, issue,
+            gh,
+            issue,
             run_agent=[review, dev],
             dirty_files=(),
             push_branch=True,
             # before_sha + after_sha all equal -> no commit.
-            head_shas=["aaa", "aaa"],
+            head_shas=[BEFORE_FIX_SHA, BEFORE_FIX_SHA],
         )
 
-        state = gh.pinned_data(302)
-        self.assertEqual(state.get("review_round"), 1)
-        self.assertTrue(state.get("awaiting_human"))
+        state = gh.pinned_data(QUESTION_ISSUE)
+        self.assertEqual(state.get(REVIEW_ROUND), 1)
+        self.assertTrue(state.get(AWAITING_HUMAN))
         # Stays on validating: no documenting handoff because nothing
         # was pushed.
-        self.assertNotIn((302, "documenting"), gh.label_history)
-        self.assertNotIn((302, "in_review"), gh.label_history)
+        self.assertNotIn((QUESTION_ISSUE, LABEL_DOCUMENTING), gh.label_history)
+        self.assertNotIn((QUESTION_ISSUE, LABEL_IN_REVIEW), gh.label_history)
 
     def test_human_resume_push_stays_validating(self) -> None:
         gh, issue = self._validating_issue(
-            issue_number=303,
+            issue_number=HUMAN_RESUME_ISSUE,
             awaiting_human=True,
-            last_action_comment_id=900,
+            last_action_comment_id=PICKUP_COMMENT_ID,
             review_round=1,
             comments=[
                 FakeComment(
-                    id=1000, body="please add a test",
+                    id=1000,
+                    body="please add a test",
                     user=FakeUser("alice"),
                 ),
             ],
         )
 
         self._run_validating(
-            gh, issue,
-            run_agent=_agent(session_id="dev-sess", last_message="done"),
+            gh,
+            issue,
+            run_agent=_agent(session_id=DEV_SESSION, last_message="done"),
             dirty_files=(),
             push_branch=True,
-            head_shas=["aaa", "bbb"],
+            head_shas=[BEFORE_FIX_SHA, "bbb"],
         )
 
-        state = gh.pinned_data(303)
-        self.assertFalse(state.get("awaiting_human"))
-        self.assertEqual(state.get("review_round"), 2)
-        self.assertNotIn((303, "documenting"), gh.label_history)
+        state = gh.pinned_data(HUMAN_RESUME_ISSUE)
+        self.assertFalse(state.get(AWAITING_HUMAN))
+        self.assertEqual(state.get(REVIEW_ROUND), 2)
+        self.assertNotIn((HUMAN_RESUME_ISSUE, LABEL_DOCUMENTING), gh.label_history)
 
     def test_drift_pushed_fix_stays_on_validating(self) -> None:
         gh, issue = self._validating_issue(
-            issue_number=304,
+            issue_number=DRIFT_FIX_ISSUE,
             body="updated criteria after drift",
             user_content_hash="stale-hash",
             review_round=1,
         )
 
         self._run_validating(
-            gh, issue,
-            run_agent=_agent(session_id="dev-sess", last_message="fixed"),
+            gh,
+            issue,
+            run_agent=_agent(session_id=DEV_SESSION, last_message="fixed"),
             dirty_files=(),
             push_branch=True,
             head_shas=["before-sha", "after-sha"],
         )
 
-        state = gh.pinned_data(304)
-        self.assertEqual(state.get("review_round"), 2)
-        self.assertNotIn((304, "documenting"), gh.label_history)
-        self.assertNotIn((304, "in_review"), gh.label_history)
+        state = gh.pinned_data(DRIFT_FIX_ISSUE)
+        self.assertEqual(state.get(REVIEW_ROUND), 2)
+        self.assertNotIn((DRIFT_FIX_ISSUE, LABEL_DOCUMENTING), gh.label_history)
+        self.assertNotIn((DRIFT_FIX_ISSUE, LABEL_IN_REVIEW), gh.label_history)
 
     def test_drift_ack_keeps_validating_label(self) -> None:
         # A drift ACK reply (no commit, explicit `ACK:` marker) is an
@@ -162,16 +197,17 @@ class ValidatingPushedFixesStayOnValidatingTest(
         # edit. Nothing pushed -- so we stay on `validating` to let the
         # reviewer re-run on the current head next tick.
         gh, issue = self._validating_issue(
-            issue_number=305,
+            issue_number=DRIFT_ACK_ISSUE,
             body="updated criteria after drift",
             user_content_hash="stale-hash",
             review_round=1,
         )
 
         self._run_validating(
-            gh, issue,
+            gh,
+            issue,
             run_agent=_agent(
-                session_id="dev-sess",
+                session_id=DEV_SESSION,
                 last_message="ACK: prior commits already cover the edit.",
             ),
             dirty_files=(),
@@ -180,20 +216,23 @@ class ValidatingPushedFixesStayOnValidatingTest(
             head_shas=["same-sha", "same-sha"],
         )
 
-        state = gh.pinned_data(305)
+        state = gh.pinned_data(DRIFT_ACK_ISSUE)
         # Round is NOT bumped on an ACK.
-        self.assertEqual(state.get("review_round"), 1)
-        self.assertNotIn((305, "documenting"), gh.label_history)
-        self.assertNotIn((305, "in_review"), gh.label_history)
+        self.assertEqual(state.get(REVIEW_ROUND), 1)
+        self.assertNotIn((DRIFT_ACK_ISSUE, LABEL_DOCUMENTING), gh.label_history)
+        self.assertNotIn((DRIFT_ACK_ISSUE, LABEL_IN_REVIEW), gh.label_history)
         # ACK reply was surfaced as an FYI on the issue thread.
-        self.assertTrue(any(
-            "existing work satisfies" in body
-            for _, body in gh.posted_comments
-        ))
+        self.assertTrue(
+            any(
+                "existing work satisfies" in body
+                for _, body in gh.posted_comments
+            )
+        )
 
 
 class ValidatingRecoveryStaysOnValidatingTest(
-    unittest.TestCase, _ValidatingHandoffFixtureMixin,
+    unittest.TestCase,
+    _ValidatingHandoffFixtureMixin,
 ):
     """Recover transient validating parks without entering documenting."""
 
@@ -202,53 +241,55 @@ class ValidatingRecoveryStaysOnValidatingTest(
         # crashed, the dev never ran). Recovery clears the flags and
         # stays on `validating` -- the PR head is unchanged.
         gh, issue = self._validating_issue(
-            issue_number=306,
+            issue_number=REVIEWER_RECOVERY_ISSUE,
             awaiting_human=True,
             park_reason="reviewer_timeout",
-            last_action_comment_id=10_000,
+            last_action_comment_id=RECOVERY_WATERMARK,
             review_round=1,
         )
 
         with patch.object(workflow, "_worktree_path", return_value=Path("/tmp")):
             self._run_validating(
-                gh, issue,
+                gh,
+                issue,
                 run_agent=_agent(),
                 push_branch=True,
             )
 
-        state = gh.pinned_data(306)
-        self.assertFalse(state.get("awaiting_human"))
+        state = gh.pinned_data(REVIEWER_RECOVERY_ISSUE)
+        self.assertFalse(state.get(AWAITING_HUMAN))
         self.assertIsNone(state.get("park_reason"))
         # No fix landed -- stays on validating.
-        self.assertEqual(state.get("review_round"), 1)
-        self.assertNotIn((306, "documenting"), gh.label_history)
+        self.assertEqual(state.get(REVIEW_ROUND), 1)
+        self.assertNotIn((REVIEWER_RECOVERY_ISSUE, LABEL_DOCUMENTING), gh.label_history)
 
     def test_clean_dev_recovery_keeps_label(self) -> None:
         # The dev session timed out without producing a new commit (HEAD
         # unchanged from the pre-agent watermark). Recovery clears the
         # flags and stays on validating.
         gh, issue = self._validating_issue(
-            issue_number=307,
+            issue_number=CLEAN_DEV_RECOVERY_ISSUE,
             awaiting_human=True,
             park_reason="agent_timeout",
             pre_dev_fix_sha="cafe1234",
-            last_action_comment_id=10_000,
+            last_action_comment_id=RECOVERY_WATERMARK,
             review_round=1,
         )
 
         with patch.object(workflow, "_worktree_path", return_value=Path("/tmp")):
             self._run_validating(
-                gh, issue,
+                gh,
+                issue,
                 run_agent=_agent(),
                 dirty_files=(),
                 push_branch=True,
                 head_shas=("cafe1234",),  # HEAD == pre-agent SHA: no commit.
             )
 
-        state = gh.pinned_data(307)
-        self.assertFalse(state.get("awaiting_human"))
-        self.assertEqual(state.get("review_round"), 1)
-        self.assertNotIn((307, "documenting"), gh.label_history)
+        state = gh.pinned_data(CLEAN_DEV_RECOVERY_ISSUE)
+        self.assertFalse(state.get(AWAITING_HUMAN))
+        self.assertEqual(state.get(REVIEW_ROUND), 1)
+        self.assertNotIn((CLEAN_DEV_RECOVERY_ISSUE, LABEL_DOCUMENTING), gh.label_history)
 
     def test_pushed_dev_recovery_stays_validating(self) -> None:
         # The dev committed before the timeout killed it; recovery
@@ -256,69 +297,74 @@ class ValidatingRecoveryStaysOnValidatingTest(
         # stays on `validating` so the reviewer re-evaluates on the
         # next tick.
         gh, issue = self._validating_issue(
-            issue_number=308,
+            issue_number=PUSHED_DEV_RECOVERY_ISSUE,
             awaiting_human=True,
             park_reason="agent_timeout",
             pre_dev_fix_sha="cafe1234",
-            last_action_comment_id=10_000,
+            last_action_comment_id=RECOVERY_WATERMARK,
             review_round=1,
         )
 
         with patch.object(workflow, "_worktree_path", return_value=Path("/tmp")):
             self._run_validating(
-                gh, issue,
+                gh,
+                issue,
                 run_agent=_agent(),
                 dirty_files=(),
                 push_branch=True,
                 head_shas=("beef5678",),  # HEAD moved past pre-agent SHA.
             )
 
-        state = gh.pinned_data(308)
-        self.assertEqual(state.get("review_round"), 2)
-        self.assertNotIn((308, "documenting"), gh.label_history)
+        state = gh.pinned_data(PUSHED_DEV_RECOVERY_ISSUE)
+        self.assertEqual(state.get(REVIEW_ROUND), 2)
+        self.assertNotIn((PUSHED_DEV_RECOVERY_ISSUE, LABEL_DOCUMENTING), gh.label_history)
 
 
 class _ValidatingToInReviewFixtureMixin(_PatchedWorkflowMixin):
-
-    PR_NUMBER = 11
-    BRANCH = "orchestrator/geserdugarov__agent-orchestrator/issue-5"
-
     def _setup(self):
         gh = FakeGitHubClient()
-        issue = make_issue(5, label="validating", comments=[
-            FakeComment(
-                id=900, body=":robot: orchestrator picking this up.",
-                user=FakeUser("orchestrator"),
-            ),
-            FakeComment(
-                id=901, body=":sparkles: PR opened: #11",
-                user=FakeUser("orchestrator"),
-            ),
-        ])
+        issue = make_issue(
+            HANDOFF_ISSUE,
+            label="validating",
+            comments=[
+                FakeComment(
+                    id=PICKUP_COMMENT_ID,
+                    body=":robot: orchestrator picking this up.",
+                    user=FakeUser(BOT_LOGIN),
+                ),
+                FakeComment(
+                    id=PR_OPEN_COMMENT_ID,
+                    body=":sparkles: PR opened: #11",
+                    user=FakeUser(BOT_LOGIN),
+                ),
+            ],
+        )
         gh.add_issue(issue)
         pr = FakePR(
-            number=self.PR_NUMBER, head_branch=self.BRANCH,
+            number=HANDOFF_PR,
+            head_branch=HANDOFF_BRANCH,
             head=FakePRRef(sha="newhead42"),
         )
         gh.add_pr(pr)
         gh.seed_state(
-            5,
-            pr_number=self.PR_NUMBER,
-            branch=self.BRANCH,
+            HANDOFF_ISSUE,
+            pr_number=HANDOFF_PR,
+            branch=HANDOFF_BRANCH,
             dev_agent="claude",
-            dev_session_id="dev-sess",
+            dev_session_id=DEV_SESSION,
             review_round=0,
             # Pre-existing orchestrator comments are recognized by exact id,
             # not author login -- mirror what `_handle_pickup` / `_on_commits`
             # would have recorded as they posted these comments.
-            orchestrator_comment_ids=[900, 901],
-            pickup_comment_id=900,
+            orchestrator_comment_ids=[PICKUP_COMMENT_ID, PR_OPEN_COMMENT_ID],
+            pickup_comment_id=PICKUP_COMMENT_ID,
         )
         return gh, issue, pr
 
 
 class ValidatingToInReviewHandoffTest(
-    unittest.TestCase, _ValidatingToInReviewFixtureMixin,
+    unittest.TestCase,
+    _ValidatingToInReviewFixtureMixin,
 ):
     """Seed and ratchet feedback watermarks during approval handoff."""
 
@@ -334,23 +380,24 @@ class ValidatingToInReviewHandoffTest(
         # before in_review).
         long_ago = datetime.now(timezone.utc) - timedelta(hours=1)
         # Backdate every existing comment so debounce would otherwise fire.
-        for c in list(issue.comments) + list(pr.issue_comments):
-            c.created_at = long_ago
+        for comment in list(issue.comments) + list(pr.issue_comments):
+            comment.created_at = long_ago
 
         mocks_v = self._run_validating(
-            gh, issue,
+            gh,
+            issue,
             run_agent=_agent(last_message=REVIEW_APPROVED_MESSAGE),
             head_shas=("newhead42",),
         )
         self.assertEqual(mocks_v["run_agent"].call_count, 1)
-        self.assertIn((5, "documenting"), gh.label_history)
+        self.assertIn((HANDOFF_ISSUE, LABEL_DOCUMENTING), gh.label_history)
 
         # Backdate the approval comment that pr_comment just appended too,
         # so it would falsely fire the debounce-resume path if the
         # watermark were not seeded.
-        for c in list(pr.issue_comments):
-            if c.created_at is None:
-                c.created_at = long_ago
+        for comment in list(pr.issue_comments):
+            if comment.created_at is None:
+                comment.created_at = long_ago
 
         # Step 2: pretend approved + green checks + mergeable so the
         # ready-ping gate is the thing under test.
@@ -362,12 +409,14 @@ class ValidatingToInReviewHandoffTest(
         # exit would do for a final-docs pass with nothing to commit.
         # Watermarks set by validating ride through untouched.
         from tests.fakes import FakeLabel
-        if not any(l.name == "in_review" for l in issue.labels):
-            issue.labels = [FakeLabel("in_review")]
 
-        with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
+        if not any(label.name == LABEL_IN_REVIEW for label in issue.labels):
+            issue.labels = [FakeLabel(LABEL_IN_REVIEW)]
+
+        with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", REVIEW_DEBOUNCE_SECONDS):
             mocks_r = self._run_in_review(
-                gh, issue,
+                gh,
+                issue,
                 run_agent=_agent(),
             )
 
@@ -376,11 +425,8 @@ class ValidatingToInReviewHandoffTest(
         # The orchestrator is manual-merge-only; in_review pings HITL
         # for the manual merge instead of merging itself.
         self.assertEqual(gh.merge_calls, [])
-        self.assertNotIn((5, "done"), gh.label_history)
-        ping_comments = [
-            body for _, body in gh.posted_comments
-            if "ready for review/merge" in body
-        ]
+        self.assertNotIn((HANDOFF_ISSUE, "done"), gh.label_history)
+        ping_comments = [body for _, body in gh.posted_comments if "ready for review/merge" in body]
         self.assertEqual(len(ping_comments), 1)
 
     def test_second_handoff_ratchets_watermark(self) -> None:
@@ -392,53 +438,63 @@ class ValidatingToInReviewHandoffTest(
         # would regress and the next in_review tick would replay the same
         # already-fixed feedback as "new", looping forever.
         gh = FakeGitHubClient()
-        issue = make_issue(99, label="validating", comments=[
-            FakeComment(
-                id=900, body=":robot: orchestrator picking this up.",
-                user=FakeUser("orchestrator"),
-            ),
-            FakeComment(
-                id=901, body=":sparkles: PR opened: #50",
-                user=FakeUser("orchestrator"),
-            ),
-        ])
+        issue = make_issue(
+            SECOND_HANDOFF_ISSUE,
+            label="validating",
+            comments=[
+                FakeComment(
+                    id=PICKUP_COMMENT_ID,
+                    body=":robot: orchestrator picking this up.",
+                    user=FakeUser(BOT_LOGIN),
+                ),
+                FakeComment(
+                    id=PR_OPEN_COMMENT_ID,
+                    body=":sparkles: PR opened: #50",
+                    user=FakeUser(BOT_LOGIN),
+                ),
+            ],
+        )
         gh.add_issue(issue)
         pr = FakePR(
-            number=50, head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-99",
+            number=SECOND_HANDOFF_PR,
+            head_branch=SECOND_HANDOFF_BRANCH,
             head=FakePRRef(sha="cafe9999"),
             issue_comments=[
                 FakeComment(
-                    id=2000, body="rename foo to bar",
+                    id=CONSUMED_FEEDBACK_ID,
+                    body="rename foo to bar",
                     user=FakeUser("alice"),
                 ),
             ],
         )
         gh.add_pr(pr)
         gh.seed_state(
-            99,
-            pr_number=50,
-            branch="orchestrator/geserdugarov__agent-orchestrator/issue-99",
+            SECOND_HANDOFF_ISSUE,
+            pr_number=SECOND_HANDOFF_PR,
+            branch=SECOND_HANDOFF_BRANCH,
             dev_agent="claude",
-            dev_session_id="dev-sess",
+            dev_session_id=DEV_SESSION,
             review_round=1,
-            pr_last_comment_id=2000,
-            pr_last_review_comment_id=4242,
-            orchestrator_comment_ids=[900, 901],
-            pickup_comment_id=900,
+            pr_last_comment_id=CONSUMED_FEEDBACK_ID,
+            pr_last_review_comment_id=REVIEW_FEEDBACK_WATERMARK,
+            orchestrator_comment_ids=[PICKUP_COMMENT_ID, PR_OPEN_COMMENT_ID],
+            pickup_comment_id=PICKUP_COMMENT_ID,
         )
 
         self._run_validating(
-            gh, issue,
+            gh,
+            issue,
             run_agent=_agent(last_message=REVIEW_APPROVED_MESSAGE),
         )
 
         # Approval relabels to `documenting` (the final-docs hop); the
         # ratcheted watermark must persist across the hop.
-        self.assertIn((99, "documenting"), gh.label_history)
-        state = gh.pinned_data(99)
+        self.assertIn((SECOND_HANDOFF_ISSUE, LABEL_DOCUMENTING), gh.label_history)
+        state = gh.pinned_data(SECOND_HANDOFF_ISSUE)
         watermark = state.get("pr_last_comment_id")
         self.assertGreaterEqual(
-            watermark, 2000,
+            watermark,
+            CONSUMED_FEEDBACK_ID,
             f"watermark must not regress past consumed PR feedback (got {watermark})",
         )
-        self.assertEqual(state.get("pr_last_review_comment_id"), 4242)
+        self.assertEqual(state.get("pr_last_review_comment_id"), REVIEW_FEEDBACK_WATERMARK)

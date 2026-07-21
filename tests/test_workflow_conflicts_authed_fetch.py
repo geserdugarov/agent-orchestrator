@@ -16,6 +16,13 @@ from tests.workflow_helpers import (
     _temp_git_repo_with_local_config,
 )
 
+SUBPROCESS_RUN = "subprocess.run"
+TOKEN_RESOLVER = "_resolve_github_token"
+FAKE_TOKEN = "fake-token-xyz"
+FORCED_MAIN_REFSPEC = "+refs/heads/main:refs/remotes/origin/main"
+TEMP_ROOT = "/tmp"
+REPOSITORY_SLUG = "acme/widgets"
+
 
 class AuthedFetchHardeningTest(unittest.TestCase):
     """`_authed_fetch` is the in-worktree authenticated fetch helper used
@@ -32,24 +39,27 @@ class AuthedFetchHardeningTest(unittest.TestCase):
             probe_result=MagicMock(returncode=1, stdout="", stderr=""),
         )
 
-        with mock_patch("subprocess.run", side_effect=run_recorder), \
-             mock_patch.object(
-                 workflow.config, "_resolve_github_token",
-                 return_value="fake-token-xyz",
-             ):
+        with (
+            mock_patch(SUBPROCESS_RUN, side_effect=run_recorder),
+            mock_patch.object(
+                workflow.config,
+                TOKEN_RESOLVER,
+                return_value=FAKE_TOKEN,
+            ),
+        ):
             workflow._authed_fetch(
                 _TEST_SPEC,
-                "+refs/heads/main:refs/remotes/origin/main",
-                cwd=Path("/tmp"),
+                FORCED_MAIN_REFSPEC,
+                cwd=Path(TEMP_ROOT),
             )
 
         env = run_recorder.env
         # askpass wires the token via env, NOT argv.
         self.assertIn("GIT_ASKPASS", env)
-        self.assertEqual(env.get("GIT_TOKEN"), "fake-token-xyz")
+        self.assertEqual(env.get("GIT_TOKEN"), FAKE_TOKEN)
         # Token must NOT appear in argv.
         for arg in run_recorder.args:
-            self.assertNotIn("fake-token-xyz", str(arg))
+            self.assertNotIn(FAKE_TOKEN, str(arg))
         # Global/system config detached so url rewrites planted there
         # cannot redirect the fetch to an attacker-controlled host.
         self.assertEqual(env.get("GIT_CONFIG_GLOBAL"), os.devnull)
@@ -62,9 +72,8 @@ class AuthedFetchHardeningTest(unittest.TestCase):
         # Auth URL carries only the username, not the token.
         self.assertTrue(
             any(
-                isinstance(a, str)
-                and a.startswith("https://x-access-token@github.com/")
-                for a in argv
+                isinstance(argument, str) and argument.startswith("https://x-access-token@github.com/")
+                for argument in argv
             ),
             f"expected x-access-token auth URL in argv, got {argv!r}",
         )
@@ -74,23 +83,23 @@ class AuthedFetchHardeningTest(unittest.TestCase):
         run_recorder = _GitRunRecorder(
             probe_result=MagicMock(
                 returncode=0,
-                stdout=(
-                    "url.https://evil.example/.insteadof "
-                    "https://github.com/\n"
-                ),
+                stdout=("url.https://evil.example/.insteadof https://github.com/\n"),
                 stderr="",
             ),
         )
 
-        with mock_patch("subprocess.run", side_effect=run_recorder), \
-             mock_patch.object(
-                 workflow.config, "_resolve_github_token",
-                 return_value="fake-token-xyz",
-             ):
+        with (
+            mock_patch(SUBPROCESS_RUN, side_effect=run_recorder),
+            mock_patch.object(
+                workflow.config,
+                TOKEN_RESOLVER,
+                return_value=FAKE_TOKEN,
+            ),
+        ):
             fetch = workflow._authed_fetch(
                 _TEST_SPEC,
-                "+refs/heads/main:refs/remotes/origin/main",
-                cwd=Path("/tmp"),
+                FORCED_MAIN_REFSPEC,
+                cwd=Path(TEMP_ROOT),
             )
 
         # Only the rewrite probe ran -- the fetch was refused.
@@ -102,15 +111,18 @@ class AuthedFetchHardeningTest(unittest.TestCase):
         # can't prove the broadened regexp actually catches http.* keys. Use
         # real git config resolution: a worktree carrying `http.proxy` must
         # make `_authed_fetch` fail closed before the token-bearing fetch runs.
-        with _temp_git_repo_with_local_config(
-            [("http.proxy", "http://evil.example:8080")]
-        ) as repo, mock_patch.object(
-            workflow.config, "_resolve_github_token",
-            return_value="fake-token-xyz",
-        ), self.assertLogs(git_plumbing.log, level="ERROR") as cm:
+        with (
+            _temp_git_repo_with_local_config([("http.proxy", "http://evil.example:8080")]) as repo,
+            mock_patch.object(
+                workflow.config,
+                TOKEN_RESOLVER,
+                return_value=FAKE_TOKEN,
+            ),
+            self.assertLogs(git_plumbing.log, level="ERROR") as cm,
+        ):
             fetch = workflow._authed_fetch(
                 _TEST_SPEC,
-                "+refs/heads/main:refs/remotes/origin/main",
+                FORCED_MAIN_REFSPEC,
                 cwd=repo,
             )
         self.assertNotEqual(fetch.returncode, 0)
@@ -122,13 +134,14 @@ class AuthedFetchHardeningTest(unittest.TestCase):
     def test_no_token_fails_without_subprocess(self) -> None:
         subprocess_run = MagicMock()
 
-        with mock_patch("subprocess.run", subprocess_run), \
-             mock_patch.object(
-                 workflow.config, "_resolve_github_token", return_value=""
-             ):
+        with (
+            mock_patch(SUBPROCESS_RUN, subprocess_run),
+            mock_patch.object(workflow.config, TOKEN_RESOLVER, return_value=""),
+        ):
             fetch = workflow._authed_fetch(
-                _TEST_SPEC, "refs/heads/main:refs/remotes/origin/main",
-                cwd=Path("/tmp"),
+                _TEST_SPEC,
+                "refs/heads/main:refs/remotes/origin/main",
+                cwd=Path(TEMP_ROOT),
             )
 
         # No subprocess at all when the token is missing.
@@ -149,23 +162,23 @@ class AuthedFetchHardeningTest(unittest.TestCase):
         token_resolver = _TokenResolver()
 
         repo = config.RepoSpec(
-            slug="acme/widgets",
+            slug=REPOSITORY_SLUG,
             target_root=Path("/tmp/orchestrator-test-target-root"),
             base_branch="main",
         )
-        with mock_patch("subprocess.run", side_effect=run_recorder), \
-             mock_patch.object(
-                 workflow.config, "_resolve_github_token", token_resolver
-             ):
+        with (
+            mock_patch(SUBPROCESS_RUN, side_effect=run_recorder),
+            mock_patch.object(workflow.config, TOKEN_RESOLVER, token_resolver),
+        ):
             fetch = workflow._authed_fetch(
                 repo,
-                "+refs/heads/main:refs/remotes/origin/main",
-                cwd=Path("/tmp"),
+                FORCED_MAIN_REFSPEC,
+                cwd=Path(TEMP_ROOT),
             )
         self.assertEqual(fetch.returncode, 0)
         # Token resolved exactly once, for the spec's slug -- not for
         # `config.REPO`.
-        self.assertEqual(token_resolver.slugs, ["acme/widgets"])
+        self.assertEqual(token_resolver.slugs, [REPOSITORY_SLUG])
         env = run_recorder.env
         self.assertEqual(env.get("GIT_TOKEN"), "ghp-token-for-acme-widgets")
         # Auth URL targets the spec's slug, not the cached config.REPO.
@@ -183,24 +196,25 @@ class AuthedFetchHardeningTest(unittest.TestCase):
         subprocess_run = MagicMock()
 
         repo = config.RepoSpec(
-            slug="acme/widgets",
+            slug=REPOSITORY_SLUG,
             target_root=Path("/tmp/orchestrator-test-target-root"),
             base_branch="main",
         )
-        with mock_patch("subprocess.run", subprocess_run), \
-             mock_patch.object(
-                 workflow.config, "_resolve_github_token", return_value=""
-             ), self.assertLogs(git_plumbing.log, level="ERROR") as cm:
+        with (
+            mock_patch(SUBPROCESS_RUN, subprocess_run),
+            mock_patch.object(workflow.config, TOKEN_RESOLVER, return_value=""),
+            self.assertLogs(git_plumbing.log, level="ERROR") as cm,
+        ):
             fetch = workflow._authed_fetch(
                 repo,
-                "+refs/heads/main:refs/remotes/origin/main",
-                cwd=Path("/tmp"),
+                FORCED_MAIN_REFSPEC,
+                cwd=Path(TEMP_ROOT),
             )
         # Fetch aborted before any subprocess ran.
         subprocess_run.assert_not_called()
         self.assertNotEqual(fetch.returncode, 0)
         self.assertTrue(
-            any("acme/widgets" in line for line in cm.output),
+            any(REPOSITORY_SLUG in line for line in cm.output),
             f"expected slug 'acme/widgets' in log output, got {cm.output!r}",
         )
 

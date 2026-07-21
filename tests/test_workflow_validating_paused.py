@@ -9,6 +9,7 @@ bumping `review_round`, relabeling, or writing pinned state -- so once the
 label is removed a later tick republishes the committed work normally. Covers
 the three validating dev resumes: the user-content drift resume, the
 awaiting-human resume, and the CHANGES_REQUESTED reviewer-feedback fix."""
+
 from __future__ import annotations
 
 import unittest
@@ -30,6 +31,17 @@ from tests.workflow_helpers import (
     _agent,
 )
 
+DRIFT_ISSUE = 80
+DRIFT_PR = 800
+HUMAN_RESUME_ISSUE = 81
+HUMAN_RESUME_PR = 810
+HUMAN_REPLY_ID = 5000
+ACTION_WATERMARK = 4000
+CHANGES_REQUESTED_ISSUE = 82
+CHANGES_REQUESTED_PR = 820
+LABEL_VALIDATING = "validating"
+DEV_SESSION = "dev-sess"
+
 
 def _branch(number: int) -> str:
     return f"orchestrator/geserdugarov__agent-orchestrator/issue-{number}"
@@ -40,14 +52,12 @@ def _paused_view(number: int) -> object:
     `gh.get_issue` returns after an operator pauses mid-run. The handler's own
     `issue` snapshot deliberately does NOT carry it, so a guard that consulted
     the stale snapshot would publish."""
-    view = make_issue(number, label="validating")
+    view = make_issue(number, label=LABEL_VALIDATING)
     view.labels.append(FakeLabel(PAUSED_LABEL))
     return view
 
 
-class ValidatingLivePauseDriftResumeTest(
-    unittest.TestCase, _PatchedWorkflowMixin
-):
+class ValidatingLivePauseDriftResumeTest(unittest.TestCase, _PatchedWorkflowMixin):
     def test_drift_pause_skips_result_handler(self) -> None:
         # A human edited the issue body (stale seeded hash -> drift fires), so
         # the handler resumes the dev on the new body. `paused` is applied
@@ -55,25 +65,26 @@ class ValidatingLivePauseDriftResumeTest(
         # `_post_user_content_change_result` posts an ack / pushes / bumps the
         # round, and before pinned state is written.
         gh = FakeGitHubClient()
-        issue = make_issue(80, label="validating", body="updated criteria")
+        issue = make_issue(DRIFT_ISSUE, label=LABEL_VALIDATING, body="updated criteria")
         gh.add_issue(issue)
-        pr = FakePR(number=800, head_branch=_branch(80))
+        pr = FakePR(number=DRIFT_PR, head_branch=_branch(DRIFT_ISSUE))
         gh.add_pr(pr)
         gh.seed_state(
-            80,
+            DRIFT_ISSUE,
             user_content_hash="stale-hash",
             dev_agent="claude",
-            dev_session_id="dev-sess",
-            pr_number=800,
+            dev_session_id=DEV_SESSION,
+            pr_number=DRIFT_PR,
             review_round=1,
-            branch=_branch(80),
+            branch=_branch(DRIFT_ISSUE),
         )
         before_writes = gh.write_state_calls
 
-        with patch.object(gh, "get_issue", return_value=_paused_view(80)):
+        with patch.object(gh, "get_issue", return_value=_paused_view(DRIFT_ISSUE)):
             mocks = self._run_validating(
-                gh, issue,
-                run_agent=_agent(session_id="dev-sess", last_message="fixed"),
+                gh,
+                issue,
+                run_agent=_agent(session_id=DEV_SESSION, last_message="fixed"),
                 head_shas=["before-sha", "after-sha"],
             )
 
@@ -81,19 +92,20 @@ class ValidatingLivePauseDriftResumeTest(
         mocks["_push_branch"].assert_not_called()
         self.assertEqual(gh.label_history, [])
         self.assertEqual(gh.posted_pr_comments, [])
-        self.assertFalse(any(
-            ":speech_balloon:" in body for _, body in gh.posted_comments
-        ))
+        self.assertFalse(
+            any(
+                ":speech_balloon:" in body
+                for _, body in gh.posted_comments
+            )
+        )
         # Durable state untouched: no pinned write, round not bumped.
         self.assertEqual(gh.write_state_calls, before_writes)
-        state = gh.pinned_data(80)
+        state = gh.pinned_data(DRIFT_ISSUE)
         self.assertEqual(state.get("review_round"), 1)
         self.assertEqual(state.get("user_content_hash"), "stale-hash")
 
 
-class ValidatingLivePauseAwaitingHumanTest(
-    unittest.TestCase, _PatchedWorkflowMixin
-):
+class ValidatingLivePauseAwaitingHumanTest(unittest.TestCase, _PatchedWorkflowMixin):
     def test_resume_skips_fix_disposition(
         self,
     ) -> None:
@@ -102,33 +114,34 @@ class ValidatingLivePauseAwaitingHumanTest(
         # `_handle_dev_fix_result` parks / pushes / bumps the round -- and
         # before any pinned write -- leaving the park intact.
         gh = FakeGitHubClient()
-        issue = make_issue(81, label="validating", body="body")
-        human = FakeComment(id=5000, body="here is the answer", user=FakeUser("alice"))
+        issue = make_issue(HUMAN_RESUME_ISSUE, label=LABEL_VALIDATING, body="body")
+        human = FakeComment(id=HUMAN_REPLY_ID, body="here is the answer", user=FakeUser("alice"))
         issue.comments.append(human)
         gh.add_issue(issue)
-        pr = FakePR(number=810, head_branch=_branch(81))
+        pr = FakePR(number=HUMAN_RESUME_PR, head_branch=_branch(HUMAN_RESUME_ISSUE))
         gh.add_pr(pr)
         # Seed the hash to INCLUDE the new comment so the drift check returns
         # None and the awaiting-human branch (not the drift resume) handles it.
         seed_hash = workflow._compute_user_content_hash(issue, set())
         gh.seed_state(
-            81,
+            HUMAN_RESUME_ISSUE,
             user_content_hash=seed_hash,
             dev_agent="claude",
-            dev_session_id="dev-sess",
-            pr_number=810,
+            dev_session_id=DEV_SESSION,
+            pr_number=HUMAN_RESUME_PR,
             review_round=2,
-            branch=_branch(81),
+            branch=_branch(HUMAN_RESUME_ISSUE),
             awaiting_human=True,
             park_reason=None,
-            last_action_comment_id=4000,
+            last_action_comment_id=ACTION_WATERMARK,
         )
         before_writes = gh.write_state_calls
 
-        with patch.object(gh, "get_issue", return_value=_paused_view(81)):
+        with patch.object(gh, "get_issue", return_value=_paused_view(HUMAN_RESUME_ISSUE)):
             mocks = self._run_validating(
-                gh, issue,
-                run_agent=_agent(session_id="dev-sess", last_message="done"),
+                gh,
+                issue,
+                run_agent=_agent(session_id=DEV_SESSION, last_message="done"),
                 head_shas=["before-sha", "after-sha"],
             )
 
@@ -141,15 +154,13 @@ class ValidatingLivePauseAwaitingHumanTest(
         # Durable state untouched: the park stays put and the consumed-comment
         # watermark is NOT advanced, so the next tick re-consumes the reply.
         self.assertEqual(gh.write_state_calls, before_writes)
-        state = gh.pinned_data(81)
+        state = gh.pinned_data(HUMAN_RESUME_ISSUE)
         self.assertTrue(state.get("awaiting_human"))
-        self.assertEqual(state.get("last_action_comment_id"), 4000)
+        self.assertEqual(state.get("last_action_comment_id"), ACTION_WATERMARK)
         self.assertEqual(state.get("review_round"), 2)
 
 
-class ValidatingLivePauseChangesRequestedTest(
-    unittest.TestCase, _PatchedWorkflowMixin
-):
+class ValidatingLivePauseChangesRequestedTest(unittest.TestCase, _PatchedWorkflowMixin):
     def test_fix_pause_keeps_fixing_label(self) -> None:
         # The reviewer returns CHANGES_REQUESTED, so the handler posts the
         # feedback, flips to `fixing` (durable, pre-spawn), and resumes the dev
@@ -158,19 +169,19 @@ class ValidatingLivePauseChangesRequestedTest(
         # back to `validating`. The pre-spawn `fixing` flip stands so
         # `_handle_fixing` owns the resume once the label is removed.
         gh = FakeGitHubClient()
-        issue = make_issue(82, label="validating", body="body")
+        issue = make_issue(CHANGES_REQUESTED_ISSUE, label=LABEL_VALIDATING, body="body")
         gh.add_issue(issue)
-        pr = FakePR(number=820, head_branch=_branch(82))
+        pr = FakePR(number=CHANGES_REQUESTED_PR, head_branch=_branch(CHANGES_REQUESTED_ISSUE))
         gh.add_pr(pr)
         seed_hash = workflow._compute_user_content_hash(issue, set())
         gh.seed_state(
-            82,
+            CHANGES_REQUESTED_ISSUE,
             user_content_hash=seed_hash,
             dev_agent="claude",
-            dev_session_id="dev-sess",
-            pr_number=820,
+            dev_session_id=DEV_SESSION,
+            pr_number=CHANGES_REQUESTED_PR,
             review_round=0,
-            branch=_branch(82),
+            branch=_branch(CHANGES_REQUESTED_ISSUE),
         )
         before_writes = gh.write_state_calls
 
@@ -178,7 +189,7 @@ class ValidatingLivePauseChangesRequestedTest(
             session_id="rev-sess",
             last_message="Please tighten the guard.\n\nVERDICT: CHANGES_REQUESTED",
         )
-        dev = _agent(session_id="dev-sess", last_message="fixed")
+        dev = _agent(session_id=DEV_SESSION, last_message="fixed")
         # The reviewer runs and returns CHANGES_REQUESTED while the issue is
         # still clean; the operator applies `paused` only during the ensuing
         # dev resume. So the reviewer-run guard must see a non-paused issue on
@@ -187,27 +198,28 @@ class ValidatingLivePauseChangesRequestedTest(
         # dev would never resume.
         issue_fetch = MagicMock(
             side_effect=[
-                make_issue(82, label="validating"),
-                _paused_view(82),
+                make_issue(CHANGES_REQUESTED_ISSUE, label=LABEL_VALIDATING),
+                _paused_view(CHANGES_REQUESTED_ISSUE),
             ],
         )
         with patch.object(gh, "get_issue", issue_fetch):
             mocks = self._run_validating(
-                gh, issue,
+                gh,
+                issue,
                 run_agent=[reviewer, dev],
                 head_shas=["before-sha", "after-sha"],
             )
 
         # Reviewer + dev both ran; the pre-spawn flip to `fixing` is durable.
         self.assertEqual(mocks["run_agent"].call_count, 2)
-        self.assertIn((82, "fixing"), gh.label_history)
+        self.assertIn((CHANGES_REQUESTED_ISSUE, "fixing"), gh.label_history)
         # But no relabel back to `validating` and no fix disposition fired.
-        self.assertNotIn((82, "validating"), gh.label_history)
+        self.assertNotIn((CHANGES_REQUESTED_ISSUE, LABEL_VALIDATING), gh.label_history)
         mocks["_push_branch"].assert_not_called()
         # Only the pre-spawn `fixing` write persisted; the post-resume path
         # never wrote again, and `review_round` was not bumped.
         self.assertEqual(gh.write_state_calls, before_writes + 1)
-        state = gh.pinned_data(82)
+        state = gh.pinned_data(CHANGES_REQUESTED_ISSUE)
         self.assertEqual(state.get("review_round"), 0)
 
 

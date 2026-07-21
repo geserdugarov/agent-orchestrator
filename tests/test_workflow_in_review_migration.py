@@ -3,6 +3,7 @@
 """Tests for the legacy in_review watermark migration and the zero-watermark
 fallback that keeps a legacy '0' from being displaced by a higher
 last_action_comment_id."""
+
 from __future__ import annotations
 
 import unittest
@@ -23,14 +24,33 @@ from tests.fakes import (
 from tests.workflow_helpers import (
     _PatchedWorkflowMixin,
     _agent,
+    _issue_branch,
 )
+
+LEGACY_ISSUE = 150
+LEGACY_PR = 300
+EMPTY_WATERMARK_ISSUE = 400
+EMPTY_WATERMARK_PR = 900
+ZERO_WATERMARK_ISSUE = 600
+ZERO_WATERMARK_PR = 1100
+EARLIER_COMMENT_ID = 910
+PR_OPEN_COMMENT_ID = 911
+LATER_COMMENT_ID = 920
+INLINE_REVIEW_ID = 30
+REVIEW_SUMMARY_ID = 4000
+FIRST_INLINE_REVIEW_ID = 42
+FIRST_REVIEW_SUMMARY_ID = 5050
+REVIEW_DEBOUNCE_SECONDS = 600
+BOT_LOGIN = "orchestrator"
+REVIEWED_SHA = "cafe1234"
+HUMAN_LOGIN = "alice"
+BACKEND_CLAUDE = "claude"
+DEV_SESSION = "dev-sess"
+DEBOUNCE_SETTING = "IN_REVIEW_DEBOUNCE_SECONDS"
+RUN_AGENT = "run_agent"
 
 
 class _LegacyWatermarkFixtureMixin(_PatchedWorkflowMixin):
-
-    PR_NUMBER = 300
-    BRANCH = "orchestrator/geserdugarov__agent-orchestrator/issue-150"
-
     def _legacy_setup(self):
         gh = FakeGitHubClient()
         long_ago = datetime.now(timezone.utc) - timedelta(hours=1)
@@ -38,42 +58,55 @@ class _LegacyWatermarkFixtureMixin(_PatchedWorkflowMixin):
         # one historical PR conversation comment (the validating handoff
         # approval) -- exactly the shape of an in-flight in_review issue
         # whose state was written before pr_last_comment_id existed.
-        issue = make_issue(150, label="in_review", comments=[
-            FakeComment(
-                id=910, body=":robot: orchestrator picking this up.",
-                user=FakeUser("orchestrator"), created_at=long_ago,
-            ),
-            FakeComment(
-                id=911, body=":sparkles: PR opened: #300",
-                user=FakeUser("orchestrator"), created_at=long_ago,
-            ),
-        ])
+        issue = make_issue(
+            LEGACY_ISSUE,
+            label="in_review",
+            comments=[
+                FakeComment(
+                    id=EARLIER_COMMENT_ID,
+                    body=":robot: orchestrator picking this up.",
+                    user=FakeUser(BOT_LOGIN),
+                    created_at=long_ago,
+                ),
+                FakeComment(
+                    id=PR_OPEN_COMMENT_ID,
+                    body=":sparkles: PR opened: #300",
+                    user=FakeUser(BOT_LOGIN),
+                    created_at=long_ago,
+                ),
+            ],
+        )
         gh.add_issue(issue)
         pr = FakePR(
-            number=self.PR_NUMBER, head_branch=self.BRANCH,
-            head=FakePRRef(sha="cafe1234"),
-            mergeable=True, check_state="success",
+            number=LEGACY_PR,
+            head_branch=_issue_branch(LEGACY_ISSUE),
+            head=FakePRRef(sha=REVIEWED_SHA),
+            mergeable=True,
+            check_state="success",
             issue_comments=[
                 FakeComment(
-                    id=920,
+                    id=LATER_COMMENT_ID,
                     body=":white_check_mark: codex review approved.",
-                    user=FakeUser("orchestrator"),
+                    user=FakeUser(BOT_LOGIN),
                     created_at=long_ago,
                 ),
             ],
             review_comments=[
                 FakeComment(
-                    id=30, body="line 5: drop the trailing newline",
-                    user=FakeUser("alice"), created_at=long_ago,
+                    id=INLINE_REVIEW_ID,
+                    body="line 5: drop the trailing newline",
+                    user=FakeUser(HUMAN_LOGIN),
+                    created_at=long_ago,
                 ),
             ],
             reviews=[
                 FakePRReview(
-                    id=4000, body="please rename foo to bar",
+                    id=REVIEW_SUMMARY_ID,
+                    body="please rename foo to bar",
                     state="CHANGES_REQUESTED",
-                    user=FakeUser("alice"),
+                    user=FakeUser(HUMAN_LOGIN),
                     submitted_at=long_ago,
-                    commit_id="cafe1234",
+                    commit_id=REVIEWED_SHA,
                 ),
             ],
         )
@@ -82,36 +115,45 @@ class _LegacyWatermarkFixtureMixin(_PatchedWorkflowMixin):
         # orchestrator_comment_ids. This is the state shape the migration
         # has to handle without replaying every historical comment.
         gh.seed_state(
-            150, pr_number=self.PR_NUMBER, branch=self.BRANCH,
-            dev_agent="claude", dev_session_id="dev-sess",
+            LEGACY_ISSUE,
+            pr_number=LEGACY_PR,
+            branch=_issue_branch(LEGACY_ISSUE),
+            dev_agent=BACKEND_CLAUDE,
+            dev_session_id=DEV_SESSION,
         )
         return gh, issue, pr
 
 
 class LegacyInReviewWatermarkSeedTest(
-    unittest.TestCase, _LegacyWatermarkFixtureMixin,
+    unittest.TestCase,
+    _LegacyWatermarkFixtureMixin,
 ):
     """Seed legacy watermarks without replaying historical feedback."""
 
     def test_first_tick_does_not_replay_history(self) -> None:
         gh, issue, pr = self._legacy_setup()
 
-        with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
+        with patch.object(
+            config,
+            DEBOUNCE_SETTING,
+            REVIEW_DEBOUNCE_SECONDS,
+        ):
             mocks = self._run_in_review(
-                gh, issue,
+                gh,
+                issue,
                 run_agent=_agent(),
             )
 
         # No dev resume despite historical comments / inline review / review
         # summary all sitting visible: the migration seeded each watermark
         # past the latest visible id on its surface.
-        mocks["run_agent"].assert_not_called()
-        self.assertNotIn((150, "validating"), gh.label_history)
+        mocks[RUN_AGENT].assert_not_called()
+        self.assertNotIn((LEGACY_ISSUE, "validating"), gh.label_history)
         # Watermarks were persisted so subsequent ticks see only newer ids.
-        state = gh.pinned_data(150)
-        self.assertGreaterEqual(state.get("pr_last_comment_id"), 920)
-        self.assertEqual(state.get("pr_last_review_comment_id"), 30)
-        self.assertEqual(state.get("pr_last_review_summary_id"), 4000)
+        state = gh.pinned_data(LEGACY_ISSUE)
+        self.assertGreaterEqual(state.get("pr_last_comment_id"), LATER_COMMENT_ID)
+        self.assertEqual(state.get("pr_last_review_comment_id"), INLINE_REVIEW_ID)
+        self.assertEqual(state.get("pr_last_review_summary_id"), REVIEW_SUMMARY_ID)
 
     def test_first_tick_pings_for_mergeable_pr(self) -> None:
         # All gates passing: the migration must not park or otherwise
@@ -123,54 +165,59 @@ class LegacyInReviewWatermarkSeedTest(
         pr.reviews = []
         pr.approved = True
 
-        with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
+        with patch.object(
+            config,
+            DEBOUNCE_SETTING,
+            REVIEW_DEBOUNCE_SECONDS,
+        ):
             self._run_in_review(
-                gh, issue,
+                gh,
+                issue,
                 run_agent=_agent(),
             )
 
         # No merge (humans drive the merge); HITL ping fires for the
         # mergeable PR.
         self.assertEqual(gh.merge_calls, [])
-        self.assertNotIn((150, "done"), gh.label_history)
-        ping_comments = [
-            body for _, body in gh.posted_comments
-            if "ready for review/merge" in body
-        ]
+        self.assertNotIn((LEGACY_ISSUE, "done"), gh.label_history)
+        ping_comments = [body for _, body in gh.posted_comments if "ready for review/merge" in body]
         self.assertEqual(len(ping_comments), 1)
         self.assertEqual(
-            gh.pinned_data(150).get("ready_ping_sha"), "cafe1234",
+            gh.pinned_data(LEGACY_ISSUE).get("ready_ping_sha"),
+            REVIEWED_SHA,
         )
 
 
 class _EmptyWatermarkMigrationFixtureMixin(_PatchedWorkflowMixin):
-
-    PR_NUMBER = 900
-    BRANCH = "orchestrator/geserdugarov__agent-orchestrator/issue-400"
-
     def _legacy_setup(self):
         gh = FakeGitHubClient()
         # Make 'truly legacy': no watermarks at all on any surface, no
         # comments anywhere. This is the shape the reviewer flagged --
         # snapshot-failed handoff or pre-feature in_review state with an
         # empty PR.
-        issue = make_issue(400, label="in_review")
+        issue = make_issue(EMPTY_WATERMARK_ISSUE, label="in_review")
         gh.add_issue(issue)
         pr = FakePR(
-            number=self.PR_NUMBER, head_branch=self.BRANCH,
-            head=FakePRRef(sha="cafe1234"),
-            mergeable=True, check_state="success",
+            number=EMPTY_WATERMARK_PR,
+            head_branch=_issue_branch(EMPTY_WATERMARK_ISSUE),
+            head=FakePRRef(sha=REVIEWED_SHA),
+            mergeable=True,
+            check_state="success",
         )
         gh.add_pr(pr)
         gh.seed_state(
-            400, pr_number=self.PR_NUMBER, branch=self.BRANCH,
-            dev_agent="claude", dev_session_id="dev-sess",
+            EMPTY_WATERMARK_ISSUE,
+            pr_number=EMPTY_WATERMARK_PR,
+            branch=_issue_branch(EMPTY_WATERMARK_ISSUE),
+            dev_agent=BACKEND_CLAUDE,
+            dev_session_id=DEV_SESSION,
         )
         return gh, issue, pr
 
 
 class LegacyMigrationPersistsEmptyWatermarksTest(
-    unittest.TestCase, _EmptyWatermarkMigrationFixtureMixin,
+    unittest.TestCase,
+    _EmptyWatermarkMigrationFixtureMixin,
 ):
     """Persist zero watermarks so first feedback remains visible."""
 
@@ -180,10 +227,11 @@ class LegacyMigrationPersistsEmptyWatermarksTest(
         # Tick 1: legacy migration runs, surfaces have nothing to seed past.
         # The migration must persist 0 on every namespace anyway.
         self._run_in_review(
-            gh, issue,
+            gh,
+            issue,
             run_agent=_agent(),
         )
-        state = gh.pinned_data(400)
+        state = gh.pinned_data(EMPTY_WATERMARK_ISSUE)
         self.assertEqual(state.get("pr_last_review_comment_id"), 0)
         self.assertEqual(state.get("pr_last_review_summary_id"), 0)
         self.assertEqual(state.get("pr_last_comment_id"), 0)
@@ -194,25 +242,33 @@ class LegacyMigrationPersistsEmptyWatermarksTest(
         long_ago = datetime.now(timezone.utc) - timedelta(hours=1)
         pr.review_comments.append(
             FakeComment(
-                id=42, body="line 7: rename foo to bar",
-                user=FakeUser("alice"), created_at=long_ago,
+                id=FIRST_INLINE_REVIEW_ID,
+                body="line 7: rename foo to bar",
+                user=FakeUser(HUMAN_LOGIN),
+                created_at=long_ago,
             ),
         )
 
-        with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
+        with patch.object(
+            config,
+            DEBOUNCE_SETTING,
+            REVIEW_DEBOUNCE_SECONDS,
+        ):
             mocks = self._run_in_review(
-                gh, issue,
+                gh,
+                issue,
                 run_agent=_agent(),
             )
 
         # The first inline review comment after migration is treated as
         # fresh feedback and routes the issue to `fixing` (no dev spawn
         # here; the fixing handler owns that step).
-        mocks["run_agent"].assert_not_called()
+        mocks[RUN_AGENT].assert_not_called()
         self.assertEqual(gh.merge_calls, [])
-        self.assertIn((400, "fixing"), gh.label_history)
+        self.assertIn((EMPTY_WATERMARK_ISSUE, "fixing"), gh.label_history)
         self.assertEqual(
-            gh.pinned_data(400).get("pending_fix_review_max_id"), 42,
+            gh.pinned_data(EMPTY_WATERMARK_ISSUE).get("pending_fix_review_max_id"),
+            FIRST_INLINE_REVIEW_ID,
         )
 
     def test_first_review_summary_surfaces(self) -> None:
@@ -222,40 +278,50 @@ class LegacyMigrationPersistsEmptyWatermarksTest(
         # the human would never reach the dev.
         gh, issue, pr = self._legacy_setup()
         gh.seed_state(
-            400, pr_number=self.PR_NUMBER, branch=self.BRANCH,
-            dev_agent="claude", dev_session_id="dev-sess",
+            EMPTY_WATERMARK_ISSUE,
+            pr_number=EMPTY_WATERMARK_PR,
+            branch=_issue_branch(EMPTY_WATERMARK_ISSUE),
+            dev_agent=BACKEND_CLAUDE,
+            dev_session_id=DEV_SESSION,
         )
 
         self._run_in_review(
-            gh, issue,
+            gh,
+            issue,
             run_agent=_agent(),
         )
-        state = gh.pinned_data(400)
+        state = gh.pinned_data(EMPTY_WATERMARK_ISSUE)
         self.assertEqual(state.get("pr_last_review_summary_id"), 0)
 
         long_ago = datetime.now(timezone.utc) - timedelta(hours=1)
         pr.reviews.append(
             FakePRReview(
-                id=5050, body="please tighten the spec",
+                id=FIRST_REVIEW_SUMMARY_ID,
+                body="please tighten the spec",
                 state="COMMENTED",
-                user=FakeUser("alice"),
+                user=FakeUser(HUMAN_LOGIN),
                 submitted_at=long_ago,
-                commit_id="cafe1234",
+                commit_id=REVIEWED_SHA,
             ),
         )
 
-        with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
+        with patch.object(
+            config,
+            DEBOUNCE_SETTING,
+            REVIEW_DEBOUNCE_SECONDS,
+        ):
             mocks = self._run_in_review(
-                gh, issue,
+                gh,
+                issue,
                 run_agent=_agent(),
             )
 
-        mocks["run_agent"].assert_not_called()
+        mocks[RUN_AGENT].assert_not_called()
         self.assertEqual(gh.merge_calls, [])
-        self.assertIn((400, "fixing"), gh.label_history)
+        self.assertIn((EMPTY_WATERMARK_ISSUE, "fixing"), gh.label_history)
         self.assertEqual(
-            gh.pinned_data(400).get("pending_fix_review_summary_max_id"),
-            5050,
+            gh.pinned_data(EMPTY_WATERMARK_ISSUE).get("pending_fix_review_summary_max_id"),
+            FIRST_REVIEW_SUMMARY_ID,
         )
 
 
@@ -268,9 +334,6 @@ class ZeroWatermarkSurvivesFallbackTest(unittest.TestCase, _PatchedWorkflowMixin
     fixing route would silently skip it.
     """
 
-    PR_NUMBER = 1100
-    BRANCH = "orchestrator/geserdugarov__agent-orchestrator/issue-600"
-
     def test_zero_does_not_use_last_action(self) -> None:
         gh = FakeGitHubClient()
         long_ago = datetime.now(timezone.utc) - timedelta(hours=1)
@@ -279,41 +342,58 @@ class ZeroWatermarkSurvivesFallbackTest(unittest.TestCase, _PatchedWorkflowMixin
         # state. last_action_comment_id was set to 920 by the prior park.
         # If the in_review handler falls back to that for the watermark,
         # comment 910 is below it and gets dropped.
-        issue = make_issue(600, label="in_review", comments=[
-            FakeComment(
-                id=910, body="please do not merge yet",
-                user=FakeUser("alice"), created_at=long_ago,
-            ),
-            FakeComment(
-                id=920, body=":robot: park message from a prior tick",
-                user=FakeUser("orchestrator"), created_at=long_ago,
-            ),
-        ])
+        issue = make_issue(
+            ZERO_WATERMARK_ISSUE,
+            label="in_review",
+            comments=[
+                FakeComment(
+                    id=EARLIER_COMMENT_ID,
+                    body="please do not merge yet",
+                    user=FakeUser(HUMAN_LOGIN),
+                    created_at=long_ago,
+                ),
+                FakeComment(
+                    id=LATER_COMMENT_ID,
+                    body=":robot: park message from a prior tick",
+                    user=FakeUser(BOT_LOGIN),
+                    created_at=long_ago,
+                ),
+            ],
+        )
         gh.add_issue(issue)
         pr = FakePR(
-            number=self.PR_NUMBER, head_branch=self.BRANCH,
-            head=FakePRRef(sha="cafe1234"),
-            mergeable=True, check_state="success",
+            number=ZERO_WATERMARK_PR,
+            head_branch=_issue_branch(ZERO_WATERMARK_ISSUE),
+            head=FakePRRef(sha=REVIEWED_SHA),
+            mergeable=True,
+            check_state="success",
         )
         gh.add_pr(pr)
         gh.seed_state(
-            600,
-            pr_number=self.PR_NUMBER, branch=self.BRANCH,
-            dev_agent="claude", dev_session_id="dev-sess",
+            ZERO_WATERMARK_ISSUE,
+            pr_number=ZERO_WATERMARK_PR,
+            branch=_issue_branch(ZERO_WATERMARK_ISSUE),
+            dev_agent=BACKEND_CLAUDE,
+            dev_session_id=DEV_SESSION,
             # Legacy default: 0 means "scan everything".
             pr_last_comment_id=0,
             pr_last_review_comment_id=0,
             pr_last_review_summary_id=0,
             # ALSO populated from the prior park; must NOT take precedence
             # over the legacy 0 watermark.
-            last_action_comment_id=920,
+            last_action_comment_id=LATER_COMMENT_ID,
             # Park the bot's own message id so the id-set filter drops it.
-            orchestrator_comment_ids=[920],
+            orchestrator_comment_ids=[LATER_COMMENT_ID],
         )
 
-        with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
+        with patch.object(
+            config,
+            DEBOUNCE_SETTING,
+            REVIEW_DEBOUNCE_SECONDS,
+        ):
             mocks = self._run_in_review(
-                gh, issue,
+                gh,
+                issue,
                 run_agent=_agent(),
             )
 
@@ -321,9 +401,12 @@ class ZeroWatermarkSurvivesFallbackTest(unittest.TestCase, _PatchedWorkflowMixin
         # feedback and routes the issue to `fixing` (the in_review handler
         # no longer drives the dev resume itself).
         self.assertEqual(gh.merge_calls, [])
-        self.assertNotIn((600, "done"), gh.label_history)
-        mocks["run_agent"].assert_not_called()
-        self.assertIn((600, "fixing"), gh.label_history)
+        self.assertNotIn((ZERO_WATERMARK_ISSUE, "done"), gh.label_history)
+        mocks[RUN_AGENT].assert_not_called()
+        self.assertIn((ZERO_WATERMARK_ISSUE, "fixing"), gh.label_history)
         self.assertEqual(
-            gh.pinned_data(600).get("pending_fix_issue_max_id"), 910,
+            gh.pinned_data(ZERO_WATERMARK_ISSUE).get(
+                "pending_fix_issue_max_id",
+            ),
+            EARLIER_COMMENT_ID,
         )

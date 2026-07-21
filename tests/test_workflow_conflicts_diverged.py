@@ -12,10 +12,10 @@ from tests.workflow_helpers import (
     _agent,
 )
 
+CONFLICT_ISSUE = 200
 
-class ResolvingConflictStaleDivergedTest(
-    unittest.TestCase, _ResolvingConflictMixin
-):
+
+class ResolvingConflictStaleDivergedTest(unittest.TestCase, _ResolvingConflictMixin):
     """Drive `_handle_resolving_conflict` through the conservative
     stale / diverged worktree parks: a worktree behind or diverged from
     `origin/<branch>` must refuse to force-push and park awaiting human.
@@ -31,7 +31,8 @@ class ResolvingConflictStaleDivergedTest(
 
         with patch.object(workflow, "_rebase_base_into_worktree", merge_mock):
             mocks = self._run_resolving_conflict(
-                gh, issue,
+                gh,
+                issue,
                 run_agent=_agent(),
                 push_branch=True,
                 branch_ahead_behind=(0, 2),
@@ -39,9 +40,9 @@ class ResolvingConflictStaleDivergedTest(
         merge_mock.assert_not_called()
         mocks["_push_branch"].assert_not_called()
         mocks["run_agent"].assert_not_called()
-        state = gh.pinned_data(200)
+        state = gh.pinned_data(CONFLICT_ISSUE)
         self.assertTrue(state.get("awaiting_human"))
-        self.assertNotIn((200, "validating"), gh.label_history)
+        self.assertNotIn((CONFLICT_ISSUE, "validating"), gh.label_history)
         last_comment = gh.posted_comments[-1][1]
         self.assertIn("stale or diverged", last_comment)
 
@@ -54,16 +55,17 @@ class ResolvingConflictStaleDivergedTest(
 
         with patch.object(workflow, "_rebase_base_into_worktree", merge_mock):
             mocks = self._run_resolving_conflict(
-                gh, issue,
+                gh,
+                issue,
                 run_agent=_agent(),
                 push_branch=True,
                 branch_ahead_behind=(1, 1),
             )
         merge_mock.assert_not_called()
         mocks["_push_branch"].assert_not_called()
-        state = gh.pinned_data(200)
+        state = gh.pinned_data(CONFLICT_ISSUE)
         self.assertTrue(state.get("awaiting_human"))
-        self.assertNotIn((200, "validating"), gh.label_history)
+        self.assertNotIn((CONFLICT_ISSUE, "validating"), gh.label_history)
 
 
 if __name__ == "__main__":

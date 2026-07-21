@@ -44,7 +44,7 @@ Do not mark a stage complete until its completion gate is satisfied.
 | 3 | Remaining production complexity | 5/6 | [ ] |
 | 4 | Remaining production style and structure | 5/5 | [x] |
 | 5 | Test structure and complexity | 7/7 | [x] |
-| 6 | Test literals and naming | 5/7 | [ ] |
+| 6 | Test literals and naming | 6/7 | [ ] |
 | 7 | Long-tail cleanup and final verification | 0/5 | [ ] |
 
 ## Finding-count progress
@@ -397,7 +397,7 @@ Apply these rules consistently:
 
 ### Package 6.6 — Validating, in-review, and conflict test literals
 
-- [ ] Resolve the same rule groups in validating, in-review, and conflict tests.
+- [x] Resolve the same rule groups in validating, in-review, and conflict tests.
 
 ### Package 6.7 — Shared and remaining test literals
 
@@ -1225,6 +1225,26 @@ Add one row for every implementation session, including partial sessions.
 | 2026-07-21 | 6.3 | Complete | WPS 363->117; target 279->33; 167f; 2204p/3s | None | Start 6.4 |
 | 2026-07-21 | 6.4 | Complete | WPS 697->141; target 555->0; 225f; 2204p/3s | None | Start 6.5 |
 | 2026-07-21 | 6.5 | Complete | WPS 560->130; target 430->0; 234f; 2204p/3s | None | Start 6.6 |
+| 2026-07-21 | 6.6 | Complete | WPS 1161->227; target 933->0; 282f; 2204p/3s | None | Start 6.7 |
+
+Package 6.6 is **complete**. The pass covered validating review, verify, squash, drift, handoff, watermark, paused,
+and terminal scenarios; in-review routing, feedback filtering, migration, drift, parks, checks, and watermarks;
+conflict execution, recovery, resume, publication, authenticated fetch, and worktree restoration; plus verdict
+parsing. Issue, PR, comment, and watermark ids; agent sessions; labels; pinned-state keys; git and authentication
+values; and protocol messages now use names tied to their test domain. True fixture constants moved to module scope,
+repeated issue-branch paths use the existing builder, and ambiguous local names were clarified without introducing
+shared abstractions across unrelated scenarios.
+
+The scoped `--select=WPS` count over the 35 modules fell from 1,161 to 227. The Package 6.6 rule set fell from 933
+to 0: `WPS110` (15), `WPS111` (30), `WPS114` (4), `WPS115` (66), `WPS226` (184), and `WPS432` (634) were
+cleared. The 220 reviewed structural findings assigned to Stage 5 remain unchanged: `WPS201` (2), `WPS202` (4),
+`WPS204` (67), `WPS210` (96), `WPS213` (33), `WPS235` (2), and `WPS441` (16). The seven remaining Stage 7
+findings are `WPS237` (2), `WPS336` (2), and `WPS342` (3); one `WPS342` finding disappeared when the fsmonitor
+fixture command became a single interpolated string, and no new rule family was introduced.
+
+All 282 focused tests pass, as does repository-wide Ruff. The complete tracked suite passes with 2,204 tests and 3
+live-Postgres skips; both committed-range and working-tree diff checks are clean. The redundancy audit confirms that
+the same 282 behaviors remain collected and the cleanup added no test abstraction or duplicated setup.
 
 Package 6.5 is **complete**. The pass covered fresh, retry, timeout, paused, drift, full-agent-spec, PR-reuse, and
 terminal implementing scenarios plus fixing execution, paused behavior, and routing. Issue and PR identities,

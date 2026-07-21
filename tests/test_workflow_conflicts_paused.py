@@ -9,6 +9,7 @@ handler returns before `_post_user_content_change_result` /
 `_post_conflict_resolution_result` push / relabel / pinned-state writes -- so the
 in-progress rebase / resolved commit stays on the branch and the park (if any)
 stays intact until the label is removed."""
+
 from __future__ import annotations
 
 import unittest
@@ -19,6 +20,10 @@ from orchestrator.github import PAUSED_LABEL
 from tests.fakes import FakeComment, FakeLabel, FakeUser, make_issue
 from tests.workflow_helpers import _ResolvingConflictMixin, _agent
 
+CONFLICT_ISSUE = 200
+HUMAN_REPLY_ID = 2000
+AWAITING_HUMAN = "awaiting_human"
+
 
 def _paused_view(number: int) -> object:
     view = make_issue(number, label="resolving_conflict")
@@ -27,13 +32,15 @@ def _paused_view(number: int) -> object:
 
 
 def _assert_no_park_comment(test_case, gh) -> None:
-    test_case.assertFalse(any(
-        "timed out" in body
-        or "rebase is still in progress" in body
-        or "agent needs your input" in body
-        or "git push failed" in body
-        for _, body in gh.posted_comments
-    ))
+    test_case.assertFalse(
+        any(
+            "timed out" in body
+            or "rebase is still in progress" in body
+            or "agent needs your input" in body
+            or "git push failed" in body
+            for _, body in gh.posted_comments
+        )
+    )
 
 
 class ResolvingConflictLivePauseTest(unittest.TestCase, _ResolvingConflictMixin):
@@ -52,9 +59,10 @@ class ResolvingConflictLivePauseTest(unittest.TestCase, _ResolvingConflictMixin)
         self._seed_with_baseline_hash(gh, issue)  # quiet drift, no baseline write
         before_writes = gh.write_state_calls
 
-        with patch.object(gh, "get_issue", MagicMock(return_value=_paused_view(200))):
+        with patch.object(gh, "get_issue", MagicMock(return_value=_paused_view(CONFLICT_ISSUE))):
             mocks, merge_mock, _ = self._run_with_merge(
-                gh, issue,
+                gh,
+                issue,
                 merge_succeeded=False,
                 conflicted_files=["a.py"],
                 head_shas=["beforehead", "merged"],
@@ -65,10 +73,10 @@ class ResolvingConflictLivePauseTest(unittest.TestCase, _ResolvingConflictMixin)
         merge_mock.assert_called_once()  # the rebase ran and conflicted
         mocks["_push_branch"].assert_not_called()
         self.assertEqual(gh.write_state_calls, before_writes)
-        self.assertNotIn((200, "validating"), gh.label_history)
-        data = gh.pinned_data(200)
-        self.assertFalse(data.get("awaiting_human"))
-        self.assertEqual(data.get("conflict_round"), 0)
+        self.assertNotIn((CONFLICT_ISSUE, "validating"), gh.label_history)
+        pinned_state = gh.pinned_data(CONFLICT_ISSUE)
+        self.assertFalse(pinned_state.get(AWAITING_HUMAN))
+        self.assertEqual(pinned_state.get("conflict_round"), 0)
         _assert_no_park_comment(self, gh)
 
     def test_resume_pause_keeps_park(self) -> None:
@@ -79,29 +87,38 @@ class ResolvingConflictLivePauseTest(unittest.TestCase, _ResolvingConflictMixin)
         # same reply once the label is removed.
         gh, issue, pr = self._seed(
             extra_state={
-                "awaiting_human": True,
+                AWAITING_HUMAN: True,
                 "conflict_round": 1,
                 "last_action_comment_id": 1000,
             },
         )
         issue.comments.append(
-            FakeComment(id=2000, body="try harder", user=FakeUser("alice"))
+            FakeComment(
+                id=HUMAN_REPLY_ID,
+                body="try harder",
+                user=FakeUser("alice"),
+            )
         )
         # Matching hash so the drift path stays quiet and the awaiting-human
         # branch owns the resume (mirrors the interrupted-resume test).
         self._seed_with_baseline_hash(
-            gh, issue,
-            awaiting_human=True, conflict_round=1, last_action_comment_id=1000,
+            gh,
+            issue,
+            awaiting_human=True,
+            conflict_round=1,
+            last_action_comment_id=1000,
         )
         before_writes = gh.write_state_calls
 
-        with patch.object(gh, "get_issue", MagicMock(return_value=_paused_view(200))):
+        with patch.object(gh, "get_issue", MagicMock(return_value=_paused_view(CONFLICT_ISSUE))):
             mocks, merge_mock, _ = self._run_with_merge(
-                gh, issue,
+                gh,
+                issue,
                 merge_succeeded=True,  # unused: the resume path does not rebase
                 head_shas=["beforehead", "merged"],
                 run_agent_result=_agent(
-                    session_id="dev-sess", last_message="resolved",
+                    session_id="dev-sess",
+                    last_message="resolved",
                 ),
             )
 
@@ -109,11 +126,11 @@ class ResolvingConflictLivePauseTest(unittest.TestCase, _ResolvingConflictMixin)
         merge_mock.assert_not_called()
         mocks["_push_branch"].assert_not_called()
         self.assertEqual(gh.write_state_calls, before_writes)
-        self.assertNotIn((200, "validating"), gh.label_history)
-        data = gh.pinned_data(200)
-        self.assertTrue(data.get("awaiting_human"))
-        self.assertEqual(data.get("last_action_comment_id"), 1000)
-        self.assertEqual(data.get("conflict_round"), 1)
+        self.assertNotIn((CONFLICT_ISSUE, "validating"), gh.label_history)
+        pinned_state = gh.pinned_data(CONFLICT_ISSUE)
+        self.assertTrue(pinned_state.get(AWAITING_HUMAN))
+        self.assertEqual(pinned_state.get("last_action_comment_id"), 1000)
+        self.assertEqual(pinned_state.get("conflict_round"), 1)
 
     def test_drift_pause_blocks_relabel(self) -> None:
         # A body edit drives the drift resume (seeded hash mismatch); the
@@ -126,13 +143,15 @@ class ResolvingConflictLivePauseTest(unittest.TestCase, _ResolvingConflictMixin)
         )
         before_writes = gh.write_state_calls
 
-        with patch.object(gh, "get_issue", MagicMock(return_value=_paused_view(200))):
+        with patch.object(gh, "get_issue", MagicMock(return_value=_paused_view(CONFLICT_ISSUE))):
             mocks, merge_mock, _ = self._run_with_merge(
-                gh, issue,
+                gh,
+                issue,
                 merge_succeeded=True,  # unused: drift returns before the rebase
                 head_shas=["beforehead", "merged"],
                 run_agent_result=_agent(
-                    session_id="dev-sess", last_message="addressed",
+                    session_id="dev-sess",
+                    last_message="addressed",
                 ),
             )
 
@@ -140,10 +159,10 @@ class ResolvingConflictLivePauseTest(unittest.TestCase, _ResolvingConflictMixin)
         merge_mock.assert_not_called()  # drift returns before the base rebase
         mocks["_push_branch"].assert_not_called()
         self.assertEqual(gh.write_state_calls, before_writes)
-        self.assertNotIn((200, "validating"), gh.label_history)
-        data = gh.pinned_data(200)
-        self.assertEqual(data.get("user_content_hash"), "stale-hash")
-        self.assertFalse(data.get("awaiting_human"))
+        self.assertNotIn((CONFLICT_ISSUE, "validating"), gh.label_history)
+        pinned_state = gh.pinned_data(CONFLICT_ISSUE)
+        self.assertEqual(pinned_state.get("user_content_hash"), "stale-hash")
+        self.assertFalse(pinned_state.get(AWAITING_HUMAN))
 
 
 if __name__ == "__main__":

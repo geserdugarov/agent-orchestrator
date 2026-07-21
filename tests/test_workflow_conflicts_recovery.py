@@ -12,10 +12,10 @@ from tests.workflow_helpers import (
     _agent,
 )
 
+CONFLICT_ISSUE = 200
 
-class ResolvingConflictRecoveryPushTest(
-    unittest.TestCase, _ResolvingConflictMixin
-):
+
+class ResolvingConflictRecoveryPushTest(unittest.TestCase, _ResolvingConflictMixin):
     """Drive `_handle_resolving_conflict` through the crash-recovery push
     branches: an unpushed local commit ships on the next tick, a failed
     recovery push parks, and a recovered push onto a stale base falls
@@ -41,10 +41,13 @@ class ResolvingConflictRecoveryPushTest(
             return_value=MagicMock(returncode=0, stdout="0\n", stderr=""),
         )
 
-        with patch.object(workflow, "_rebase_base_into_worktree", merge_mock), \
-             patch.object(workflow, "_git", git_on_base):
+        with (
+            patch.object(workflow, "_rebase_base_into_worktree", merge_mock),
+            patch.object(workflow, "_git", git_on_base),
+        ):
             mocks = self._run_resolving_conflict(
-                gh, issue,
+                gh,
+                issue,
                 run_agent=_agent(),
                 push_branch=True,
                 # HEAD ahead of `origin/<branch>` by one commit (the
@@ -62,12 +65,12 @@ class ResolvingConflictRecoveryPushTest(
         # stamped exactly as on the happy-path resolve. The recovered
         # push hands straight back to `validating`; the single docs
         # pass is deferred to the post-approval hop.
-        state = gh.pinned_data(200)
+        state = gh.pinned_data(CONFLICT_ISSUE)
         self.assertEqual(state.get("review_round"), 0)
         self.assertEqual(state.get("conflict_round"), 1)
         self.assertIn("last_conflict_resolved_at", state)
-        self.assertIn((200, "validating"), gh.label_history)
-        self.assertNotIn((200, "documenting"), gh.label_history)
+        self.assertIn((CONFLICT_ISSUE, "validating"), gh.label_history)
+        self.assertNotIn((CONFLICT_ISSUE, "documenting"), gh.label_history)
 
     def test_unpushed_recovery_push_failure_parks(self) -> None:
         # Recovery push fails (e.g. force-with-lease lease miss because
@@ -79,16 +82,17 @@ class ResolvingConflictRecoveryPushTest(
 
         with patch.object(workflow, "_rebase_base_into_worktree", merge_mock):
             mocks = self._run_resolving_conflict(
-                gh, issue,
+                gh,
+                issue,
                 run_agent=_agent(),
                 push_branch=False,
                 branch_ahead_behind=(1, 0),
             )
         mocks["_push_branch"].assert_called_once()
         merge_mock.assert_not_called()
-        state = gh.pinned_data(200)
+        state = gh.pinned_data(CONFLICT_ISSUE)
         self.assertTrue(state.get("awaiting_human"))
-        self.assertNotIn((200, "validating"), gh.label_history)
+        self.assertNotIn((CONFLICT_ISSUE, "validating"), gh.label_history)
 
     def test_stale_base_falls_through_to_rebase(self) -> None:
         # The `fixing` drift router
@@ -115,10 +119,13 @@ class ResolvingConflictRecoveryPushTest(
             return_value=MagicMock(returncode=0, stdout="2\n", stderr=""),
         )
 
-        with patch.object(workflow, "_rebase_base_into_worktree", merge_mock), \
-             patch.object(workflow, "_git", git_behind_base):
+        with (
+            patch.object(workflow, "_rebase_base_into_worktree", merge_mock),
+            patch.object(workflow, "_git", git_behind_base),
+        ):
             mocks = self._run_resolving_conflict(
-                gh, issue,
+                gh,
+                issue,
                 run_agent=_agent(),
                 push_branch=True,
                 # Recovered push first (force-with-lease=None on a
@@ -139,22 +146,22 @@ class ResolvingConflictRecoveryPushTest(
         mocks["run_agent"].assert_not_called()
         # Single conflict_round increment for the combined push+rebase
         # reconciliation, NOT one per push.
-        state = gh.pinned_data(200)
+        state = gh.pinned_data(CONFLICT_ISSUE)
         self.assertEqual(state.get("conflict_round"), 1)
         self.assertEqual(state.get("review_round"), 0)
         self.assertIn("last_conflict_resolved_at", state)
         # The combined round outcome is the rebase path's
         # `base_rebased_clean`, not the fast-path `recovered_push`.
         rounds = [
-            event for event in gh.recorded_events
-            if event.get("event") == "conflict_round"
-            and event.get("action") == "incremented"
+            event
+            for event in gh.recorded_events
+            if event.get("event") == "conflict_round" and event.get("action") == "incremented"
         ]
         self.assertEqual(len(rounds), 1)
         self.assertEqual(rounds[0].get("outcome"), "base_rebased_clean")
         # Hand back to validating after the rebase landed.
-        self.assertIn((200, "validating"), gh.label_history)
-        self.assertNotIn((200, "documenting"), gh.label_history)
+        self.assertIn((CONFLICT_ISSUE, "validating"), gh.label_history)
+        self.assertNotIn((CONFLICT_ISSUE, "documenting"), gh.label_history)
 
 
 if __name__ == "__main__":
