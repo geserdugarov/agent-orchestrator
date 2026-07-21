@@ -20,6 +20,27 @@ from unittest.mock import patch
 
 from orchestrator.scheduler import IssueScheduler
 
+PRIMARY_REPO = "owner/repo"
+OTHER_REPO = "owner/other"
+REPO_A = "owner/a"
+REPO_B = "owner/b"
+SCHEDULER_LOGGER = "orchestrator.scheduler"
+WORKER_FAILURE = "worker exploded"
+FORBIDDEN_WORKER_MESSAGE = "must not run"
+POLL_INTERVAL_SECONDS = 0.01
+EVENT_TIMEOUT_SECONDS = 2.0
+WORKER_TIMEOUT_SECONDS = 5.0
+SHUTDOWN_TIMEOUT_SECONDS = 10.0
+BRIEF_TIMEOUT_SECONDS = 0.05
+CAP_REJECTION_ISSUE_NUMBER = 99
+FIRST_FAMILY_ISSUE_NUMBER = 100
+SECOND_FAMILY_ISSUE_NUMBER = 101
+OTHER_FAMILY_ISSUE_NUMBER = 102
+FANOUT_ISSUE_NUMBER = 200
+COMPLETED_FAMILY_ISSUE_NUMBER = 50
+FOLLOW_UP_FAMILY_ISSUE_NUMBER = 51
+TRACKED_ISSUE_NUMBER = 42
+
 
 @contextlib.contextmanager
 def _release_on_exit(*events: threading.Event):
@@ -35,18 +56,18 @@ def _wait_until_inactive(
     repo_slug: str,
     issue_number: int,
     *,
-    timeout: float = 2.0,
+    timeout: float = EVENT_TIMEOUT_SECONDS,
 ) -> None:
     deadline = time.monotonic() + timeout
     while scheduler.is_active(repo_slug, issue_number) and time.monotonic() < deadline:
-        time.sleep(0.01)
+        time.sleep(POLL_INTERVAL_SECONDS)
 
 
 def _worker(start: threading.Event, release: threading.Event) -> None:
     """Standard worker body: signal that the thread has started, then
     block until the test releases it. Used by every concurrency test."""
     start.set()
-    release.wait(timeout=5.0)
+    release.wait(timeout=WORKER_TIMEOUT_SECONDS)
 
 
 def _finishing_worker(
@@ -58,7 +79,7 @@ def _finishing_worker(
     finished.set()
 
 
-def _failing_worker(message: str = "worker exploded") -> None:
+def _failing_worker(message: str = WORKER_FAILURE) -> None:
     raise RuntimeError(message)
 
 
@@ -81,7 +102,7 @@ def _submit_then_signal(
     worker,
     done: threading.Event,
 ) -> None:
-    scheduler.submit("owner/repo", 1, worker)
+    scheduler.submit(PRIMARY_REPO, 1, worker)
     done.set()
 
 
@@ -109,7 +130,7 @@ def _tracked_worker(
         if claimed:
             claimed_event.set()
         start.set()
-        release.wait(timeout=5.0)
+        release.wait(timeout=WORKER_TIMEOUT_SECONDS)
 
 
 class DuplicateActiveIssueSkipTest(unittest.TestCase):
@@ -120,26 +141,26 @@ class DuplicateActiveIssueSkipTest(unittest.TestCase):
         release = threading.Event()
         with _release_on_exit(release):
             self.assertTrue(
-                sched.submit("owner/repo", 1, lambda: _worker(start, release))
+                sched.submit(PRIMARY_REPO, 1, lambda: _worker(start, release))
             )
-            self.assertTrue(start.wait(timeout=2.0))
+            self.assertTrue(start.wait(timeout=EVENT_TIMEOUT_SECONDS))
 
             # Same (repo_slug, issue_number) is rejected even though both
             # global and per-repo caps still have spare slots.
             self.assertFalse(
-                sched.submit("owner/repo", 1, lambda: self.fail("must not run"))
+                sched.submit(PRIMARY_REPO, 1, lambda: self.fail(FORBIDDEN_WORKER_MESSAGE))
             )
             self.assertEqual(sched.active_count(), 1)
-            self.assertTrue(sched.is_active("owner/repo", 1))
+            self.assertTrue(sched.is_active(PRIMARY_REPO, 1))
 
             # Same issue NUMBER on a different repo slug is a different
             # key and IS accepted -- the in-flight set is keyed on the
             # pair, not the number alone.
             start_b = threading.Event()
             self.assertTrue(
-                sched.submit("owner/other", 1, lambda: _worker(start_b, release))
+                sched.submit(OTHER_REPO, 1, lambda: _worker(start_b, release))
             )
-            self.assertTrue(start_b.wait(timeout=2.0))
+            self.assertTrue(start_b.wait(timeout=EVENT_TIMEOUT_SECONDS))
             self.assertEqual(sched.active_count(), 2)
 
 
@@ -149,25 +170,25 @@ class CompletionClearingTest(unittest.TestCase):
         self.addCleanup(sched.shutdown)
         done = threading.Event()
 
-        self.assertTrue(sched.submit("owner/repo", 7, done.set))
-        self.assertTrue(done.wait(timeout=2.0))
+        self.assertTrue(sched.submit(PRIMARY_REPO, 7, done.set))
+        self.assertTrue(done.wait(timeout=EVENT_TIMEOUT_SECONDS))
 
         # Wait for the done-callback to clear the marker. The callback
         # runs on a background thread, so poll briefly to avoid a race
         # between worker exit and marker clear.
-        _wait_until_inactive(sched, "owner/repo", 7)
-        self.assertFalse(sched.is_active("owner/repo", 7))
+        _wait_until_inactive(sched, PRIMARY_REPO, 7)
+        self.assertFalse(sched.is_active(PRIMARY_REPO, 7))
         self.assertEqual(sched.active_count(), 0)
-        self.assertEqual(sched.active_count("owner/repo"), 0)
+        self.assertEqual(sched.active_count(PRIMARY_REPO), 0)
 
         # Now a fresh submit for the same key succeeds.
         start = threading.Event()
         release = threading.Event()
         with _release_on_exit(release):
             self.assertTrue(
-                sched.submit("owner/repo", 7, lambda: _worker(start, release))
+                sched.submit(PRIMARY_REPO, 7, lambda: _worker(start, release))
             )
-            self.assertTrue(start.wait(timeout=2.0))
+            self.assertTrue(start.wait(timeout=EVENT_TIMEOUT_SECONDS))
 
     def test_completion_logs_worker_failure_via_reap(self) -> None:
         sched = IssueScheduler(global_cap=2, per_repo_cap=2)
@@ -175,21 +196,21 @@ class CompletionClearingTest(unittest.TestCase):
         done = threading.Event()
 
         self.assertTrue(sched.submit(
-            "owner/repo",
+            PRIMARY_REPO,
             9,
-            partial(_signaling_failure, done, "worker exploded"),
+            partial(_signaling_failure, done, WORKER_FAILURE),
         ))
-        self.assertTrue(done.wait(timeout=2.0))
+        self.assertTrue(done.wait(timeout=EVENT_TIMEOUT_SECONDS))
         # The marker must clear regardless of the exception: a failed
         # worker still hands its slot back.
-        _wait_until_inactive(sched, "owner/repo", 9)
-        self.assertFalse(sched.is_active("owner/repo", 9))
+        _wait_until_inactive(sched, PRIMARY_REPO, 9)
+        self.assertFalse(sched.is_active(PRIMARY_REPO, 9))
 
-        with self.assertLogs("orchestrator.scheduler", level=logging.ERROR) as logs:
+        with self.assertLogs(SCHEDULER_LOGGER, level=logging.ERROR) as logs:
             count = sched.reap()
         self.assertGreaterEqual(count, 1)
         self.assertTrue(
-            any("worker exploded" in msg for msg in logs.output),
+            any(WORKER_FAILURE in msg for msg in logs.output),
             logs.output,
         )
 
@@ -203,27 +224,31 @@ class GlobalCapEnforcementTest(unittest.TestCase):
         with _release_on_exit(release):
             self.assertTrue(
                 sched.submit(
-                    "owner/a", 1, partial(_worker, starts[0], release)
+                    REPO_A, 1, partial(_worker, starts[0], release)
                 )
             )
             self.assertTrue(
                 sched.submit(
-                    "owner/b", 2, partial(_worker, starts[1], release)
+                    REPO_B, 2, partial(_worker, starts[1], release)
                 )
             )
             for start in starts:
-                self.assertTrue(start.wait(timeout=2.0))
+                self.assertTrue(start.wait(timeout=EVENT_TIMEOUT_SECONDS))
             self.assertEqual(sched.active_count(), 2)
 
             # Third submit on a fresh repo still exceeds the global cap.
             self.assertFalse(
-                sched.submit("owner/c", 3, lambda: self.fail("must not run"))
+                sched.submit("owner/c", 3, lambda: self.fail(FORBIDDEN_WORKER_MESSAGE))
             )
             # And on any of the existing repos (with a distinct issue
             # so the duplicate-key rule does not falsely account for
             # the skip).
             self.assertFalse(
-                sched.submit("owner/a", 99, lambda: self.fail("must not run"))
+                sched.submit(
+                    REPO_A,
+                    CAP_REJECTION_ISSUE_NUMBER,
+                    lambda: self.fail(FORBIDDEN_WORKER_MESSAGE),
+                )
             )
             self.assertEqual(sched.active_count(), 2)
 
@@ -237,35 +262,35 @@ class PerRepoCapEnforcementTest(unittest.TestCase):
         with _release_on_exit(release):
             self.assertTrue(
                 sched.submit(
-                    "owner/repo", 1, partial(_worker, starts[0], release)
+                    PRIMARY_REPO, 1, partial(_worker, starts[0], release)
                 )
             )
             self.assertTrue(
                 sched.submit(
-                    "owner/repo", 2, partial(_worker, starts[1], release)
+                    PRIMARY_REPO, 2, partial(_worker, starts[1], release)
                 )
             )
             for start in starts:
-                self.assertTrue(start.wait(timeout=2.0))
-            self.assertEqual(sched.active_count("owner/repo"), 2)
+                self.assertTrue(start.wait(timeout=EVENT_TIMEOUT_SECONDS))
+            self.assertEqual(sched.active_count(PRIMARY_REPO), 2)
 
             # A third issue on the same repo is rejected even though
             # the global cap (10) has plenty of room.
             self.assertFalse(
                 sched.submit(
-                    "owner/repo", 3, lambda: self.fail("must not run")
+                    PRIMARY_REPO, 3, lambda: self.fail(FORBIDDEN_WORKER_MESSAGE)
                 )
             )
             # A different repo IS still accepted under the global cap.
             start_b = threading.Event()
             self.assertTrue(
                 sched.submit(
-                    "owner/other", 4, lambda: _worker(start_b, release)
+                    OTHER_REPO, 4, lambda: _worker(start_b, release)
                 )
             )
-            self.assertTrue(start_b.wait(timeout=2.0))
-            self.assertEqual(sched.active_count("owner/repo"), 2)
-            self.assertEqual(sched.active_count("owner/other"), 1)
+            self.assertTrue(start_b.wait(timeout=EVENT_TIMEOUT_SECONDS))
+            self.assertEqual(sched.active_count(PRIMARY_REPO), 2)
+            self.assertEqual(sched.active_count(OTHER_REPO), 1)
 
     def test_per_repo_cap_override_takes_precedence(self) -> None:
         # The per-call override lets a RepoSpec with `parallel_limit=1`
@@ -277,16 +302,16 @@ class PerRepoCapEnforcementTest(unittest.TestCase):
         with _release_on_exit(release):
             self.assertTrue(
                 sched.submit(
-                    "owner/repo", 1,
+                    PRIMARY_REPO, 1,
                     lambda: _worker(start, release),
                     per_repo_cap=1,
                 )
             )
-            self.assertTrue(start.wait(timeout=2.0))
+            self.assertTrue(start.wait(timeout=EVENT_TIMEOUT_SECONDS))
             self.assertFalse(
                 sched.submit(
-                    "owner/repo", 2,
-                    lambda: self.fail("must not run"),
+                    PRIMARY_REPO, 2,
+                    lambda: self.fail(FORBIDDEN_WORKER_MESSAGE),
                     per_repo_cap=1,
                 )
             )
@@ -303,19 +328,19 @@ class FamilyGateTest(unittest.TestCase):
         with _release_on_exit(release):
             self.assertTrue(
                 sched.submit(
-                    "owner/repo", 100,
+                    PRIMARY_REPO, FIRST_FAMILY_ISSUE_NUMBER,
                     lambda: _worker(start, release),
                     family=True,
                 )
             )
-            self.assertTrue(start.wait(timeout=2.0))
+            self.assertTrue(start.wait(timeout=EVENT_TIMEOUT_SECONDS))
 
             # A second family-aware submit on the same repo is rejected
             # even though the per-repo cap (10) has room.
             self.assertFalse(
                 sched.submit(
-                    "owner/repo", 101,
-                    lambda: self.fail("must not run"),
+                    PRIMARY_REPO, SECOND_FAMILY_ISSUE_NUMBER,
+                    lambda: self.fail(FORBIDDEN_WORKER_MESSAGE),
                     family=True,
                 )
             )
@@ -324,24 +349,24 @@ class FamilyGateTest(unittest.TestCase):
             start_b = threading.Event()
             self.assertTrue(
                 sched.submit(
-                    "owner/repo", 200,
+                    PRIMARY_REPO, FANOUT_ISSUE_NUMBER,
                     lambda: _worker(start_b, release),
                     family=False,
                 )
             )
-            self.assertTrue(start_b.wait(timeout=2.0))
+            self.assertTrue(start_b.wait(timeout=EVENT_TIMEOUT_SECONDS))
 
             # A family-aware submit on a DIFFERENT repo IS accepted:
             # the gate is per-repo, not global.
             start_c = threading.Event()
             self.assertTrue(
                 sched.submit(
-                    "owner/other", 102,
+                    OTHER_REPO, OTHER_FAMILY_ISSUE_NUMBER,
                     lambda: _worker(start_c, release),
                     family=True,
                 )
             )
-            self.assertTrue(start_c.wait(timeout=2.0))
+            self.assertTrue(start_c.wait(timeout=EVENT_TIMEOUT_SECONDS))
 
     def test_family_slot_clears_on_completion(self) -> None:
         sched = IssueScheduler(global_cap=4, per_repo_cap=4)
@@ -349,14 +374,18 @@ class FamilyGateTest(unittest.TestCase):
         done = threading.Event()
         self.assertTrue(
             sched.submit(
-                "owner/repo", 50,
+                PRIMARY_REPO, COMPLETED_FAMILY_ISSUE_NUMBER,
                 lambda: done.set(),
                 family=True,
             )
         )
-        self.assertTrue(done.wait(timeout=2.0))
+        self.assertTrue(done.wait(timeout=EVENT_TIMEOUT_SECONDS))
 
-        _wait_until_inactive(sched, "owner/repo", 50)
+        _wait_until_inactive(
+            sched,
+            PRIMARY_REPO,
+            COMPLETED_FAMILY_ISSUE_NUMBER,
+        )
 
         # Family slot must be released on completion, so a follow-up
         # family-aware submit on the same repo succeeds.
@@ -365,12 +394,12 @@ class FamilyGateTest(unittest.TestCase):
         with _release_on_exit(release):
             self.assertTrue(
                 sched.submit(
-                    "owner/repo", 51,
+                    PRIMARY_REPO, FOLLOW_UP_FAMILY_ISSUE_NUMBER,
                     lambda: _worker(start, release),
                     family=True,
                 )
             )
-            self.assertTrue(start.wait(timeout=2.0))
+            self.assertTrue(start.wait(timeout=EVENT_TIMEOUT_SECONDS))
 
 
 class ShutdownDrainRaceTest(unittest.TestCase):
@@ -406,11 +435,11 @@ class ShutdownDrainRaceTest(unittest.TestCase):
             # in some Python versions, so subsequent calls pass straight
             # through to keep shutdown's bookkeeping working.
             if not register_gate.is_set():
-                register_gate.wait(timeout=5.0)
+                register_gate.wait(timeout=WORKER_TIMEOUT_SECONDS)
             return real_add(self_fut, fn)
 
         with patch.object(Future, "add_done_callback", gated_add):
-            with self.assertLogs("orchestrator.scheduler", level=logging.ERROR) as logs:
+            with self.assertLogs(SCHEDULER_LOGGER, level=logging.ERROR) as logs:
                 submit_done = threading.Event()
 
                 submitter = threading.Thread(target=partial(
@@ -447,13 +476,13 @@ class ShutdownDrainRaceTest(unittest.TestCase):
                 )
 
                 register_gate.set()
-                submitter.join(timeout=5.0)
-                shutter.join(timeout=5.0)
+                submitter.join(timeout=WORKER_TIMEOUT_SECONDS)
+                shutter.join(timeout=WORKER_TIMEOUT_SECONDS)
                 self.assertFalse(submitter.is_alive())
                 self.assertFalse(shutter.is_alive())
 
             self.assertTrue(
-                any("worker exploded" in msg for msg in logs.output),
+                any(WORKER_FAILURE in msg for msg in logs.output),
                 logs.output,
             )
             self.assertEqual(sched.active_count(), 0)
@@ -470,19 +499,27 @@ class ShutdownDrainRaceTest(unittest.TestCase):
             # accepts zero submits would render the assertLogs guard
             # vacuously satisfied and hide a real regression.
             head_start = 20
-            with self.assertLogs("orchestrator.scheduler", level=logging.ERROR) as logs:
-                for i in range(head_start):
-                    if sched.submit(f"owner/repo-{trial}", i, _failing_worker):
+            with self.assertLogs(SCHEDULER_LOGGER, level=logging.ERROR) as logs:
+                for issue_number in range(head_start):
+                    if sched.submit(
+                        f"owner/repo-{trial}",
+                        issue_number,
+                        _failing_worker,
+                    ):
                         accepted += 1
                 shutdown_thread = threading.Thread(target=sched.shutdown)
                 shutdown_thread.start()
-                for i in range(head_start, head_start + 60):
-                    if sched.submit(f"owner/repo-{trial}", i, _failing_worker):
+                for issue_number in range(head_start, head_start + 60):
+                    if sched.submit(
+                        f"owner/repo-{trial}",
+                        issue_number,
+                        _failing_worker,
+                    ):
                         accepted += 1
-                shutdown_thread.join(timeout=10.0)
+                shutdown_thread.join(timeout=SHUTDOWN_TIMEOUT_SECONDS)
                 self.assertFalse(shutdown_thread.is_alive())
 
-            logged = sum(1 for msg in logs.output if "worker exploded" in msg)
+            logged = sum(1 for msg in logs.output if WORKER_FAILURE in msg)
             self.assertGreater(
                 accepted, 0,
                 f"trial {trial}: no submits were accepted before shutdown ran",
@@ -511,11 +548,11 @@ class ShutdownRepeatableWaitTest(unittest.TestCase):
 
         with _release_on_exit(release):
             self.assertTrue(sched.submit(
-                "owner/repo",
+                PRIMARY_REPO,
                 1,
                 partial(_finishing_worker, start, release, finished),
             ))
-            self.assertTrue(start.wait(timeout=2.0))
+            self.assertTrue(start.wait(timeout=EVENT_TIMEOUT_SECONDS))
 
             # First call returns immediately, leaving the worker running.
             sched.shutdown(wait=False)
@@ -524,7 +561,7 @@ class ShutdownRepeatableWaitTest(unittest.TestCase):
             # Second call must actually wait. Release the worker from
             # another thread after a brief delay so the wait is real.
             releaser = threading.Thread(
-                target=partial(_release_after, 0.05, release),
+                target=partial(_release_after, BRIEF_TIMEOUT_SECONDS, release),
             )
             releaser.start()
 
@@ -535,7 +572,7 @@ class ShutdownRepeatableWaitTest(unittest.TestCase):
             # asleep for 50ms.
             self.assertTrue(finished.is_set())
             self.assertEqual(sched.active_count(), 0)
-            releaser.join(timeout=2.0)
+            releaser.join(timeout=EVENT_TIMEOUT_SECONDS)
 
     def test_wait_true_after_false_drains_completion(self) -> None:
         # A worker that finishes between the two shutdown calls must
@@ -546,7 +583,7 @@ class ShutdownRepeatableWaitTest(unittest.TestCase):
 
         with _release_on_exit(release):
             self.assertTrue(sched.submit(
-                "owner/repo",
+                PRIMARY_REPO,
                 7,
                 partial(
                     _gated_failure,
@@ -555,10 +592,10 @@ class ShutdownRepeatableWaitTest(unittest.TestCase):
                     "late worker exploded",
                 ),
             ))
-            self.assertTrue(start.wait(timeout=2.0))
+            self.assertTrue(start.wait(timeout=EVENT_TIMEOUT_SECONDS))
             sched.shutdown(wait=False)
 
-            with self.assertLogs("orchestrator.scheduler", level=logging.ERROR) as logs:
+            with self.assertLogs(SCHEDULER_LOGGER, level=logging.ERROR) as logs:
                 release.set()
                 # The wait=True call must block until the worker exits
                 # and then drain its failure via reap.
@@ -585,20 +622,20 @@ class SubmitSkipLoggingTest(unittest.TestCase):
         with _release_on_exit(release):
             self.assertTrue(
                 sched.submit(
-                    "owner/repo", 100,
+                    PRIMARY_REPO, FIRST_FAMILY_ISSUE_NUMBER,
                     lambda: _worker(start, release),
                     family=True,
                 )
             )
-            self.assertTrue(start.wait(timeout=2.0))
+            self.assertTrue(start.wait(timeout=EVENT_TIMEOUT_SECONDS))
 
             with self.assertLogs(
-                "orchestrator.scheduler", level=logging.INFO,
+                SCHEDULER_LOGGER, level=logging.INFO,
             ) as logs:
                 self.assertFalse(
                     sched.submit(
-                        "owner/repo", 101,
-                        lambda: self.fail("must not run"),
+                        PRIMARY_REPO, SECOND_FAMILY_ISSUE_NUMBER,
+                        lambda: self.fail(FORBIDDEN_WORKER_MESSAGE),
                         family=True,
                     )
                 )
@@ -619,20 +656,20 @@ class SubmitSkipLoggingTest(unittest.TestCase):
         with _release_on_exit(release):
             self.assertTrue(
                 sched.submit(
-                    "owner/repo", 1,
+                    PRIMARY_REPO, 1,
                     lambda: _worker(start, release),
                     per_repo_cap=1,
                 )
             )
-            self.assertTrue(start.wait(timeout=2.0))
+            self.assertTrue(start.wait(timeout=EVENT_TIMEOUT_SECONDS))
 
             with self.assertLogs(
-                "orchestrator.scheduler", level=logging.INFO,
+                SCHEDULER_LOGGER, level=logging.INFO,
             ) as logs:
                 self.assertFalse(
                     sched.submit(
-                        "owner/repo", 2,
-                        lambda: self.fail("must not run"),
+                        PRIMARY_REPO, 2,
+                        lambda: self.fail(FORBIDDEN_WORKER_MESSAGE),
                         per_repo_cap=1,
                     )
                 )
@@ -655,18 +692,18 @@ class SubmitSkipLoggingTest(unittest.TestCase):
         with _release_on_exit(release):
             self.assertTrue(
                 sched.submit(
-                    "owner/repo", 1, lambda: _worker(start, release),
+                    PRIMARY_REPO, 1, lambda: _worker(start, release),
                 )
             )
-            self.assertTrue(start.wait(timeout=2.0))
+            self.assertTrue(start.wait(timeout=EVENT_TIMEOUT_SECONDS))
 
             with self.assertLogs(
-                "orchestrator.scheduler", level=logging.DEBUG,
+                SCHEDULER_LOGGER, level=logging.DEBUG,
             ) as logs:
                 self.assertFalse(
                     sched.submit(
-                        "owner/repo", 1,
-                        lambda: self.fail("must not run"),
+                        PRIMARY_REPO, 1,
+                        lambda: self.fail(FORBIDDEN_WORKER_MESSAGE),
                     )
                 )
             self.assertTrue(
@@ -691,11 +728,11 @@ class TrackActiveContextManagerTest(unittest.TestCase):
     def test_marks_key_active_for_the_duration(self) -> None:
         sched = IssueScheduler(global_cap=4, per_repo_cap=4)
         self.addCleanup(sched.shutdown)
-        self.assertFalse(sched.is_active("owner/repo", 7))
-        with sched.track_active("owner/repo", 7) as claimed:
+        self.assertFalse(sched.is_active(PRIMARY_REPO, 7))
+        with sched.track_active(PRIMARY_REPO, 7) as claimed:
             self.assertTrue(claimed)
-            self.assertTrue(sched.is_active("owner/repo", 7))
-        self.assertFalse(sched.is_active("owner/repo", 7))
+            self.assertTrue(sched.is_active(PRIMARY_REPO, 7))
+        self.assertFalse(sched.is_active(PRIMARY_REPO, 7))
 
     def test_does_not_bump_per_repo_counter(self) -> None:
         # The bucket's parent submit is what counts toward per_repo
@@ -703,10 +740,10 @@ class TrackActiveContextManagerTest(unittest.TestCase):
         # reporting (refresh-skip).
         sched = IssueScheduler(global_cap=4, per_repo_cap=4)
         self.addCleanup(sched.shutdown)
-        self.assertEqual(sched.active_count("owner/repo"), 0)
-        with sched.track_active("owner/repo", 7) as claimed:
+        self.assertEqual(sched.active_count(PRIMARY_REPO), 0)
+        with sched.track_active(PRIMARY_REPO, 7) as claimed:
             self.assertTrue(claimed)
-            self.assertEqual(sched.active_count("owner/repo"), 0)
+            self.assertEqual(sched.active_count(PRIMARY_REPO), 0)
 
     def test_does_not_count_toward_global_cap(self) -> None:
         # With `global_cap=2`, a single family bucket worker running and
@@ -741,8 +778,8 @@ class TrackActiveContextManagerTest(unittest.TestCase):
                     family=True,
                 )
             )
-            self.assertTrue(start_bucket.wait(timeout=2.0))
-            self.assertTrue(bucket_inner_claimed.wait(timeout=2.0))
+            self.assertTrue(start_bucket.wait(timeout=EVENT_TIMEOUT_SECONDS))
+            self.assertTrue(bucket_inner_claimed.wait(timeout=EVENT_TIMEOUT_SECONDS))
 
             # `_active` counts ONLY the executor worker (the bucket
             # submit's sentinel key), not the tracked inner issue.
@@ -754,11 +791,11 @@ class TrackActiveContextManagerTest(unittest.TestCase):
             release_b = threading.Event()
             self.assertTrue(
                 sched.submit(
-                    "owner/other", 5,
+                    OTHER_REPO, 5,
                     lambda: _worker(start_b, release_b),
                 )
             )
-            self.assertTrue(start_b.wait(timeout=2.0))
+            self.assertTrue(start_b.wait(timeout=EVENT_TIMEOUT_SECONDS))
             release_b.set()
 
     def test_duplicate_claim_keeps_existing_marker(
@@ -774,20 +811,20 @@ class TrackActiveContextManagerTest(unittest.TestCase):
         with _release_on_exit(release):
             self.assertTrue(
                 sched.submit(
-                    "owner/repo", 7, lambda: _worker(start, release),
+                    PRIMARY_REPO, 7, lambda: _worker(start, release),
                 )
             )
-            self.assertTrue(start.wait(timeout=2.0))
+            self.assertTrue(start.wait(timeout=EVENT_TIMEOUT_SECONDS))
 
-            with sched.track_active("owner/repo", 7) as claimed:
+            with sched.track_active(PRIMARY_REPO, 7) as claimed:
                 self.assertFalse(
                     claimed,
                     "track_active must report False when the key is "
                     "already in flight elsewhere",
                 )
-                self.assertTrue(sched.is_active("owner/repo", 7))
+                self.assertTrue(sched.is_active(PRIMARY_REPO, 7))
             # The original owner's marker survives the inner exit.
-            self.assertTrue(sched.is_active("owner/repo", 7))
+            self.assertTrue(sched.is_active(PRIMARY_REPO, 7))
 
     def test_submit_rejects_fanout_for_tracked_issue(self) -> None:
         # A fanout submit for an issue currently held by track_active
@@ -803,26 +840,26 @@ class TrackActiveContextManagerTest(unittest.TestCase):
         with _release_on_exit(release):
             self.assertTrue(
                 sched.submit(
-                    "owner/repo",
+                    PRIMARY_REPO,
                     0,
                     partial(
                         _tracked_worker,
                         sched,
-                        "owner/repo",
-                        42,
+                        PRIMARY_REPO,
+                        TRACKED_ISSUE_NUMBER,
                         (start, release, inner_claimed),
                     ),
                     family=True,
                 )
             )
-            self.assertTrue(start.wait(timeout=2.0))
-            self.assertTrue(inner_claimed.wait(timeout=2.0))
+            self.assertTrue(start.wait(timeout=EVENT_TIMEOUT_SECONDS))
+            self.assertTrue(inner_claimed.wait(timeout=EVENT_TIMEOUT_SECONDS))
 
             # A fanout submit for the tracked issue must be rejected.
             self.assertFalse(
                 sched.submit(
-                    "owner/repo", 42,
-                    lambda: self.fail("must not run"),
+                    PRIMARY_REPO, TRACKED_ISSUE_NUMBER,
+                    lambda: self.fail(FORBIDDEN_WORKER_MESSAGE),
                 )
             )
 
@@ -844,17 +881,17 @@ class CapExemptSubmitTest(unittest.TestCase):
         with _release_on_exit(release):
             self.assertTrue(
                 sched.submit(
-                    "owner/a", 1, lambda: _worker(start_a, release),
+                    REPO_A, 1, lambda: _worker(start_a, release),
                 )
             )
-            self.assertTrue(start_a.wait(timeout=2.0))
+            self.assertTrue(start_a.wait(timeout=EVENT_TIMEOUT_SECONDS))
             self.assertEqual(sched.active_count(), 1)
 
             # Normal submit on a different repo is rejected: global cap=1
             # and one slot is in use.
             self.assertFalse(
                 sched.submit(
-                    "owner/b", 2, lambda: self.fail("must not run"),
+                    REPO_B, 2, lambda: self.fail(FORBIDDEN_WORKER_MESSAGE),
                 )
             )
 
@@ -862,17 +899,17 @@ class CapExemptSubmitTest(unittest.TestCase):
             # even though the global cap is saturated.
             self.assertTrue(
                 sched.submit(
-                    "owner/b", 3,
+                    REPO_B, 3,
                     lambda: _worker(start_b, release),
                     cap_exempt=True,
                 )
             )
-            self.assertTrue(start_b.wait(timeout=2.0))
+            self.assertTrue(start_b.wait(timeout=EVENT_TIMEOUT_SECONDS))
             # The exempt submit must NOT have inflated the global
             # counter -- still one cap-counted worker in flight.
             self.assertEqual(sched.active_count(), 1)
             # And the exempt submit is visible via `is_active`.
-            self.assertTrue(sched.is_active("owner/b", 3))
+            self.assertTrue(sched.is_active(REPO_B, 3))
 
     def test_cap_exempt_submit_bypasses_per_repo_cap(self) -> None:
         sched = IssueScheduler(global_cap=10, per_repo_cap=1)
@@ -883,29 +920,29 @@ class CapExemptSubmitTest(unittest.TestCase):
         with _release_on_exit(release):
             self.assertTrue(
                 sched.submit(
-                    "owner/repo", 1, lambda: _worker(start_a, release),
+                    PRIMARY_REPO, 1, lambda: _worker(start_a, release),
                 )
             )
-            self.assertTrue(start_a.wait(timeout=2.0))
-            self.assertEqual(sched.active_count("owner/repo"), 1)
+            self.assertTrue(start_a.wait(timeout=EVENT_TIMEOUT_SECONDS))
+            self.assertEqual(sched.active_count(PRIMARY_REPO), 1)
 
             # Normal submit on the same repo is rejected by per_repo_cap.
             self.assertFalse(
                 sched.submit(
-                    "owner/repo", 2, lambda: self.fail("must not run"),
+                    PRIMARY_REPO, 2, lambda: self.fail(FORBIDDEN_WORKER_MESSAGE),
                 )
             )
 
             # Cap-exempt submit on the same repo IS accepted.
             self.assertTrue(
                 sched.submit(
-                    "owner/repo", 3,
+                    PRIMARY_REPO, 3,
                     lambda: _worker(start_b, release),
                     cap_exempt=True,
                 )
             )
-            self.assertTrue(start_b.wait(timeout=2.0))
-            self.assertEqual(sched.active_count("owner/repo"), 1)
+            self.assertTrue(start_b.wait(timeout=EVENT_TIMEOUT_SECONDS))
+            self.assertEqual(sched.active_count(PRIMARY_REPO), 1)
 
             # A second cap-exempt submit (different key) on the same
             # repo also bypasses the cap -- exemption is per submit,
@@ -913,13 +950,13 @@ class CapExemptSubmitTest(unittest.TestCase):
             start_c = threading.Event()
             self.assertTrue(
                 sched.submit(
-                    "owner/repo", 4,
+                    PRIMARY_REPO, 4,
                     lambda: _worker(start_c, release),
                     cap_exempt=True,
                 )
             )
-            self.assertTrue(start_c.wait(timeout=2.0))
-            self.assertEqual(sched.active_count("owner/repo"), 1)
+            self.assertTrue(start_c.wait(timeout=EVENT_TIMEOUT_SECONDS))
+            self.assertEqual(sched.active_count(PRIMARY_REPO), 1)
 
     def test_submit_honors_family_mutex(self) -> None:
         # The cap exemption only bypasses the cap counters; family-aware
@@ -932,19 +969,19 @@ class CapExemptSubmitTest(unittest.TestCase):
         with _release_on_exit(release):
             self.assertTrue(
                 sched.submit(
-                    "owner/repo", 100,
+                    PRIMARY_REPO, FIRST_FAMILY_ISSUE_NUMBER,
                     lambda: _worker(start, release),
                     family=True,
                 )
             )
-            self.assertTrue(start.wait(timeout=2.0))
+            self.assertTrue(start.wait(timeout=EVENT_TIMEOUT_SECONDS))
 
             # Cap-exempt family submit on the same repo is rejected by
             # the family mutex even though both caps are wide open.
             self.assertFalse(
                 sched.submit(
-                    "owner/repo", 101,
-                    lambda: self.fail("must not run"),
+                    PRIMARY_REPO, SECOND_FAMILY_ISSUE_NUMBER,
+                    lambda: self.fail(FORBIDDEN_WORKER_MESSAGE),
                     family=True,
                     cap_exempt=True,
                 )
@@ -961,27 +998,27 @@ class CapExemptSubmitTest(unittest.TestCase):
         with _release_on_exit(release):
             self.assertTrue(
                 sched.submit(
-                    "owner/repo", 7,
+                    PRIMARY_REPO, 7,
                     lambda: _worker(start, release),
                     cap_exempt=True,
                 )
             )
-            self.assertTrue(start.wait(timeout=2.0))
-            self.assertTrue(sched.is_active("owner/repo", 7))
+            self.assertTrue(start.wait(timeout=EVENT_TIMEOUT_SECONDS))
+            self.assertTrue(sched.is_active(PRIMARY_REPO, 7))
 
             # Duplicate key, cap-exempt: rejected.
             self.assertFalse(
                 sched.submit(
-                    "owner/repo", 7,
-                    lambda: self.fail("must not run"),
+                    PRIMARY_REPO, 7,
+                    lambda: self.fail(FORBIDDEN_WORKER_MESSAGE),
                     cap_exempt=True,
                 )
             )
             # Duplicate key, non-exempt: also rejected.
             self.assertFalse(
                 sched.submit(
-                    "owner/repo", 7,
-                    lambda: self.fail("must not run"),
+                    PRIMARY_REPO, 7,
+                    lambda: self.fail(FORBIDDEN_WORKER_MESSAGE),
                 )
             )
 
@@ -1004,13 +1041,13 @@ class CapExemptSubmitTest(unittest.TestCase):
         with _release_on_exit(release):
             self.assertTrue(
                 sched.submit(
-                    "owner/a", 0,
+                    REPO_A, 0,
                     lambda: _worker(start_a, release),
                     family=True,
                     cap_exempt=True,
                 )
             )
-            self.assertTrue(start_a.wait(timeout=2.0))
+            self.assertTrue(start_a.wait(timeout=EVENT_TIMEOUT_SECONDS))
 
             # A second no-agent family bucket on a DIFFERENT repo must
             # start immediately even though ``global_cap=1`` and the
@@ -1020,14 +1057,14 @@ class CapExemptSubmitTest(unittest.TestCase):
             # an executor pool that re-imposes the global cap.
             self.assertTrue(
                 sched.submit(
-                    "owner/b", 0,
+                    REPO_B, 0,
                     lambda: _worker(start_b, release),
                     family=True,
                     cap_exempt=True,
                 )
             )
             self.assertTrue(
-                start_b.wait(timeout=2.0),
+                start_b.wait(timeout=EVENT_TIMEOUT_SECONDS),
                 "second exempt family bucket queued behind the first -- "
                 "exempt executor is still capped by global_cap",
             )
@@ -1043,18 +1080,24 @@ class CapExemptSubmitTest(unittest.TestCase):
         done = threading.Event()
         self.assertTrue(
             sched.submit(
-                "owner/repo", 50,
+                PRIMARY_REPO, COMPLETED_FAMILY_ISSUE_NUMBER,
                 lambda: done.set(),
                 family=True,
                 cap_exempt=True,
             )
         )
-        self.assertTrue(done.wait(timeout=2.0))
+        self.assertTrue(done.wait(timeout=EVENT_TIMEOUT_SECONDS))
 
-        _wait_until_inactive(sched, "owner/repo", 50)
-        self.assertFalse(sched.is_active("owner/repo", 50))
+        _wait_until_inactive(
+            sched,
+            PRIMARY_REPO,
+            COMPLETED_FAMILY_ISSUE_NUMBER,
+        )
+        self.assertFalse(
+            sched.is_active(PRIMARY_REPO, COMPLETED_FAMILY_ISSUE_NUMBER)
+        )
         self.assertEqual(sched.active_count(), 0)
-        self.assertEqual(sched.active_count("owner/repo"), 0)
+        self.assertEqual(sched.active_count(PRIMARY_REPO), 0)
 
         # A non-exempt family submit on the same repo must now be
         # accepted -- the exempt completion released the family slot.
@@ -1063,12 +1106,12 @@ class CapExemptSubmitTest(unittest.TestCase):
         with _release_on_exit(release):
             self.assertTrue(
                 sched.submit(
-                    "owner/repo", 51,
+                    PRIMARY_REPO, FOLLOW_UP_FAMILY_ISSUE_NUMBER,
                     lambda: _worker(start, release),
                     family=True,
                 )
             )
-            self.assertTrue(start.wait(timeout=2.0))
+            self.assertTrue(start.wait(timeout=EVENT_TIMEOUT_SECONDS))
 
 
 if __name__ == "__main__":

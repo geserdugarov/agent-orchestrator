@@ -31,19 +31,25 @@ TARGET_ROOT = Path("/tmp/orchestrator-test-target-root")
 PROCESS_ISSUE = "_process_issue"
 REFRESH_BASE = "_refresh_base_and_worktrees"
 FANOUT_START_TIMEOUT_MESSAGE = "implementing fanout #1 did not start"
+POLL_INTERVAL_SECONDS = 0.01
+EVENT_TIMEOUT_SECONDS = 2.0
+WORKER_TIMEOUT_SECONDS = 5.0
+DEFERRED_ISSUE_NUMBERS = (10, 11, 12)
+FAMILY_ISSUE_NUMBER = 42
+RELABELLED_FANOUT_ISSUE_NUMBER = 50
 
 
 def _wait_for_first_started(
     starts: dict[int, threading.Event],
     *,
-    timeout: float = 2.0,
+    timeout: float = EVENT_TIMEOUT_SECONDS,
 ) -> int | None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         for issue_number, started in starts.items():
             if started.is_set():
                 return issue_number
-        time.sleep(0.01)
+        time.sleep(POLL_INTERVAL_SECONDS)
     return None
 
 
@@ -51,7 +57,11 @@ def _record_current_thread(thread_ids: list[int], _gh, _spec, _issue) -> None:
     thread_ids.append(threading.get_ident())
 
 
-def _wait_for_log(log_capture, *fragments: str, timeout: float = 2.0) -> bool:
+def _wait_for_log(
+    log_capture,
+    *fragments: str,
+    timeout: float = EVENT_TIMEOUT_SECONDS,
+) -> bool:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if any(
@@ -59,7 +69,7 @@ def _wait_for_log(log_capture, *fragments: str, timeout: float = 2.0) -> bool:
             for message in log_capture.output
         ):
             return True
-        time.sleep(0.01)
+        time.sleep(POLL_INTERVAL_SECONDS)
     return False
 
 
@@ -84,7 +94,7 @@ class _IssueProcessor:
         if self._blocking:
             release = self.releases.get(issue.number)
             if release is not None:
-                release.wait(timeout=5.0)
+                release.wait(timeout=WORKER_TIMEOUT_SECONDS)
 
     def release_all(self) -> None:
         for release in self.releases.values():
@@ -102,7 +112,7 @@ class _GatedWorker:
 
     def __call__(self) -> None:
         self.started.set()
-        self.release.wait(timeout=5.0)
+        self.release.wait(timeout=WORKER_TIMEOUT_SECONDS)
 
 
 class _SequentialIssueProcessor(_IssueProcessor):
@@ -127,7 +137,10 @@ class _SequentialIssueProcessor(_IssueProcessor):
 
 class _BarrierIssueProcessor:
     def __init__(self, parties: int):
-        self._barrier = threading.Barrier(parties, timeout=5.0)
+        self._barrier = threading.Barrier(
+            parties,
+            timeout=WORKER_TIMEOUT_SECONDS,
+        )
         self._processed: list[int] = []
         self._lock = threading.Lock()
 
@@ -217,11 +230,11 @@ class _SchedulerWorkflowTest(unittest.TestCase):
         self,
         scheduler: IssueScheduler,
         repo_slug: str = REPO_SLUG,
-        deadline_s: float = 5.0,
+        deadline_s: float = WORKER_TIMEOUT_SECONDS,
     ) -> None:
         deadline = time.monotonic() + deadline_s
         while scheduler.active_count(repo_slug) > 0 and time.monotonic() < deadline:
-            time.sleep(0.01)
+            time.sleep(POLL_INTERVAL_SECONDS)
         self.assertEqual(
             scheduler.active_count(repo_slug),
             0,
@@ -233,14 +246,14 @@ class _SchedulerWorkflowTest(unittest.TestCase):
         scheduler: IssueScheduler,
         issue_number: int,
         *,
-        timeout: float = 2.0,
+        timeout: float = EVENT_TIMEOUT_SECONDS,
     ) -> None:
         deadline = time.monotonic() + timeout
         while (
             scheduler.is_active(REPO_SLUG, issue_number)
             and time.monotonic() < deadline
         ):
-            time.sleep(0.01)
+            time.sleep(POLL_INTERVAL_SECONDS)
         self.assertFalse(scheduler.is_active(REPO_SLUG, issue_number))
 
 
@@ -279,7 +292,7 @@ class TickFanoutRoutingTest(_SchedulerWorkflowTest):
         ):
             workflow.tick(gh, self._spec(), scheduler=sched)
             self.assertTrue(
-                first_process.starts[7].wait(timeout=2.0),
+                first_process.starts[7].wait(timeout=EVENT_TIMEOUT_SECONDS),
                 "worker never entered _process_issue after first tick",
             )
             self.assertTrue(sched.is_active(REPO_SLUG, 7))
@@ -299,7 +312,7 @@ class TickFanoutRoutingTest(_SchedulerWorkflowTest):
         ):
             workflow.tick(gh, self._spec(), scheduler=sched)
             self.assertTrue(
-                second_process.starts[7].wait(timeout=2.0),
+                second_process.starts[7].wait(timeout=EVENT_TIMEOUT_SECONDS),
                 "worker never re-entered _process_issue after first completed",
             )
         self.assertEqual(
@@ -316,8 +329,8 @@ class TickFanoutRoutingTest(_SchedulerWorkflowTest):
         # that could keep them apart.
         sched = self._scheduler(global_cap=8, per_repo_cap=3)
         gh = FakeGitHubClient()
-        for n in (1, 2, 3):
-            gh.add_issue(make_issue(n, label=LABEL_IMPLEMENTING))
+        for issue_number in (1, 2, 3):
+            gh.add_issue(make_issue(issue_number, label=LABEL_IMPLEMENTING))
 
         process = _BarrierIssueProcessor(parties=3)
 
@@ -327,11 +340,11 @@ class TickFanoutRoutingTest(_SchedulerWorkflowTest):
             side_effect=process,
         ):
             workflow.tick(gh, self._spec(), scheduler=sched)
-            deadline = time.monotonic() + 5.0
+            deadline = time.monotonic() + WORKER_TIMEOUT_SECONDS
             while time.monotonic() < deadline:
                 if len(process.processed_snapshot()) == 3:
                     break
-                time.sleep(0.01)
+                time.sleep(POLL_INTERVAL_SECONDS)
         self._wait_idle(sched)
 
         self.assertEqual(sorted(process.processed_snapshot()), [1, 2, 3])
@@ -343,10 +356,10 @@ class TickFanoutRoutingTest(_SchedulerWorkflowTest):
         # tick admits the previously-skipped issue.
         sched = self._scheduler()
         gh = FakeGitHubClient()
-        for n in (10, 11, 12):
-            gh.add_issue(make_issue(n, label=LABEL_IMPLEMENTING))
+        for issue_number in DEFERRED_ISSUE_NUMBERS:
+            gh.add_issue(make_issue(issue_number, label=LABEL_IMPLEMENTING))
 
-        process = self._processor(10, 11, 12)
+        process = self._processor(*DEFERRED_ISSUE_NUMBERS)
         with patch.object(workflow, REFRESH_BASE), patch.object(
             workflow,
             PROCESS_ISSUE,
@@ -358,12 +371,14 @@ class TickFanoutRoutingTest(_SchedulerWorkflowTest):
             accepted = [
                 number
                 for number, started in process.starts.items()
-                if started.wait(timeout=2.0)
+                if started.wait(timeout=EVENT_TIMEOUT_SECONDS)
             ]
             self.assertEqual(len(accepted), 2, accepted)
             time.sleep(0.1)
             rejected_numbers = [
-                number for number in (10, 11, 12) if number not in accepted
+                number
+                for number in DEFERRED_ISSUE_NUMBERS
+                if number not in accepted
             ]
             self.assertEqual(len(rejected_numbers), 1)
             rejected_number = rejected_numbers[0]
@@ -382,7 +397,7 @@ class TickFanoutRoutingTest(_SchedulerWorkflowTest):
                 gh, self._spec(parallel_limit=2), scheduler=sched,
             )
             self.assertTrue(
-                process.starts[rejected_number].wait(timeout=2.0),
+                process.starts[rejected_number].wait(timeout=EVENT_TIMEOUT_SECONDS),
                 f"#{rejected_number} not admitted after a slot freed up",
             )
 
@@ -414,7 +429,7 @@ class FamilyBucketRoutingTest(_SchedulerWorkflowTest):
         ):
             workflow.tick(gh, self._spec(), scheduler=sched)
             self.assertTrue(
-                process.starts[1].wait(timeout=2.0),
+                process.starts[1].wait(timeout=EVENT_TIMEOUT_SECONDS),
                 "drain did not enter the first family-aware issue",
             )
             time.sleep(0.1)
@@ -436,7 +451,7 @@ class FamilyBucketRoutingTest(_SchedulerWorkflowTest):
 
             process.releases[1].set()
             self.assertTrue(
-                process.starts[2].wait(timeout=2.0),
+                process.starts[2].wait(timeout=EVENT_TIMEOUT_SECONDS),
                 "drain did not advance to second family issue "
                 "after first one was released",
             )
@@ -468,7 +483,7 @@ class FamilyBucketRoutingTest(_SchedulerWorkflowTest):
             side_effect=process,
         ):
             workflow.tick(gh, self._spec(), scheduler=sched)
-            self.assertTrue(process.starts[1].wait(timeout=2.0))
+            self.assertTrue(process.starts[1].wait(timeout=EVENT_TIMEOUT_SECONDS))
 
             with self.assertLogs(
                 "orchestrator.workflow", level=logging.INFO,
@@ -492,21 +507,25 @@ class FamilyBucketRoutingTest(_SchedulerWorkflowTest):
         # in-flight family issue's worktree and could race the agent.
         sched = self._scheduler()
         gh = FakeGitHubClient()
-        gh.add_issue(make_issue(42, label=LABEL_DECOMPOSING))
+        gh.add_issue(make_issue(FAMILY_ISSUE_NUMBER, label=LABEL_DECOMPOSING))
 
-        process = self._processor(42)
+        process = self._processor(FAMILY_ISSUE_NUMBER)
         with patch.object(workflow, REFRESH_BASE), patch.object(
             workflow,
             PROCESS_ISSUE,
             side_effect=process,
         ):
             workflow.tick(gh, self._spec(), scheduler=sched)
-            self.assertTrue(process.starts[42].wait(timeout=2.0))
-            self.assertTrue(sched.is_active(REPO_SLUG, 42))
+            self.assertTrue(
+                process.starts[FAMILY_ISSUE_NUMBER].wait(
+                    timeout=EVENT_TIMEOUT_SECONDS,
+                )
+            )
+            self.assertTrue(sched.is_active(REPO_SLUG, FAMILY_ISSUE_NUMBER))
         process.release_all()
         self._wait_idle(sched)
         # After completion, #42's per-iteration claim is released.
-        self.assertFalse(sched.is_active(REPO_SLUG, 42))
+        self.assertFalse(sched.is_active(REPO_SLUG, FAMILY_ISSUE_NUMBER))
 
     def test_family_drain_skips_active_issue(self) -> None:
         # Cross-tick race: tick N classifies #50 as fanout (e.g.
@@ -519,22 +538,30 @@ class FamilyBucketRoutingTest(_SchedulerWorkflowTest):
         # concurrently would race the worktree and pinned state.
         sched = self._scheduler()
         gh = FakeGitHubClient()
-        gh.add_issue(make_issue(50, label=LABEL_IMPLEMENTING))
+        gh.add_issue(make_issue(
+            RELABELLED_FANOUT_ISSUE_NUMBER,
+            label=LABEL_IMPLEMENTING,
+        ))
 
         # Simulate the fanout worker holding (acme/widget, 50) via a
         # direct scheduler.submit that parks until released.
         fanout = _GatedWorker()
         self.addCleanup(fanout.release.set)
-        process = self._processor(50, blocking=False)
+        process = self._processor(
+            RELABELLED_FANOUT_ISSUE_NUMBER,
+            blocking=False,
+        )
 
         self.assertTrue(
-            sched.submit(REPO_SLUG, 50, fanout),
+            sched.submit(REPO_SLUG, RELABELLED_FANOUT_ISSUE_NUMBER, fanout),
         )
-        self.assertTrue(fanout.started.wait(timeout=2.0))
+        self.assertTrue(fanout.started.wait(timeout=EVENT_TIMEOUT_SECONDS))
 
         # Relabel #50 to a family-aware state so the next tick
         # folds it into the family bucket.
-        gh._issues[50].labels = [FakeLabel(LABEL_BLOCKED)]
+        gh._issues[RELABELLED_FANOUT_ISSUE_NUMBER].labels = [
+            FakeLabel(LABEL_BLOCKED),
+        ]
 
         with (
             self.assertLogs(
@@ -548,7 +575,10 @@ class FamilyBucketRoutingTest(_SchedulerWorkflowTest):
                 _wait_for_log(logs, "already in flight", "#50"),
                 logs.output,
             )
-        self.assertNotIn(50, process.processed_snapshot())
+        self.assertNotIn(
+            RELABELLED_FANOUT_ISSUE_NUMBER,
+            process.processed_snapshot(),
+        )
         fanout.release.set()
         self._wait_idle(sched)
 
@@ -583,7 +613,7 @@ class FamilyBucketRoutingTest(_SchedulerWorkflowTest):
 
             process.releases[started_first].set()
             self.assertTrue(
-                process.starts[second].wait(timeout=2.0),
+                process.starts[second].wait(timeout=EVENT_TIMEOUT_SECONDS),
                 "unlabeled-pickup issue did not run inside the "
                 "family bucket after the first family issue released",
             )
@@ -666,7 +696,7 @@ class TickExecutionIsolationTest(_SchedulerWorkflowTest):
         ), patch.object(workflow, PROCESS_ISSUE, side_effect=process):
             workflow.tick(gh, self._spec(), scheduler=sched)
             self.assertTrue(
-                process.starts[7].wait(timeout=2.0),
+                process.starts[7].wait(timeout=EVENT_TIMEOUT_SECONDS),
                 "worker never entered _process_issue",
             )
             self.assertTrue(sched.is_active(REPO_SLUG, 7))
@@ -747,11 +777,11 @@ class UmbrellaCapExemptionTest(_SchedulerWorkflowTest):
         ):
             workflow.tick(gh, self._spec(parallel_limit=1), scheduler=sched)
             self.assertTrue(
-                process.starts[1].wait(timeout=2.0),
+                process.starts[1].wait(timeout=EVENT_TIMEOUT_SECONDS),
                 FANOUT_START_TIMEOUT_MESSAGE,
             )
             self.assertTrue(
-                process.starts[2].wait(timeout=2.0),
+                process.starts[2].wait(timeout=EVENT_TIMEOUT_SECONDS),
                 "umbrella #2 was blocked by the per-repo cap -- the "
                 "exempt bucket must run alongside the fanout slot",
             )
@@ -775,7 +805,7 @@ class UmbrellaCapExemptionTest(_SchedulerWorkflowTest):
             side_effect=process,
         ):
             workflow.tick(gh, self._spec(), scheduler=sched)
-            self.assertTrue(process.starts[1].wait(timeout=2.0))
+            self.assertTrue(process.starts[1].wait(timeout=EVENT_TIMEOUT_SECONDS))
             self.assertEqual(sched.active_count(), 0)
             self.assertEqual(sched.active_count(REPO_SLUG), 0)
             self.assertTrue(sched.is_active(REPO_SLUG, 1))
@@ -801,7 +831,7 @@ class UmbrellaCapExemptionTest(_SchedulerWorkflowTest):
             side_effect=process,
         ):
             workflow.tick(gh, self._spec(parallel_limit=1), scheduler=sched)
-            self.assertTrue(process.starts[1].wait(timeout=2.0))
+            self.assertTrue(process.starts[1].wait(timeout=EVENT_TIMEOUT_SECONDS))
             time.sleep(0.1)
             self.assertFalse(
                 process.starts[3].is_set(),
@@ -834,11 +864,11 @@ class UmbrellaCapExemptionTest(_SchedulerWorkflowTest):
         ):
             workflow.tick(gh, self._spec(parallel_limit=1), scheduler=sched)
             self.assertTrue(
-                process.starts[1].wait(timeout=2.0),
+                process.starts[1].wait(timeout=EVENT_TIMEOUT_SECONDS),
                 FANOUT_START_TIMEOUT_MESSAGE,
             )
             self.assertTrue(
-                process.starts[2].wait(timeout=2.0),
+                process.starts[2].wait(timeout=EVENT_TIMEOUT_SECONDS),
                 "blocked #2 was starved by the per-repo cap -- the "
                 "no-agent family bucket must run cap-exempt alongside "
                 "the fanout slot",
@@ -862,7 +892,7 @@ class UmbrellaCapExemptionTest(_SchedulerWorkflowTest):
             side_effect=process,
         ):
             workflow.tick(gh, self._spec(), scheduler=sched)
-            self.assertTrue(process.starts[1].wait(timeout=2.0))
+            self.assertTrue(process.starts[1].wait(timeout=EVENT_TIMEOUT_SECONDS))
             self.assertEqual(sched.active_count(), 0)
             self.assertEqual(sched.active_count(REPO_SLUG), 0)
             self.assertTrue(sched.is_active(REPO_SLUG, 1))
@@ -936,7 +966,7 @@ class _BacklogDispatchFixture(_SchedulerWorkflowTest):
         ):
             workflow.tick(gh, self._spec(parallel_limit=1), scheduler=sched)
             self.assertTrue(
-                process.starts[1].wait(timeout=2.0),
+                process.starts[1].wait(timeout=EVENT_TIMEOUT_SECONDS),
                 f"implementing #1 was starved -- the {parked_label} issue "
                 "must not occupy the only per-repo slot",
             )
@@ -977,11 +1007,11 @@ class BacklogDispatchFilterTest(_BacklogDispatchFixture):
         ):
             workflow.tick(gh, self._spec(parallel_limit=1), scheduler=sched)
             self.assertTrue(
-                process.starts[1].wait(timeout=2.0),
+                process.starts[1].wait(timeout=EVENT_TIMEOUT_SECONDS),
                 FANOUT_START_TIMEOUT_MESSAGE,
             )
             self.assertTrue(
-                process.starts[2].wait(timeout=2.0),
+                process.starts[2].wait(timeout=EVENT_TIMEOUT_SECONDS),
                 "blocked #2 did not start -- the bucket must stay "
                 "cap-exempt once the backlog issue is filtered out",
             )
@@ -1024,11 +1054,11 @@ class ClosedFanoutCapExemptionTest(_SchedulerWorkflowTest):
         ):
             workflow.tick(gh, self._spec(parallel_limit=1), scheduler=sched)
             self.assertTrue(
-                process.starts[1].wait(timeout=2.0),
+                process.starts[1].wait(timeout=EVENT_TIMEOUT_SECONDS),
                 "open validating #1 did not start",
             )
             self.assertTrue(
-                process.starts[2].wait(timeout=2.0),
+                process.starts[2].wait(timeout=EVENT_TIMEOUT_SECONDS),
                 "closed in_review #2 was starved by the per-repo cap -- "
                 "a terminal finalization must run cap-exempt",
             )
@@ -1052,7 +1082,7 @@ class ClosedFanoutCapExemptionTest(_SchedulerWorkflowTest):
             side_effect=process,
         ):
             workflow.tick(gh, self._spec(parallel_limit=4), scheduler=sched)
-            self.assertTrue(process.starts[1].wait(timeout=2.0))
+            self.assertTrue(process.starts[1].wait(timeout=EVENT_TIMEOUT_SECONDS))
             self.assertEqual(sched.active_count(), 0)
             self.assertEqual(sched.active_count(REPO_SLUG), 0)
             self.assertTrue(sched.is_active(REPO_SLUG, 1))
@@ -1074,7 +1104,7 @@ class ClosedFanoutCapExemptionTest(_SchedulerWorkflowTest):
             side_effect=process,
         ):
             workflow.tick(gh, self._spec(parallel_limit=1), scheduler=sched)
-            self.assertTrue(process.starts[1].wait(timeout=2.0))
+            self.assertTrue(process.starts[1].wait(timeout=EVENT_TIMEOUT_SECONDS))
             self.assertFalse(
                 process.starts[2].wait(timeout=1.0),
                 "open in_review #2 should be cap-skipped, not exempt",

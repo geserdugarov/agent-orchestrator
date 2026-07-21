@@ -19,6 +19,12 @@ from tests.workflow_helpers import (
     _FAKE_WT, _TEST_SPEC, _temp_git_repo_with_local_config,
 )
 
+ISSUE_BRANCH = "orchestrator/issue-5"
+ISSUE_REF = f"refs/heads/{ISSUE_BRANCH}"
+TOKEN_RESOLVER_ATTR = "_resolve_github_token"
+GIT_FAILURE_EXIT_CODE = 128
+HTTP_PROXY_KEY = "http.proxy"
+
 
 def _git_result(
     *,
@@ -26,11 +32,11 @@ def _git_result(
     stdout: str = "",
     stderr: str = "",
 ) -> MagicMock:
-    result = MagicMock()
-    result.returncode = returncode
-    result.stdout = stdout
-    result.stderr = stderr
-    return result
+    git_result = MagicMock()
+    git_result.returncode = returncode
+    git_result.stdout = stdout
+    git_result.stderr = stderr
+    return git_result
 
 
 @contextlib.contextmanager
@@ -38,7 +44,7 @@ def _patched_push(run_results: list):
     run_mock = MagicMock(side_effect=run_results)
     with patch.object(
         workflow.config,
-        "_resolve_github_token",
+        TOKEN_RESOLVER_ATTR,
         return_value="ghp-test-secret",
     ), patch.object(workflow.subprocess, "run", run_mock):
         yield run_mock
@@ -66,23 +72,23 @@ class PushBranchTest(unittest.TestCase):
     def test_existing_remote_branch_uses_observed_sha(self) -> None:
         # rewrite check (clean), ls-remote (returns sha), push (ok)
         sha = "87b2bc94b03a1729ef8b8145836d0959f433600e"
-        ls_stdout = f"{sha}\trefs/heads/orchestrator/issue-5\n"
+        ls_stdout = f"{sha}\t{ISSUE_REF}\n"
         with _patched_push([
             _git_result(),
             _git_result(stdout=ls_stdout),
             _git_result(),
         ]) as run_mock:
             ok = workflow._push_branch(
-                _TEST_SPEC, _FAKE_WT, "orchestrator/issue-5"
+                _TEST_SPEC, _FAKE_WT, ISSUE_BRANCH
             )
             self.assertTrue(ok)
             push_cmd = run_mock.call_args_list[2].args[0]
             self.assertIn("push", push_cmd)
             self.assertIn(
-                f"--force-with-lease=refs/heads/orchestrator/issue-5:{sha}",
+                f"--force-with-lease={ISSUE_REF}:{sha}",
                 push_cmd,
             )
-            self.assertIn("HEAD:refs/heads/orchestrator/issue-5", push_cmd)
+            self.assertIn(f"HEAD:{ISSUE_REF}", push_cmd)
 
     def test_missing_remote_branch_uses_empty_lease(self) -> None:
         # First push ever for this branch -- ls-remote returns nothing, the
@@ -106,10 +112,10 @@ class PushBranchTest(unittest.TestCase):
     def test_ls_remote_failure_aborts_without_pushing(self) -> None:
         with _patched_push([
             _git_result(),
-            _git_result(returncode=128, stderr="network down"),
+            _git_result(returncode=GIT_FAILURE_EXIT_CODE, stderr="network down"),
         ]) as run_mock:
             ok = workflow._push_branch(
-                _TEST_SPEC, _FAKE_WT, "orchestrator/issue-5"
+                _TEST_SPEC, _FAKE_WT, ISSUE_BRANCH
             )
             self.assertFalse(ok)
             # Only rewrite-check + ls-remote ran; the push subprocess.run was not
@@ -117,14 +123,14 @@ class PushBranchTest(unittest.TestCase):
             self.assertEqual(run_mock.call_count, 2)
 
     def test_push_failure_returns_false(self) -> None:
-        ls_stdout = "abc123\trefs/heads/orchestrator/issue-5\n"
+        ls_stdout = f"abc123\t{ISSUE_REF}\n"
         with _patched_push([
             _git_result(),
             _git_result(stdout=ls_stdout),
-            _git_result(returncode=128, stderr="rejected"),
+            _git_result(returncode=GIT_FAILURE_EXIT_CODE, stderr="rejected"),
         ]):
             ok = workflow._push_branch(
-                _TEST_SPEC, _FAKE_WT, "orchestrator/issue-5"
+                _TEST_SPEC, _FAKE_WT, ISSUE_BRANCH
             )
         self.assertFalse(ok)
 
@@ -140,7 +146,7 @@ class PushBranchTest(unittest.TestCase):
         rewrite_hit.stderr = ""
         with _patched_push([rewrite_hit]) as run_mock:
             ok = workflow._push_branch(
-                _TEST_SPEC, _FAKE_WT, "orchestrator/issue-5"
+                _TEST_SPEC, _FAKE_WT, ISSUE_BRANCH
             )
             self.assertFalse(ok)
             self.assertEqual(run_mock.call_count, 1)
@@ -154,13 +160,13 @@ class PushBranchTest(unittest.TestCase):
             _git_result(),
             _git_result(
                 stdout="deadbeefcafef00ddeadbeefcafef00ddeadbeef"
-                "\trefs/heads/orchestrator/issue-5\n",
+                f"\t{ISSUE_REF}\n",
             ),
             _git_result(),
         ])
         resolver = _TokenResolver()
 
-        with patch.object(workflow.config, "_resolve_github_token", resolver), \
+        with patch.object(workflow.config, TOKEN_RESOLVER_ATTR, resolver), \
              patch.object(workflow.subprocess, "run", run_mock):
             self.assertTrue(workflow._push_branch(
                 config.RepoSpec(
@@ -169,7 +175,7 @@ class PushBranchTest(unittest.TestCase):
                     base_branch="main",
                 ),
                 _FAKE_WT,
-                "orchestrator/issue-5",
+                ISSUE_BRANCH,
             ))
         # Token was resolved exactly once, for the spec's slug.
         self.assertEqual(resolver.slugs, ["acme/widgets"])
@@ -194,10 +200,10 @@ class PushBranchTest(unittest.TestCase):
         # rather than the generic "GITHUB_TOKEN missing" the legacy code emitted.
         run_mock = MagicMock()
         with patch.object(
-            workflow.config, "_resolve_github_token", return_value=""
+            workflow.config, TOKEN_RESOLVER_ATTR, return_value=""
         ), patch.object(workflow.subprocess, "run", run_mock):
             ok = workflow._push_branch(
-                _TEST_SPEC, _FAKE_WT, "orchestrator/issue-5"
+                _TEST_SPEC, _FAKE_WT, ISSUE_BRANCH
             )
         self.assertFalse(ok)
         # Push aborted before any subprocess ran.
@@ -217,7 +223,7 @@ class TransportConfigHardeningTest(unittest.TestCase):
 
     def test_unsafe_config_flags_transport_keys(self) -> None:
         cases = {
-            "http.proxy": [("http.proxy", "http://evil.example:8080")],
+            HTTP_PROXY_KEY: [(HTTP_PROXY_KEY, "http://evil.example:8080")],
             "http.sslVerify=false": [("http.sslVerify", "false")],
             "url-scoped http.proxy": [
                 ("http.https://github.com/.proxy", "http://evil.example:8080"),
@@ -260,7 +266,7 @@ class TransportConfigHardeningTest(unittest.TestCase):
                 cwd=repo, check=True, capture_output=True,
             )
             self.assertIn(
-                "http.proxy",
+                HTTP_PROXY_KEY,
                 git_plumbing._unsafe_local_transport_config(repo),
             )
 
@@ -272,12 +278,12 @@ class TransportConfigHardeningTest(unittest.TestCase):
             [("extensions.worktreeConfig", "true")]
         ) as repo:
             subprocess.run(
-                ["git", "config", "--worktree", "http.proxy",
+                ["git", "config", "--worktree", HTTP_PROXY_KEY,
                  "http://evil.example:9090"],
                 cwd=repo, check=True, capture_output=True,
             )
             self.assertIn(
-                "http.proxy",
+                HTTP_PROXY_KEY,
                 git_plumbing._unsafe_local_transport_config(repo),
             )
 
@@ -285,14 +291,14 @@ class TransportConfigHardeningTest(unittest.TestCase):
         # End-to-end: a real worktree carrying `http.proxy` makes `_push_branch`
         # fail closed before the token-bearing ls-remote / push ever runs.
         with _temp_git_repo_with_local_config(
-            [("http.proxy", "http://evil.example:8080")]
+            [(HTTP_PROXY_KEY, "http://evil.example:8080")]
         ) as repo, patch.object(
-            workflow.config, "_resolve_github_token",
+            workflow.config, TOKEN_RESOLVER_ATTR,
             return_value="ghp-test-secret",
         ), self.assertLogs(git_plumbing.log, level="ERROR") as cm:
-            ok = workflow._push_branch(_TEST_SPEC, repo, "orchestrator/issue-5")
+            ok = workflow._push_branch(_TEST_SPEC, repo, ISSUE_BRANCH)
         self.assertFalse(ok)
         self.assertTrue(
-            any("http.proxy" in line for line in cm.output),
-            f"expected http.proxy in refusal log, got {cm.output!r}",
+            any(HTTP_PROXY_KEY in line for line in cm.output),
+            f"expected {HTTP_PROXY_KEY} in refusal log, got {cm.output!r}",
         )
