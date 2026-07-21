@@ -18,17 +18,28 @@ from tests.workflow_helpers import (
     _agent,
 )
 
+LABEL_READY = "ready"
+DEV_SESSION_ID = "dev-sess"
+FIRST_READY_ISSUE_NUMBER = 20
+SEEDED_PICKUP_ISSUE_NUMBER = 21
+COMMENT_WATERMARK_ISSUE_NUMBER = 22
+PRESERVED_WATERMARK_ISSUE_NUMBER = 23
+PICKUP_COMMENT_ID = 500
+HUMAN_COMMENT_ID = 2050
+PRESERVED_LAST_ACTION_COMMENT_ID = 9999
+
 
 class HandleReadyTest(unittest.TestCase, _PatchedWorkflowMixin):
     def test_routes_to_implementing_same_tick(self) -> None:
         gh = FakeGitHubClient()
-        issue = make_issue(20, label="ready")
+        issue = make_issue(FIRST_READY_ISSUE_NUMBER, label=LABEL_READY)
         gh.add_issue(issue)
 
         mocks = self._run(
             lambda: workflow._handle_ready(gh, _TEST_SPEC, issue),
             run_agent=_agent(
-                session_id="dev-sess", last_message="implemented"
+                session_id=DEV_SESSION_ID,
+                last_message="implemented",
             ),
             has_new_commits=[False, True],
             push_branch=True,
@@ -36,12 +47,15 @@ class HandleReadyTest(unittest.TestCase, _PatchedWorkflowMixin):
 
         # Label flips to implementing on the same tick; the dev agent ran
         # and a PR opened.
-        self.assertEqual(gh.label_history[0], (20, "implementing"))
+        self.assertEqual(
+            gh.label_history[0],
+            (FIRST_READY_ISSUE_NUMBER, "implementing"),
+        )
         mocks["run_agent"].assert_called_once()
         self.assertEqual(len(gh.opened_prs), 1)
         # pickup_comment_id seeded so the validating handoff can anchor
         # the in_review watermark seed on it.
-        state = gh.pinned_data(20)
+        state = gh.pinned_data(FIRST_READY_ISSUE_NUMBER)
         self.assertIn("pickup_comment_id", state)
         self.assertIn("created_at", state)
 
@@ -50,11 +64,11 @@ class HandleReadyTest(unittest.TestCase, _PatchedWorkflowMixin):
         # legacy pickup path), don't double-post the picking-this-up
         # comment.
         gh = FakeGitHubClient()
-        issue = make_issue(21, label="ready")
+        issue = make_issue(SEEDED_PICKUP_ISSUE_NUMBER, label=LABEL_READY)
         gh.add_issue(issue)
         gh.seed_state(
-            21,
-            pickup_comment_id=500,
+            SEEDED_PICKUP_ISSUE_NUMBER,
+            pickup_comment_id=PICKUP_COMMENT_ID,
             created_at="2026-05-03T00:00:00+00:00",
         )
 
@@ -62,7 +76,8 @@ class HandleReadyTest(unittest.TestCase, _PatchedWorkflowMixin):
         self._run(
             lambda: workflow._handle_ready(gh, _TEST_SPEC, issue),
             run_agent=_agent(
-                session_id="dev-sess", last_message="done"
+                session_id=DEV_SESSION_ID,
+                last_message="done",
             ),
             has_new_commits=[False, True],
             push_branch=True,
@@ -88,37 +103,39 @@ class HandleReadyTest(unittest.TestCase, _PatchedWorkflowMixin):
         # `_seed_watermark_past_self`'s `consumed_through` walk treats
         # those decomposing/blocked-era comments as already-fed-to-the-dev.
         gh = FakeGitHubClient()
-        issue = make_issue(22, label="ready")
+        issue = make_issue(COMMENT_WATERMARK_ISSUE_NUMBER, label=LABEL_READY)
         # Decomposing-era human comment -- id well above the original
         # pickup comment id.
         issue.comments.append(FakeComment(
-            id=2050, body="please use snake_case",
+            id=HUMAN_COMMENT_ID,
+            body="please use snake_case",
             user=FakeUser("alice"),
         ))
         gh.add_issue(issue)
         gh.seed_state(
-            22,
-            pickup_comment_id=500,
+            COMMENT_WATERMARK_ISSUE_NUMBER,
+            pickup_comment_id=PICKUP_COMMENT_ID,
             created_at="2026-05-03T00:00:00+00:00",
         )
 
         self._run(
             lambda: workflow._handle_ready(gh, _TEST_SPEC, issue),
             run_agent=_agent(
-                session_id="dev-sess", last_message="done"
+                session_id=DEV_SESSION_ID,
+                last_message="done",
             ),
             has_new_commits=[False, True],
             push_branch=True,
         )
 
-        state = gh.pinned_data(22)
+        state = gh.pinned_data(COMMENT_WATERMARK_ISSUE_NUMBER)
         last_action = state.get("last_action_comment_id")
         self.assertIsNotNone(
             last_action,
             "last_action_comment_id must be set so the in_review "
             "handoff treats decomposing-era comments as consumed",
         )
-        self.assertGreaterEqual(int(last_action), 2050)
+        self.assertGreaterEqual(int(last_action), HUMAN_COMMENT_ID)
 
     def test_keeps_existing_last_action(self) -> None:
         # If a prior decomposing park already advanced
@@ -128,23 +145,27 @@ class HandleReadyTest(unittest.TestCase, _PatchedWorkflowMixin):
         # comment from a fresh seed (low id) and the prior park id was
         # higher.
         gh = FakeGitHubClient()
-        issue = make_issue(23, label="ready")
+        issue = make_issue(PRESERVED_WATERMARK_ISSUE_NUMBER, label=LABEL_READY)
         gh.add_issue(issue)
         gh.seed_state(
-            23,
-            pickup_comment_id=500,
-            last_action_comment_id=9999,
+            PRESERVED_WATERMARK_ISSUE_NUMBER,
+            pickup_comment_id=PICKUP_COMMENT_ID,
+            last_action_comment_id=PRESERVED_LAST_ACTION_COMMENT_ID,
             created_at="2026-05-03T00:00:00+00:00",
         )
 
         self._run(
             lambda: workflow._handle_ready(gh, _TEST_SPEC, issue),
             run_agent=_agent(
-                session_id="dev-sess", last_message="done"
+                session_id=DEV_SESSION_ID,
+                last_message="done",
             ),
             has_new_commits=[False, True],
             push_branch=True,
         )
 
-        state = gh.pinned_data(23)
-        self.assertGreaterEqual(int(state["last_action_comment_id"]), 9999)
+        state = gh.pinned_data(PRESERVED_WATERMARK_ISSUE_NUMBER)
+        self.assertGreaterEqual(
+            int(state["last_action_comment_id"]),
+            PRESERVED_LAST_ACTION_COMMENT_ID,
+        )

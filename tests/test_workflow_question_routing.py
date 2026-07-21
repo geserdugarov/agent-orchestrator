@@ -15,6 +15,8 @@ from orchestrator import workflow
 from tests.fakes import FakeGitHubClient, make_issue
 from tests.workflow_helpers import LABEL_QUESTION, _TEST_SPEC
 
+QUESTION_ISSUE_NUMBER = 801
+
 
 class QuestionLabelRoutingTest(unittest.TestCase):
     """`question` is a first-class workflow label routed to its own stage
@@ -46,15 +48,15 @@ class QuestionLabelRoutingTest(unittest.TestCase):
 
     def test_dispatcher_routes_question_to_handler(self) -> None:
         gh = FakeGitHubClient()
-        issue = make_issue(801, label=LABEL_QUESTION)
+        issue = make_issue(QUESTION_ISSUE_NUMBER, label=LABEL_QUESTION)
         gh.add_issue(issue)
 
-        with patch.object(workflow, "_handle_question") as handler, \
+        with patch.object(workflow, "_handle_question") as question_handler, \
              patch.object(workflow, "_handle_pickup") as pickup, \
              patch.object(workflow, "_handle_implementing") as impl:
             workflow._process_issue(gh, _TEST_SPEC, issue)
 
-        handler.assert_called_once_with(gh, _TEST_SPEC, issue)
+        question_handler.assert_called_once_with(gh, _TEST_SPEC, issue)
         pickup.assert_not_called()
         impl.assert_not_called()
 

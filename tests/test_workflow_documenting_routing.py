@@ -14,6 +14,11 @@ from orchestrator import workflow
 from tests.fakes import FakeGitHubClient, make_issue
 from tests.workflow_helpers import _TEST_SPEC
 
+LABEL_DOCUMENTING = "documenting"
+ROUTING_ISSUE_NUMBER = 901
+MISSING_PR_ISSUE_NUMBER = 902
+PARKED_MISSING_PR_ISSUE_NUMBER = 903
+
 
 class DocumentingLabelRegistrationTest(unittest.TestCase):
     """`documenting` is registered as a workflow label so the dispatcher
@@ -28,7 +33,7 @@ class DocumentingLabelRegistrationTest(unittest.TestCase):
     def test_label_is_recognized(self) -> None:
         from orchestrator.github import WORKFLOW_LABELS
 
-        self.assertIn("documenting", WORKFLOW_LABELS)
+        self.assertIn(LABEL_DOCUMENTING, WORKFLOW_LABELS)
 
     def test_documenting_label_is_in_bootstrap_specs(self) -> None:
         # Label bootstrap iterates WORKFLOW_LABEL_SPECS; if the spec entry
@@ -37,7 +42,7 @@ class DocumentingLabelRegistrationTest(unittest.TestCase):
         from orchestrator.github import WORKFLOW_LABEL_SPECS
 
         names = [name for name, _, _ in WORKFLOW_LABEL_SPECS]
-        self.assertIn("documenting", names)
+        self.assertIn(LABEL_DOCUMENTING, names)
 
     def test_label_between_validating_and_in_review(
         self,
@@ -53,7 +58,7 @@ class DocumentingLabelRegistrationTest(unittest.TestCase):
         names = [name for name, _, _ in WORKFLOW_LABEL_SPECS]
         impl_idx = names.index("implementing")
         val_idx = names.index("validating")
-        doc_idx = names.index("documenting")
+        doc_idx = names.index(LABEL_DOCUMENTING)
         in_review_idx = names.index("in_review")
         self.assertEqual(val_idx, impl_idx + 1)
         self.assertEqual(doc_idx, val_idx + 1)
@@ -64,7 +69,7 @@ class DocumentingLabelRegistrationTest(unittest.TestCase):
         # worktree, so the label must stay out of `_FAMILY_AWARE_LABELS`
         # -- otherwise the parallel tick path would route it through the
         # single-threaded family bucket and defeat fan-out concurrency.
-        self.assertNotIn("documenting", workflow._FAMILY_AWARE_LABELS)
+        self.assertNotIn(LABEL_DOCUMENTING, workflow._FAMILY_AWARE_LABELS)
 
     def test_label_is_in_pr_refresh_detours(self) -> None:
         # Behind-base PR-having worktrees need to be routed through
@@ -79,26 +84,26 @@ class DocumentingLabelRegistrationTest(unittest.TestCase):
         # behind-base docs-pass worktree instead of stranding it.
         from orchestrator.worktrees import _PR_REFRESH_DETOUR_LABELS
 
-        self.assertIn("documenting", _PR_REFRESH_DETOUR_LABELS)
+        self.assertIn(LABEL_DOCUMENTING, _PR_REFRESH_DETOUR_LABELS)
 
 class DocumentingLabelRoutingTest(unittest.TestCase):
     """Dispatcher routing and the missing-PR park remain stable."""
 
     def test_dispatcher_routes_documenting_to_handler(self) -> None:
         gh = FakeGitHubClient()
-        issue = make_issue(901, label="documenting")
+        issue = make_issue(ROUTING_ISSUE_NUMBER, label=LABEL_DOCUMENTING)
         gh.add_issue(issue)
 
-        with patch.object(workflow, "_handle_documenting") as handler, \
+        with patch.object(workflow, "_handle_documenting") as documenting_handler, \
              patch.object(workflow, "_handle_pickup") as pickup, \
              patch.object(workflow, "_handle_implementing") as impl, \
-             patch.object(workflow, "_handle_validating") as val:
+             patch.object(workflow, "_handle_validating") as validating_handler:
             workflow._process_issue(gh, _TEST_SPEC, issue)
 
-        handler.assert_called_once_with(gh, _TEST_SPEC, issue)
+        documenting_handler.assert_called_once_with(gh, _TEST_SPEC, issue)
         pickup.assert_not_called()
         impl.assert_not_called()
-        val.assert_not_called()
+        validating_handler.assert_not_called()
 
     def test_missing_pr_parks_awaiting_human(self) -> None:
         # End-to-end with the real handler: a manually-applied
@@ -106,16 +111,18 @@ class DocumentingLabelRoutingTest(unittest.TestCase):
         # cannot anchor on a dev PR worktree, so the handler parks
         # awaiting human rather than guessing.
         gh = FakeGitHubClient()
-        issue = make_issue(902, label="documenting")
+        issue = make_issue(MISSING_PR_ISSUE_NUMBER, label=LABEL_DOCUMENTING)
         gh.add_issue(issue)
 
         workflow._process_issue(gh, _TEST_SPEC, issue)
 
         self.assertEqual(len(gh.posted_comments), 1)
         issue_number, body = gh.posted_comments[0]
-        self.assertEqual(issue_number, 902)
-        self.assertIn("documenting", body)
-        self.assertTrue(gh.pinned_data(902).get("awaiting_human"))
+        self.assertEqual(issue_number, MISSING_PR_ISSUE_NUMBER)
+        self.assertIn(LABEL_DOCUMENTING, body)
+        self.assertTrue(
+            gh.pinned_data(MISSING_PR_ISSUE_NUMBER).get("awaiting_human")
+        )
         # The label is NOT flipped: parking surfaces the situation but
         # leaves the operator in control of the next move.
         self.assertEqual(gh.label_history, [])
@@ -128,9 +135,12 @@ class DocumentingLabelRoutingTest(unittest.TestCase):
         # re-emit the audit event -- otherwise every polling tick
         # would spam the issue.
         gh = FakeGitHubClient()
-        issue = make_issue(903, label="documenting")
+        issue = make_issue(
+            PARKED_MISSING_PR_ISSUE_NUMBER,
+            label=LABEL_DOCUMENTING,
+        )
         gh.add_issue(issue)
-        gh.seed_state(903, awaiting_human=True)
+        gh.seed_state(PARKED_MISSING_PR_ISSUE_NUMBER, awaiting_human=True)
 
         workflow._process_issue(gh, _TEST_SPEC, issue)
 
