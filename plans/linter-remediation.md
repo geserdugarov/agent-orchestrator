@@ -44,7 +44,7 @@ Do not mark a stage complete until its completion gate is satisfied.
 | 3 | Remaining production complexity | 5/6 | [ ] |
 | 4 | Remaining production style and structure | 5/5 | [x] |
 | 5 | Test structure and complexity | 7/7 | [x] |
-| 6 | Test literals and naming | 1/7 | [ ] |
+| 6 | Test literals and naming | 2/7 | [ ] |
 | 7 | Long-tail cleanup and final verification | 0/5 | [ ] |
 
 ## Finding-count progress
@@ -381,7 +381,7 @@ Apply these rules consistently:
 
 ### Package 6.2 — Agent, usage, main, and configuration test literals
 
-- [ ] Resolve the same rule groups in agent, usage, main, and configuration tests.
+- [x] Resolve the same rule groups in agent, usage, main, and configuration tests.
 
 ### Package 6.3 — Scheduler, base-sync, git, and worktree test literals
 
@@ -901,36 +901,66 @@ considered.
 
 ### Agent-wire-format fixture schema keys
 
-- File and symbols: the `claude` / `codex` stream-json fixture builders in `tests/test_analytics.py`
-  (`_claude_stdout_with_skills` and the streaming/trajectory record fixtures) — the literal dict keys
-  `type`, `tool_use`, `assistant`, `message`, `model`, `content`, `usage`, `system`, `subtype`, `init`, `id`,
-  `input`, `name`, and the `result` frame kind.
+- File and symbols: the `claude` / `codex` stream-json fixture builders in `tests/test_analytics.py`,
+  `tests/test_agents.py`, and `tests/test_usage.py` (`_claude_stdout_with_skills`, `_assistant`, `_tool_use`,
+  `_codex_cmd`, and the streaming/trajectory record fixtures) — the literal dict keys `type`, `tool_use`,
+  `assistant`, `message`, `model`, `content`, `usage`, `system`, `subtype`, `init`, `id`, `session_id`, `input`,
+  `input_tokens`, `output_tokens`, `name`, `text`, and `result`, plus short correlation identifiers and payload
+  examples that make started/completed or tool-use/result pairs visible in place.
 - Rule: `WPS226`
 - Reason: These keys reproduce the exact on-the-wire `claude` / `codex` stream-json envelope the extractor
   parses. A fixture that reads as the literal payload (`{"type": "tool_use", "name": "Skill", ...}`) documents
   the wire contract under test; replacing each key with a constant forces a reader to dereference names to
   recover the provider schema and desyncs the fixture from the real stream it mimics. The analytics-record
-  field keys the tests own (`input_tokens`, `steps`, `backend`, ...) are already named module constants.
-- Protected by: `tests/test_analytics.py`.
+  field keys the tests own (`steps`, `turns`, `backend`, ...) and recurring tool / event / status values are already
+  named module constants.
+- Protected by: `tests/test_analytics.py`, `tests/test_agents.py`, and `tests/test_usage.py`.
 - Reviewed: [x]
 
 ### Single-use fixture-payload magic numbers and float-zeros in test data
 
 - File and symbols: per-fixture cost / token / count / duration literals used once or twice across
   `tests/test_dashboard_charts.py`, `tests/test_analytics_read_tables.py`,
-  `tests/test_analytics_read_breakdowns.py`, `tests/test_analytics.py`, and the trajectory tests, plus the
-  genuine float-typed `0.0` cost / rate defaults (`total_cost_usd`, per-backend cost cells, expected-value
-  arrays).
+  `tests/test_analytics_read_breakdowns.py`, `tests/test_analytics.py`, `tests/test_usage.py`, and the trajectory
+  tests, plus the genuine float-typed `0.0` cost / rate defaults (`total_cost_usd`, per-backend cost cells,
+  expected-value arrays).
 - Rule: `WPS432` (magic number) and `WPS358` (float zero).
 - Reason: Each such literal is a single scenario's expected value. Naming it produces a single-use constant
   that adds no meaning, and the recurring numeric values are coincidental collisions across unrelated fixture
   fields (e.g. one stage's `cache_cost_usd` sharing a value with a different row's `total_cost_usd`), so a
-  shared name would mislead rather than clarify. The `0.0` defaults are genuine float zeros a `0` literal
-  would mistype. Only values that recur with one domain meaning (issue / PR numbers, retry limits, the fixture
-  year, reused token totals) were named. This mirrors the production single-use `WPS432` and `WPS358`
+  shared name would mislead rather than clarify. The usage-parser rate multipliers stay beside the expected-cost
+  formulas they audit; moving each SKU's one-off price components to distant constants makes those formulas harder
+  to verify against the fixture. The `0.0` defaults are genuine float zeros a `0` literal would mistype. Only
+  values that recur with one domain meaning (issue / PR numbers, retry limits, the fixture year, cumulative token
+  totals, shared reported costs) were named. This mirrors the production single-use `WPS432` and `WPS358`
   remainders already registered above.
 - Protected by: `tests/test_dashboard_charts.py`, `tests/test_analytics_read_*.py`, `tests/test_analytics.py`,
-  and the trajectory tests.
+  `tests/test_usage.py`, and the trajectory tests.
+- Reviewed: [x]
+
+### Hermetic entry-point reload and dispatch calls
+
+- File and symbols: `_reload_main(_LEGACY_ENV)`, the `GitHubClient` / `workflow.tick` patch expressions,
+  `main_mod.main(_ONCE_ARGS)`, and `main_mod._run_tick(clients, sched)` in `tests/test_main.py`.
+- Rule: `WPS204`
+- Reason: Each scenario reloads module-level configuration, installs the exact dispatch boundary it exercises, and
+  directly invokes the entry point or one-tick coordinator. Hiding those calls behind a generic runner would make
+  signal, scheduler, barrier, and patch lifetimes harder to audit while merely moving the repeated expression to a
+  helper. Stable environment keys, argv, patch attributes, repo slugs, timing budgets, and exit-code components are
+  already named in `tests/main_helpers.py`.
+- Protected by: the 31 focused `tests/test_main.py` scenarios.
+- Reviewed: [x]
+
+### Direct usage-parser calls and field assertions
+
+- File and symbols: the repeated `parse_claude_*` / `parse_codex_*` calls, optional-cost guards, and serialized
+  `decoded[STEPS_FIELD]` assertions in `tests/test_usage.py`.
+- Rule: `WPS204`
+- Reason: Each test directly names the parser under test and independently asserts the fields its scenario protects.
+  A generic parse/assert wrapper would obscure whether a Claude, Codex, skill, or trajectory parser is exercised and
+  would hide distinct cost and serialization checks behind shared control flow. Repeated input shapes and protocol
+  values with one domain meaning have already been consolidated.
+- Protected by: the 102 focused `tests/test_usage.py` scenarios.
 - Reviewed: [x]
 
 ### Scheduler and base-sync scenario density
@@ -1190,6 +1220,23 @@ Add one row for every implementation session, including partial sessions.
 | 2026-07-20 | 5.5 | Complete | WPS 680->560; 234 focused; gate 2149p/3s | Not committed | Start Package 5.6 |
 | 2026-07-20 | 5.6 | Complete | WPS 1272->1161; 282 focused; gate 2149p/3s | Not committed | Start Package 5.7 |
 | 2026-07-21 | 5.7 | Complete | WPS 851->650; 287 focused; gate 2161p/3s | Not committed | Start Package 6.2 |
+| 2026-07-21 | 6.2 | Complete | WPS 566->288; target 374->130; 275 focused; gate 2173p/3s | Not committed | Start Package 6.3 |
+
+Package 6.2 is **complete**. The pass covered `test_agents.py`, `test_usage.py`, `test_main.py`, `test_config.py`,
+and `main_helpers.py`. Backend / CLI / environment tokens, repository fixtures, timing budgets, signal exit codes,
+provider statuses, cost sources, and cumulative usage records now use names tied to their test-domain meaning.
+Ambiguous locals, numbered identifiers, upper-case class attributes, and overlong test names were cleared. Repeated
+configuration failures share one error-message fixture, and the entry-point constants remain in the dedicated helper
+module without adding another large import surface to `test_main.py`.
+
+The scoped `--select=WPS` count fell from 566 to 288. The Package 6.2 rule set fell from 374 to 130: `WPS110` (20),
+`WPS111` (12), `WPS114` (20), `WPS115` (3), `WPS118` (14), and `WPS358` (1) were cleared; `WPS204` fell from 23 to
+15, `WPS226` from 112 to 29, and `WPS432` from 169 to 86. No new rule family was introduced. The retained findings
+are the reviewed direct entry-point/parser call shapes, literal provider wire envelopes and correlation values, and
+per-scenario pricing inputs / rate multipliers documented above.
+
+All 275 focused tests and 55 focused subtests pass, as does repository-wide Ruff. The complete tracked suite passes
+with 2,173 tests and 3 live-Postgres skips; both committed-range and working-tree diff checks are clean.
 
 Package 5.7 is **complete**. The pass covered the shared GitHub fake and workflow patch harness plus the remaining
 state-machine, metadata, routing, analytics, PR-lifecycle, prompt, and parallel-tick tests. Closed-sweep and review
