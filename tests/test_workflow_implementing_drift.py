@@ -17,38 +17,70 @@ from tests.fakes import (
     make_issue,
 )
 from tests.workflow_helpers import (
+    LABEL_IMPLEMENTING,
+    LABEL_VALIDATING,
     _PatchedWorkflowMixin,
     _agent,
+    _issue_branch,
 )
+
+RUN_AGENT = "run_agent"
+USER_CONTENT_HASH = "user_content_hash"
+AWAITING_HUMAN = "awaiting_human"
+LAST_ACTION_COMMENT_ID = "last_action_comment_id"
+STALE_CONTENT_HASH = "stale-hash"
+DEV_AGENT = "claude"
+DEV_SESSION = "dev-sess"
+FRESH_SESSION = "new-sess"
+IMPLEMENTED_MESSAGE = "implemented"
+UPDATED_REQUIREMENTS = "new requirements"
+IMPLEMENTER_PROMPT_FRAGMENT = "You are the implementer"
+CONTINUE_COMMAND = "/orchestrator continue"
+
+DRIFT_RESUME_ISSUE = 60
+FRESH_DRIFT_ISSUE = 61
+INTERRUPTED_DRIFT_ISSUE = 62
+RECOVERED_COMMITS_ISSUE = 850
+NO_SESSION_RECOVERED_ISSUE = 860
+NO_SESSION_FRESH_ISSUE = 861
+AWAITING_BODY_DRIFT_ISSUE = 1200
+AWAITING_COMMENT_DRIFT_ISSUE = 1210
+CONTINUE_RETRY_ISSUE = 730
+CONTINUE_QUESTION_ISSUE = 731
+CONTINUE_GUIDED_ISSUE = 732
+HUMAN_COMMENT_ID = 500
+PICKUP_COMMENT_ID = 900
+COMMAND_COMMENT_ID = 9000
+PRIOR_ACTION_WATERMARK = 8000
 
 
 def _seed_parked_implementing(
     number: int,
     *,
     park_reason,
-    command_body="/orchestrator continue",
+    command_body=CONTINUE_COMMAND,
     drift_neutral=False,
 ):
     gh = FakeGitHubClient()
-    issue = make_issue(number, label="implementing", body="the requirements")
+    issue = make_issue(number, label=LABEL_IMPLEMENTING, body="the requirements")
     issue.comments.append(
-        FakeComment(id=9000, body=command_body, user=FakeUser("dave"))
+        FakeComment(id=COMMAND_COMMENT_ID, body=command_body, user=FakeUser("dave"))
     )
     gh.add_issue(issue)
     content_hash = (
         workflow._compute_user_content_hash(issue, set())
-        if drift_neutral else "stale-hash"
+        if drift_neutral else STALE_CONTENT_HASH
     )
     gh.seed_state(
         number,
         user_content_hash=content_hash,
-        dev_agent="claude",
-        dev_session_id="dev-sess",
+        dev_agent=DEV_AGENT,
+        dev_session_id=DEV_SESSION,
         awaiting_human=True,
         park_reason=park_reason,
         silent_park_count=1,
-        last_action_comment_id=8000,
-        branch=f"orchestrator/geserdugarov__agent-orchestrator/issue-{number}",
+        last_action_comment_id=PRIOR_ACTION_WATERMARK,
+        branch=_issue_branch(number),
     )
     return gh, issue
 
@@ -62,22 +94,26 @@ class HandleImplementingResumeOnHashChangeTest(
         # resume the locked dev session with the new body so it can decide
         # whether more work is needed.
         gh = FakeGitHubClient()
-        issue = make_issue(60, label="implementing", body="new requirements")
+        issue = make_issue(
+            DRIFT_RESUME_ISSUE,
+            label=LABEL_IMPLEMENTING,
+            body=UPDATED_REQUIREMENTS,
+        )
         gh.add_issue(issue)
         gh.seed_state(
-            60,
-            user_content_hash="stale-hash",
-            dev_agent="claude",
-            dev_session_id="dev-sess",
+            DRIFT_RESUME_ISSUE,
+            user_content_hash=STALE_CONTENT_HASH,
+            dev_agent=DEV_AGENT,
+            dev_session_id=DEV_SESSION,
             awaiting_human=True,
-            last_action_comment_id=500,
-            branch="orchestrator/geserdugarov__agent-orchestrator/issue-60",
+            last_action_comment_id=HUMAN_COMMENT_ID,
+            branch=_issue_branch(DRIFT_RESUME_ISSUE),
         )
 
         mocks = self._run_implementing(
             gh, issue,
             run_agent=_agent(
-                session_id="dev-sess", last_message="addressed it"
+                session_id=DEV_SESSION, last_message="addressed it"
             ),
             has_new_commits=True,
             dirty_files=(),
@@ -90,19 +126,19 @@ class HandleImplementingResumeOnHashChangeTest(
         )
 
         # Dev session resumed; the prompt mentions the updated body.
-        mocks["run_agent"].assert_called_once()
-        prompt = mocks["run_agent"].call_args[0][1]
-        self.assertIn("new requirements", prompt)
+        mocks[RUN_AGENT].assert_called_once()
+        prompt = mocks[RUN_AGENT].call_args[0][1]
+        self.assertIn(UPDATED_REQUIREMENTS, prompt)
         self.assertIn("Updated issue", prompt)
         # The label flipped via _on_commits -> validating because the
         # resume produced a commit; the issue is NOT routed to
         # decomposing, and the docs pass only runs as the final-docs
         # handoff after a reviewer approval.
-        self.assertNotIn((60, "decomposing"), gh.label_history)
-        self.assertIn((60, "validating"), gh.label_history)
-        self.assertNotIn((60, "documenting"), gh.label_history)
-        state = gh.pinned_data(60)
-        self.assertNotEqual(state.get("user_content_hash"), "stale-hash")
+        self.assertNotIn((DRIFT_RESUME_ISSUE, "decomposing"), gh.label_history)
+        self.assertIn((DRIFT_RESUME_ISSUE, LABEL_VALIDATING), gh.label_history)
+        self.assertNotIn((DRIFT_RESUME_ISSUE, "documenting"), gh.label_history)
+        state = gh.pinned_data(DRIFT_RESUME_ISSUE)
+        self.assertNotEqual(state.get(USER_CONTENT_HASH), STALE_CONTENT_HASH)
         self.assertTrue(any(
             "issue body changed" in body
             for _, body in gh.posted_comments
@@ -115,18 +151,18 @@ class HandleImplementingResumeOnHashChangeTest(
         # via `_build_implement_prompt`. There is no "stale dev session"
         # to notify about.
         gh = FakeGitHubClient()
-        issue = make_issue(61, label="implementing", body="brand new body")
+        issue = make_issue(FRESH_DRIFT_ISSUE, label=LABEL_IMPLEMENTING, body="brand new body")
         gh.add_issue(issue)
         gh.seed_state(
-            61,
-            user_content_hash="stale-hash",
-            pickup_comment_id=900,
+            FRESH_DRIFT_ISSUE,
+            user_content_hash=STALE_CONTENT_HASH,
+            pickup_comment_id=PICKUP_COMMENT_ID,
         )
 
         mocks = self._run_implementing(
             gh, issue,
             run_agent=_agent(
-                session_id="new-sess", last_message="implemented"
+                session_id=FRESH_SESSION, last_message=IMPLEMENTED_MESSAGE,
             ),
             # Three `_has_new_commits` calls: (1) the drift-no-session
             # "are there recovered commits to park on?" check
@@ -139,8 +175,8 @@ class HandleImplementingResumeOnHashChangeTest(
 
         # Fresh spawn ran; the implement prompt was built (not the
         # "issue body changed" resume prompt).
-        prompt = mocks["run_agent"].call_args[0][1]
-        self.assertIn("You are the implementer", prompt)
+        prompt = mocks[RUN_AGENT].call_args[0][1]
+        self.assertIn(IMPLEMENTER_PROMPT_FRAGMENT, prompt)
         # No "issue body changed" notice was posted (we fell through to
         # the normal fresh-spawn path).
         self.assertFalse(any(
@@ -148,8 +184,8 @@ class HandleImplementingResumeOnHashChangeTest(
             for _, body in gh.posted_comments
         ))
         # But the new hash is persisted.
-        state = gh.pinned_data(61)
-        self.assertNotEqual(state.get("user_content_hash"), "stale-hash")
+        state = gh.pinned_data(FRESH_DRIFT_ISSUE)
+        self.assertNotEqual(state.get(USER_CONTENT_HASH), STALE_CONTENT_HASH)
 
 
 class ImplementingDriftInterruptedResumeTest(
@@ -164,38 +200,42 @@ class ImplementingDriftInterruptedResumeTest(
 
     def test_interrupted_resume_keeps_state(self) -> None:
         gh = FakeGitHubClient()
-        issue = make_issue(62, label="implementing", body="new requirements")
+        issue = make_issue(
+            INTERRUPTED_DRIFT_ISSUE,
+            label=LABEL_IMPLEMENTING,
+            body=UPDATED_REQUIREMENTS,
+        )
         gh.add_issue(issue)
         gh.seed_state(
-            62,
-            user_content_hash="stale-hash",
-            dev_agent="claude",
-            dev_session_id="dev-sess",
+            INTERRUPTED_DRIFT_ISSUE,
+            user_content_hash=STALE_CONTENT_HASH,
+            dev_agent=DEV_AGENT,
+            dev_session_id=DEV_SESSION,
             awaiting_human=True,
-            last_action_comment_id=500,
-            branch="orchestrator/geserdugarov__agent-orchestrator/issue-62",
+            last_action_comment_id=HUMAN_COMMENT_ID,
+            branch=_issue_branch(INTERRUPTED_DRIFT_ISSUE),
         )
         before_writes = gh.write_state_calls
 
         mocks = self._run_implementing(
             gh, issue,
-            run_agent=_agent(session_id="dev-sess", interrupted=True),
+            run_agent=_agent(session_id=DEV_SESSION, interrupted=True),
             # before_sha + after_sha probes around the resume.
             head_shas=["before-resume", "after-resume"],
         )
 
         # The resume spawned, then the interruption was observed.
-        mocks["run_agent"].assert_called_once()
+        mocks[RUN_AGENT].assert_called_once()
         # No durable state churn -- the refreshed hash / consumed-comment /
         # awaiting-human writes are all discarded.
         self.assertEqual(gh.write_state_calls, before_writes)
-        state = gh.pinned_data(62)
-        self.assertEqual(state.get("user_content_hash"), "stale-hash")
-        self.assertTrue(state.get("awaiting_human"))
-        self.assertEqual(state.get("last_action_comment_id"), 500)
+        state = gh.pinned_data(INTERRUPTED_DRIFT_ISSUE)
+        self.assertEqual(state.get(USER_CONTENT_HASH), STALE_CONTENT_HASH)
+        self.assertTrue(state.get(AWAITING_HUMAN))
+        self.assertEqual(state.get(LAST_ACTION_COMMENT_ID), HUMAN_COMMENT_ID)
         # No PR, no label flip, and no HITL question / ack / timeout park.
         self.assertEqual(gh.opened_prs, [])
-        self.assertNotIn((62, "validating"), gh.label_history)
+        self.assertNotIn((INTERRUPTED_DRIFT_ISSUE, LABEL_VALIDATING), gh.label_history)
         self.assertFalse(any(
             "agent needs your input" in body
             or "existing work satisfies" in body
@@ -220,17 +260,19 @@ class ImplementingDriftHeadShaDeltaTest(
     ) -> None:
         gh = FakeGitHubClient()
         issue = make_issue(
-            850, label="implementing", body="new requirements",
+            RECOVERED_COMMITS_ISSUE,
+            label=LABEL_IMPLEMENTING,
+            body=UPDATED_REQUIREMENTS,
         )
         gh.add_issue(issue)
         gh.seed_state(
-            850,
-            user_content_hash="stale-hash",
-            dev_agent="claude",
-            dev_session_id="dev-sess",
+            RECOVERED_COMMITS_ISSUE,
+            user_content_hash=STALE_CONTENT_HASH,
+            dev_agent=DEV_AGENT,
+            dev_session_id=DEV_SESSION,
             awaiting_human=True,
             last_action_comment_id=100,
-            branch="orchestrator/geserdugarov__agent-orchestrator/issue-850",
+            branch=_issue_branch(RECOVERED_COMMITS_ISSUE),
         )
 
         # The drift resume returns no new commit (`last_message=""` so
@@ -242,7 +284,7 @@ class ImplementingDriftHeadShaDeltaTest(
         self._run_implementing(
             gh, issue,
             run_agent=_agent(
-                session_id="dev-sess", last_message=""
+                session_id=DEV_SESSION, last_message=""
             ),
             # has_new_commits would return True for the recovered
             # worktree; the drift branch must NOT consult it.
@@ -255,10 +297,10 @@ class ImplementingDriftHeadShaDeltaTest(
         # validating: the empty resume gave the dev no chance to
         # address the edited requirements.
         self.assertEqual(gh.opened_prs, [])
-        self.assertNotIn((850, "validating"), gh.label_history)
+        self.assertNotIn((RECOVERED_COMMITS_ISSUE, LABEL_VALIDATING), gh.label_history)
         # Should fall to the silent-failure park via `_on_question`.
-        state = gh.pinned_data(850)
-        self.assertTrue(state.get("awaiting_human"))
+        state = gh.pinned_data(RECOVERED_COMMITS_ISSUE)
+        self.assertTrue(state.get(AWAITING_HUMAN))
         self.assertEqual(state.get("park_reason"), "agent_silent")
 
 
@@ -276,16 +318,18 @@ class NoSessionRecoveredCommitsDriftTest(
     ) -> None:
         gh = FakeGitHubClient()
         issue = make_issue(
-            860, label="implementing", body="updated requirements",
+            NO_SESSION_RECOVERED_ISSUE,
+            label=LABEL_IMPLEMENTING,
+            body="updated requirements",
         )
         gh.add_issue(issue)
         # No `dev_session_id` recorded: legacy/recovered state. Pre-seed
         # `user_content_hash` so the drift detection fires (vs. silently
         # initializing the baseline on first encounter).
         gh.seed_state(
-            860,
-            user_content_hash="stale-hash",
-            branch="orchestrator/geserdugarov__agent-orchestrator/issue-860",
+            NO_SESSION_RECOVERED_ISSUE,
+            user_content_hash=STALE_CONTENT_HASH,
+            branch=_issue_branch(NO_SESSION_RECOVERED_ISSUE),
         )
 
         mocks = self._run_implementing(
@@ -300,15 +344,15 @@ class NoSessionRecoveredCommitsDriftTest(
         # never authored against the edited body.
         mocks["_push_branch"].assert_not_called()
         self.assertEqual(gh.opened_prs, [])
-        self.assertNotIn((860, "validating"), gh.label_history)
+        self.assertNotIn((NO_SESSION_RECOVERED_ISSUE, LABEL_VALIDATING), gh.label_history)
         # Parked so the operator can adjudicate.
-        state = gh.pinned_data(860)
-        self.assertTrue(state.get("awaiting_human"))
+        state = gh.pinned_data(NO_SESSION_RECOVERED_ISSUE)
+        self.assertTrue(state.get(AWAITING_HUMAN))
         last_comment = gh.posted_comments[-1][1]
         self.assertIn("never saw the edited requirements", last_comment)
         # New hash baseline persisted so subsequent ticks don't keep
         # re-firing the drift park on the same edit.
-        self.assertNotEqual(state.get("user_content_hash"), "stale-hash")
+        self.assertNotEqual(state.get(USER_CONTENT_HASH), STALE_CONTENT_HASH)
 
     def test_no_session_or_commits_falls_through(
         self,
@@ -317,18 +361,18 @@ class NoSessionRecoveredCommitsDriftTest(
         # recovered commits: a fresh spawn picks up the new body via
         # `_build_implement_prompt`.
         gh = FakeGitHubClient()
-        issue = make_issue(861, label="implementing", body="new body")
+        issue = make_issue(NO_SESSION_FRESH_ISSUE, label=LABEL_IMPLEMENTING, body="new body")
         gh.add_issue(issue)
         gh.seed_state(
-            861,
-            user_content_hash="stale-hash",
-            pickup_comment_id=900,
+            NO_SESSION_FRESH_ISSUE,
+            user_content_hash=STALE_CONTENT_HASH,
+            pickup_comment_id=PICKUP_COMMENT_ID,
         )
 
         mocks = self._run_implementing(
             gh, issue,
             run_agent=_agent(
-                session_id="new-sess", last_message="implemented"
+                session_id=FRESH_SESSION, last_message=IMPLEMENTED_MESSAGE,
             ),
             # Three `_has_new_commits` calls: (1) drift-no-session park
             # check returns False -> fall through; (2) recovered-worktree
@@ -339,8 +383,8 @@ class NoSessionRecoveredCommitsDriftTest(
         )
 
         # Fresh implement prompt ran (not the drift resume prompt).
-        prompt = mocks["run_agent"].call_args[0][1]
-        self.assertIn("You are the implementer", prompt)
+        prompt = mocks[RUN_AGENT].call_args[0][1]
+        self.assertIn(IMPLEMENTER_PROMPT_FRAGMENT, prompt)
         # PR opened from the fresh spawn.
         self.assertEqual(len(gh.opened_prs), 1)
 
@@ -365,14 +409,16 @@ class AwaitingHumanNoSessionDriftTest(
     def test_body_edit_clears_park_and_spawns_fresh(self) -> None:
         gh = FakeGitHubClient()
         issue = make_issue(
-            1200, label="implementing", body="updated requirements",
+            AWAITING_BODY_DRIFT_ISSUE,
+            label=LABEL_IMPLEMENTING,
+            body="updated requirements",
         )
         # No prior dev session, but parked. Pre-seed `user_content_hash`
         # to a stale value so the drift detection fires (auto-seeding on
         # first encounter would hide the bug).
         gh.seed_state(
-            1200,
-            user_content_hash="stale-hash",
+            AWAITING_BODY_DRIFT_ISSUE,
+            user_content_hash=STALE_CONTENT_HASH,
             awaiting_human=True,
             park_reason=None,
             last_action_comment_id=100,
@@ -381,7 +427,7 @@ class AwaitingHumanNoSessionDriftTest(
         mocks = self._run_implementing(
             gh, issue,
             run_agent=_agent(
-                session_id="new-sess", last_message="implemented"
+                session_id=FRESH_SESSION, last_message=IMPLEMENTED_MESSAGE,
             ),
             # Three `_has_new_commits` calls: (1) the drift-no-session
             # park-on-recovered-commits check returns False; (2) the
@@ -391,17 +437,17 @@ class AwaitingHumanNoSessionDriftTest(
             push_branch=True,
         )
 
-        state = gh.pinned_data(1200)
+        state = gh.pinned_data(AWAITING_BODY_DRIFT_ISSUE)
         # The new hash is durably persisted -- the drift does NOT loop.
-        self.assertNotEqual(state.get("user_content_hash"), "stale-hash")
+        self.assertNotEqual(state.get(USER_CONTENT_HASH), STALE_CONTENT_HASH)
         # Park flags cleared so the fresh-spawn branch fired.
-        self.assertFalse(state.get("awaiting_human"))
+        self.assertFalse(state.get(AWAITING_HUMAN))
         self.assertIsNone(state.get("park_reason"))
         # The fresh implement prompt was used (NOT the resume-with-just-
         # comments prompt), so the dev sees the updated body.
-        mocks["run_agent"].assert_called_once()
-        prompt = mocks["run_agent"].call_args[0][1]
-        self.assertIn("You are the implementer", prompt)
+        mocks[RUN_AGENT].assert_called_once()
+        prompt = mocks[RUN_AGENT].call_args[0][1]
+        self.assertIn(IMPLEMENTER_PROMPT_FRAGMENT, prompt)
         self.assertIn("updated requirements", prompt)
         # PR opened from the fresh spawn.
         self.assertEqual(len(gh.opened_prs), 1)
@@ -411,20 +457,22 @@ class AwaitingHumanNoSessionDriftTest(
     ) -> None:
         gh = FakeGitHubClient()
         issue = make_issue(
-            1210, label="implementing", body="updated body",
+            AWAITING_COMMENT_DRIFT_ISSUE,
+            label=LABEL_IMPLEMENTING,
+            body="updated body",
         )
         # New human comment that triggers comment-driven resume in the
         # legacy code path -- the bug there fresh-spawns with ONLY the
         # comment text, missing the body context.
         human = FakeComment(
-            id=500, body="here's more detail",
+            id=HUMAN_COMMENT_ID, body="here's more detail",
             user=FakeUser("alice"),
         )
         issue.comments.append(human)
         gh.add_issue(issue)
         gh.seed_state(
-            1210,
-            user_content_hash="stale-hash",
+            AWAITING_COMMENT_DRIFT_ISSUE,
+            user_content_hash=STALE_CONTENT_HASH,
             awaiting_human=True,
             last_action_comment_id=100,
         )
@@ -432,7 +480,7 @@ class AwaitingHumanNoSessionDriftTest(
         mocks = self._run_implementing(
             gh, issue,
             run_agent=_agent(
-                session_id="new-sess", last_message="implemented"
+                session_id=FRESH_SESSION, last_message=IMPLEMENTED_MESSAGE,
             ),
             has_new_commits=[False, False, True],
             push_branch=True,
@@ -440,15 +488,15 @@ class AwaitingHumanNoSessionDriftTest(
 
         # Fresh implement prompt with the updated body AND the new
         # comment quoted via `_recent_comments_text`.
-        prompt = mocks["run_agent"].call_args[0][1]
-        self.assertIn("You are the implementer", prompt)
+        prompt = mocks[RUN_AGENT].call_args[0][1]
+        self.assertIn(IMPLEMENTER_PROMPT_FRAGMENT, prompt)
         self.assertIn("updated body", prompt)
         self.assertIn("here's more detail", prompt)
         # Comment marked consumed so the validating->in_review handoff
         # later won't classify it as fresh PR feedback.
-        state = gh.pinned_data(1210)
+        state = gh.pinned_data(AWAITING_COMMENT_DRIFT_ISSUE)
         self.assertGreaterEqual(
-            int(state.get("last_action_comment_id")), 500,
+            int(state.get(LAST_ACTION_COMMENT_ID)), HUMAN_COMMENT_ID,
         )
 
 
@@ -470,11 +518,14 @@ class ImplementingContinueCommandTest(
         # exactly `/orchestrator continue`. The dev session is resumed
         # intentionally -- no "issue body changed" / "issue content changed"
         # notice, and the bare command is NOT fed as the dev prompt.
-        gh, issue = _seed_parked_implementing(730, park_reason="agent_silent")
+        gh, issue = _seed_parked_implementing(
+            CONTINUE_RETRY_ISSUE,
+            park_reason="agent_silent",
+        )
 
         mocks = self._run_implementing(
             gh, issue,
-            run_agent=_agent(session_id="dev-sess", last_message="finished it"),
+            run_agent=_agent(session_id=DEV_SESSION, last_message="finished it"),
             has_new_commits=True,
             dirty_files=(),
             push_branch=True,
@@ -483,13 +534,13 @@ class ImplementingContinueCommandTest(
 
         # The dev retry/resume path is entered -- the poisoned but healthy
         # session is resumed (not rotated), on the neutral retry prompt.
-        mocks["run_agent"].assert_called_once()
-        prompt = mocks["run_agent"].call_args[0][1]
+        mocks[RUN_AGENT].assert_called_once()
+        prompt = mocks[RUN_AGENT].call_args[0][1]
         self.assertIn("session/usage limit", prompt)
-        self.assertNotIn("/orchestrator continue", prompt)
+        self.assertNotIn(CONTINUE_COMMAND, prompt)
         self.assertEqual(
-            mocks["run_agent"].call_args.kwargs.get("resume_session_id"),
-            "dev-sess",
+            mocks[RUN_AGENT].call_args.kwargs.get("resume_session_id"),
+            DEV_SESSION,
         )
         # No drift notice of any kind.
         self.assertFalse(any(
@@ -498,9 +549,12 @@ class ImplementingContinueCommandTest(
         ))
         # The retry produced a commit, so the issue advanced to validating and
         # the command comment is consumed (won't re-fire next tick).
-        self.assertIn((730, "validating"), gh.label_history)
+        self.assertIn((CONTINUE_RETRY_ISSUE, LABEL_VALIDATING), gh.label_history)
         self.assertEqual(len(gh.opened_prs), 1)
-        self.assertEqual(gh.pinned_data(730).get("last_action_comment_id"), 9000)
+        self.assertEqual(
+            gh.pinned_data(CONTINUE_RETRY_ISSUE).get(LAST_ACTION_COMMENT_ID),
+            COMMAND_COMMENT_ID,
+        )
 
     def test_question_park_bare_continue_refuses(
         self,
@@ -509,7 +563,7 @@ class ImplementingContinueCommandTest(
         # continue carries no answer, so refuse and stay parked -- and the
         # refusal must not re-post every tick.
         gh, issue = _seed_parked_implementing(
-            731, park_reason=None, drift_neutral=True,
+            CONTINUE_QUESTION_ISSUE, park_reason=None, drift_neutral=True,
         )
 
         mocks = self._run_implementing(
@@ -522,18 +576,18 @@ class ImplementingContinueCommandTest(
             run_agent=_agent(),
         )
 
-        mocks["run_agent"].assert_not_called()
+        mocks[RUN_AGENT].assert_not_called()
         refusals = [
             body for _, body in gh.posted_comments
             if "needs your actual guidance" in body
         ]
         self.assertEqual(len(refusals), 1)
         self.assertEqual(gh.opened_prs, [])
-        state = gh.pinned_data(731)
-        self.assertTrue(state.get("awaiting_human"))
+        state = gh.pinned_data(CONTINUE_QUESTION_ISSUE)
+        self.assertTrue(state.get(AWAITING_HUMAN))
         # Command AND the refusal are consumed so nothing re-fires.
         self.assertGreaterEqual(
-            int(state.get("last_action_comment_id")), 9000,
+            int(state.get(LAST_ACTION_COMMENT_ID)), COMMAND_COMMENT_ID,
         )
 
     def test_guided_continue_keeps_guidance(self) -> None:
@@ -541,19 +595,20 @@ class ImplementingContinueCommandTest(
         # bare command: it falls through to the normal drift resume, which
         # feeds the guidance to the dev (it must not be dropped).
         gh, issue = _seed_parked_implementing(
-            732, park_reason="agent_silent",
-            command_body="/orchestrator continue\nrename the flag to --strict",
+            CONTINUE_GUIDED_ISSUE,
+            park_reason="agent_silent",
+            command_body=f"{CONTINUE_COMMAND}\nrename the flag to --strict",
         )
 
         mocks = self._run_implementing(
             gh, issue,
-            run_agent=_agent(session_id="dev-sess", last_message="done"),
+            run_agent=_agent(session_id=DEV_SESSION, last_message="done"),
             has_new_commits=True,
             dirty_files=(),
             push_branch=True,
             head_shas=["sha-before", "sha-after"],
         )
 
-        mocks["run_agent"].assert_called_once()
-        prompt = mocks["run_agent"].call_args[0][1]
+        mocks[RUN_AGENT].assert_called_once()
+        prompt = mocks[RUN_AGENT].call_args[0][1]
         self.assertIn("rename the flag to --strict", prompt)

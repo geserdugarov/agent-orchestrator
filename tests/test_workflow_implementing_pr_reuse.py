@@ -21,10 +21,47 @@ from tests.fakes import (
     make_issue,
 )
 from tests.workflow_helpers import (
+    LABEL_IMPLEMENTING,
     _PatchedWorkflowMixin,
     _TEST_SPEC,
     _agent,
 )
+
+GIT_HELPER = "_git"
+FAKE_WORKTREE = Path("/tmp/wt-not-real")
+TEST_TARGET_ROOT = Path("/tmp/orchestrator-test-target-root")
+DEFAULT_REVISION_RANGE = "origin/main..HEAD"
+DEV_SESSION = "sess-1"
+DONE_MESSAGE = "done"
+FEATURE_PREFIX = "feat"
+TEST_ISSUE_TITLE = "add a thing"
+TEST_ISSUE_BODY = "please add a thing"
+SPARKLY_TITLE = "add a sparkly thing"
+SPARKLY_COMMIT_SUBJECT = "feat: add a sparkly thing"
+REPO_LOCAL_FORBIDDEN_PREFIXES = ("feat:", "chore:", "refactor:", "test:")
+FOREGROUND_MARKER = "NEVER start a background job"
+GITHUB_BODY_LIMIT = 65536
+EXISTING_PR_NUMBER = 42
+FEEDBACK_COMMENT_ID = 42
+BRANCHLESS_ISSUE = 11
+BRANCHLESS_REPLY_ID = 2100
+BRANCHLESS_WATERMARK = 2000
+LONG_MESSAGE_WORD_COUNT = 20000
+CODE_FENCE_LINE_COUNT = 20000
+TOKEN_TAIL_LENGTH = 4000
+LONG_BODY_REPEAT_COUNT = 5000
+BODY_SHORT_ISSUE = 61
+CONVENTIONAL_ISSUE = 30
+SCOPED_CONVENTIONAL_ISSUE = 31
+UNCONVENTIONAL_ISSUE = 32
+BUG_FALLBACK_ISSUE = 33
+EMPTY_SUBJECT_ISSUE = 34
+CONVENTIONAL_TITLE_ISSUE = 35
+CUSTOM_PREFIX_ISSUE = 36
+INFERRED_PREFIX_ISSUE = 37
+PREFIX_HELPER_ISSUE = 50
+GIT_ERROR_ISSUE = 51
+REMOTE_ROUTING_ISSUE = 52
 
 
 class _GitRecorder:
@@ -44,15 +81,13 @@ class _GitRecorder:
 
 
 class _RepoLocalStyleAssertions:
-    _HARDCODED_LIST = ("feat:", "chore:", "refactor:", "test:")
-
     def _assert_repo_local_style(self, prompt: str) -> None:
         self.assertIn("git log", prompt)
         self.assertIn("repository-local", prompt)
         self.assertIn("event:", prompt)
         self.assertIn("career:", prompt)
         self.assertNotIn("Conventional", prompt)
-        for prefix in self._HARDCODED_LIST:
+        for prefix in REPO_LOCAL_FORBIDDEN_PREFIXES:
             self.assertNotIn(prefix, prompt)
         self.assertIn("subject line only", prompt)
         self.assertIn("Co-Authored-By", prompt)
@@ -63,8 +98,8 @@ class _ConventionalTitleFixtureMixin(_PatchedWorkflowMixin):
         gh = FakeGitHubClient()
         issue = make_issue(
             issue_number,
-            label="implementing",
-            title="add a sparkly thing",
+            label=LABEL_IMPLEMENTING,
+            title=SPARKLY_TITLE,
         )
         if label_name:
             issue.labels.append(FakeLabel(label_name))
@@ -74,27 +109,30 @@ class _ConventionalTitleFixtureMixin(_PatchedWorkflowMixin):
 
 class _SubjectPrefixFixtureMixin:
     def _infer(self, stdout: str, *, bug: bool = False) -> str:
-        issue = make_issue(50, title="do a thing")
+        issue = make_issue(PREFIX_HELPER_ISSUE, title="do a thing")
         if bug:
             issue.labels.append(FakeLabel("bug"))
         git = _GitRecorder(stdout)
-        with patch.object(branch_publication, "_git", git):
+        with patch.object(branch_publication, GIT_HELPER, git):
             return workflow._infer_subject_prefix(
-                _TEST_SPEC, Path("/tmp/wt-not-real"), issue
+                _TEST_SPEC, FAKE_WORKTREE, issue
             )
 
 
 class OnCommitsPRReuseTest(unittest.TestCase, _PatchedWorkflowMixin):
     def test_existing_open_pr_is_reused(self) -> None:
         gh = FakeGitHubClient()
-        issue = make_issue(4, label="implementing")
+        issue = make_issue(4, label=LABEL_IMPLEMENTING)
         gh.add_issue(issue)
-        existing = FakePR(number=42, head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-4")
+        existing = FakePR(
+            number=EXISTING_PR_NUMBER,
+            head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-4",
+        )
         gh.existing_open_pr["orchestrator/geserdugarov__agent-orchestrator/issue-4"] = existing
 
         self._run_implementing(
             gh, issue,
-            run_agent=_agent(session_id="sess-1", last_message="done"),
+            run_agent=_agent(session_id=DEV_SESSION, last_message=DONE_MESSAGE),
             has_new_commits=[False, True],
             dirty_files=(),
             push_branch=True,
@@ -105,7 +143,7 @@ class OnCommitsPRReuseTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertFalse(any(":sparkles: PR opened" in body
                              for _, body in gh.posted_comments))
         self.assertIn((4, "validating"), gh.label_history)
-        self.assertEqual(gh.pinned_data(4).get("pr_number"), 42)
+        self.assertEqual(gh.pinned_data(4).get("pr_number"), EXISTING_PR_NUMBER)
 
     def test_legacy_branch_anchors_lookup_and_push(self) -> None:
         # Regression: an in-flight issue that was already running before
@@ -117,9 +155,9 @@ class OnCommitsPRReuseTest(unittest.TestCase, _PatchedWorkflowMixin):
         # against the new branch while the original PR is orphaned.
         LEGACY = "orchestrator/issue-4"
         gh = FakeGitHubClient()
-        issue = make_issue(4, label="implementing")
+        issue = make_issue(4, label=LABEL_IMPLEMENTING)
         gh.add_issue(issue)
-        existing = FakePR(number=42, head_branch=LEGACY)
+        existing = FakePR(number=EXISTING_PR_NUMBER, head_branch=LEGACY)
         gh.existing_open_pr[LEGACY] = existing
         # Pinned state mirrors what an issue picked up before this
         # change would carry.
@@ -127,7 +165,7 @@ class OnCommitsPRReuseTest(unittest.TestCase, _PatchedWorkflowMixin):
 
         mocks = self._run_implementing(
             gh, issue,
-            run_agent=_agent(session_id="sess-1", last_message="done"),
+            run_agent=_agent(session_id=DEV_SESSION, last_message=DONE_MESSAGE),
             has_new_commits=[False, True],
             dirty_files=(),
             push_branch=True,
@@ -138,7 +176,7 @@ class OnCommitsPRReuseTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertEqual(gh.opened_prs, [])
         self.assertFalse(any(":sparkles: PR opened" in body
                              for _, body in gh.posted_comments))
-        self.assertEqual(gh.pinned_data(4).get("pr_number"), 42)
+        self.assertEqual(gh.pinned_data(4).get("pr_number"), EXISTING_PR_NUMBER)
         # Push targeted the legacy branch, not the new namespaced one.
         push_call = mocks["_push_branch"].call_args
         self.assertEqual(push_call.args[2], LEGACY)
@@ -157,10 +195,10 @@ class OnCommitsPRReuseTest(unittest.TestCase, _PatchedWorkflowMixin):
         # must persist the pushed branch alongside `pr_number` so the
         # resolver recovers it directly.
         gh = FakeGitHubClient()
-        issue = make_issue(11, label="implementing")
+        issue = make_issue(BRANCHLESS_ISSUE, label=LABEL_IMPLEMENTING)
         # Pending human comment that triggers the awaiting-human resume.
         issue.comments.append(
-            FakeComment(id=2100, body="please retry", user=FakeUser("alice"))
+            FakeComment(id=BRANCHLESS_REPLY_ID, body="please retry", user=FakeUser("alice"))
         )
         gh.add_issue(issue)
         # State carries `awaiting_human=True` and a dev session id but
@@ -169,16 +207,16 @@ class OnCommitsPRReuseTest(unittest.TestCase, _PatchedWorkflowMixin):
         # `branch`. `pr_number` is also absent because no PR exists
         # yet; the resume produces the first commit.
         gh.seed_state(
-            11,
+            BRANCHLESS_ISSUE,
             awaiting_human=True,
             dev_agent="claude",
             dev_session_id="dev-sess",
-            last_action_comment_id=2000,
+            last_action_comment_id=BRANCHLESS_WATERMARK,
         )
 
         self._run_implementing(
             gh, issue,
-            run_agent=_agent(session_id="dev-sess", last_message="done"),
+            run_agent=_agent(session_id="dev-sess", last_message=DONE_MESSAGE),
             # Resume path: no recovered-worktree shortcut, post-agent
             # check sees the new commit.
             has_new_commits=[True],
@@ -188,13 +226,13 @@ class OnCommitsPRReuseTest(unittest.TestCase, _PatchedWorkflowMixin):
 
         # A PR was opened and persisted to state.
         self.assertEqual(len(gh.opened_prs), 1)
-        data = gh.pinned_data(11)
-        self.assertEqual(data.get("pr_number"), gh.opened_prs[0].number)
+        pinned_data = gh.pinned_data(BRANCHLESS_ISSUE)
+        self.assertEqual(pinned_data.get("pr_number"), gh.opened_prs[0].number)
         # The branch was persisted alongside `pr_number` so the next
         # tick's `_resolve_branch_name` recovers the slug-namespaced
         # form directly instead of mis-inferring the legacy ref.
         self.assertEqual(
-            data.get("branch"),
+            pinned_data.get("branch"),
             "orchestrator/geserdugarov__agent-orchestrator/issue-11",
         )
 
@@ -218,7 +256,7 @@ class FormatPrAgentMessageTest(unittest.TestCase):
         self.assertNotIn(implementing._PR_BODY_TRUNCATION_MARKER, out)
 
     def test_long_message_capped_with_marker(self) -> None:
-        msg = "word " * 20000  # ~100k chars, well over the cap
+        msg = "word " * LONG_MESSAGE_WORD_COUNT  # ~100k chars, well over the cap
         out = implementing._format_pr_agent_message(msg)
         # Explicit, visible truncation marker is present.
         self.assertIn(implementing._PR_BODY_TRUNCATION_MARKER, out)
@@ -237,7 +275,7 @@ class FormatPrAgentMessageTest(unittest.TestCase):
         # A single unbroken run with one space near the cap: the cut must
         # fall back to the word boundary rather than slicing mid-token.
         head = "a" * (implementing._PR_BODY_AGENT_MESSAGE_CAP - 5)
-        msg = head + " " + "b" * 4000
+        msg = head + " " + "b" * TOKEN_TAIL_LENGTH
         out = implementing._format_pr_agent_message(msg)
         kept = out.split("\n\n" + implementing._PR_BODY_TRUNCATION_MARKER)[0]
         # Cut at the space: no stray `b` characters leaked past the boundary.
@@ -246,7 +284,7 @@ class FormatPrAgentMessageTest(unittest.TestCase):
     def test_dangling_code_fence_is_closed(self) -> None:
         # Force the cut to land inside an open code fence and assert it gets
         # closed so the marker renders outside the block.
-        msg = "intro\n\n```python\n" + "x = 1\n" * 20000
+        msg = "intro\n\n```python\n" + "x = 1\n" * CODE_FENCE_LINE_COUNT
         out = implementing._format_pr_agent_message(msg)
         self.assertEqual(out.count("```") % 2, 0)
         self.assertIn(implementing._PR_BODY_TRUNCATION_MARKER, out)
@@ -256,22 +294,20 @@ class OnCommitsBodyTruncationTest(unittest.TestCase, _PatchedWorkflowMixin):
     """End-to-end: a long dev message yields a PR body that fits GitHub's
     65,536-char limit and carries the visible truncation marker."""
 
-    _GITHUB_BODY_LIMIT = 65536
-
     def test_long_body_is_capped_and_marked(self) -> None:
         gh = FakeGitHubClient()
-        issue = make_issue(60, label="implementing", title="add a thing")
+        issue = make_issue(60, label=LABEL_IMPLEMENTING, title=TEST_ISSUE_TITLE)
         gh.add_issue(issue)
 
-        long_message = "This is a long closing note. " * 5000  # ~145k chars
+        long_message = "This is a long closing note. " * LONG_BODY_REPEAT_COUNT  # ~145k chars
 
         self._run_implementing(
             gh, issue,
-            run_agent=_agent(session_id="sess-1", last_message=long_message),
+            run_agent=_agent(session_id=DEV_SESSION, last_message=long_message),
             has_new_commits=[False, True],
             dirty_files=(),
             push_branch=True,
-            first_commit_subject="feat: add a thing",
+            first_commit_subject=f"{FEATURE_PREFIX}: {TEST_ISSUE_TITLE}",
         )
 
         self.assertEqual(len(gh.opened_prs), 1)
@@ -279,20 +315,20 @@ class OnCommitsBodyTruncationTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertIn("_Last agent message:_", body)
         # Visible marker present, and the whole body fits GitHub's limit.
         self.assertIn(implementing._PR_BODY_TRUNCATION_MARKER, body)
-        self.assertLessEqual(len(body), self._GITHUB_BODY_LIMIT)
+        self.assertLessEqual(len(body), GITHUB_BODY_LIMIT)
 
     def test_short_agent_message_body_no_marker(self) -> None:
         gh = FakeGitHubClient()
-        issue = make_issue(61, label="implementing", title="add a thing")
+        issue = make_issue(BODY_SHORT_ISSUE, label=LABEL_IMPLEMENTING, title=TEST_ISSUE_TITLE)
         gh.add_issue(issue)
 
         self._run_implementing(
             gh, issue,
-            run_agent=_agent(session_id="sess-1", last_message="all done"),
+            run_agent=_agent(session_id=DEV_SESSION, last_message="all done"),
             has_new_commits=[False, True],
             dirty_files=(),
             push_branch=True,
-            first_commit_subject="feat: add a thing",
+            first_commit_subject=f"{FEATURE_PREFIX}: {TEST_ISSUE_TITLE}",
         )
 
         body = gh.opened_prs[0].body
@@ -311,7 +347,7 @@ class RepoLocalCommitStylePromptTest(
     `feat:`/`chore:`/`refactor:`/`test:` enumeration is removed."""
 
     def test_implement_prompt_teaches_local_style(self) -> None:
-        issue = make_issue(7, title="add a thing", body="please add a thing")
+        issue = make_issue(7, title=TEST_ISSUE_TITLE, body=TEST_ISSUE_BODY)
         self._assert_repo_local_style(
             workflow._build_implement_prompt(
                 _TEST_SPEC, issue, comments_text="", specs=[_TEST_SPEC]))
@@ -321,18 +357,18 @@ class RepoLocalCommitStylePromptTest(
             workflow._build_fix_prompt("please fix the typo"))
 
     def test_followup_teaches_local_style(self) -> None:
-        comments = [FakeComment(id=42, body="please rename foo to bar",
+        comments = [FakeComment(id=FEEDBACK_COMMENT_ID, body="please rename foo to bar",
                                 user=FakeUser("alice"))]
         self._assert_repo_local_style(
             workflow._build_pr_comment_followup(comments))
 
     def test_content_change_teaches_local_style(self) -> None:
-        issue = make_issue(7, title="add a thing", body="please add a thing")
+        issue = make_issue(7, title=TEST_ISSUE_TITLE, body=TEST_ISSUE_BODY)
         self._assert_repo_local_style(
             workflow._build_user_content_change_prompt(issue, comments_text=""))
 
     def test_docs_prompt_does_not_require_prefix(self) -> None:
-        issue = make_issue(7, title="add a thing", body="please add a thing")
+        issue = make_issue(7, title=TEST_ISSUE_TITLE, body=TEST_ISSUE_BODY)
         prompt = workflow._build_documentation_prompt(
             _TEST_SPEC, issue, comments_text="", specs=[_TEST_SPEC])
         # Same repo-local contract as the other commit-producing prompts.
@@ -349,11 +385,9 @@ class ForegroundOnlyPromptTest(unittest.TestCase):
     backgrounded build/test ("Miri is running, I'll continue when it
     completes") is never observed and the issue parks forever."""
 
-    MARKER = "NEVER start a background job"
-
     def test_dev_prompts_have_foreground_note(self) -> None:
-        issue = make_issue(7, title="add a thing", body="please add a thing")
-        comments = [FakeComment(id=42, body="please rename foo to bar",
+        issue = make_issue(7, title=TEST_ISSUE_TITLE, body=TEST_ISSUE_BODY)
+        comments = [FakeComment(id=FEEDBACK_COMMENT_ID, body="please rename foo to bar",
                                 user=FakeUser("alice"))]
         prompts = {
             "implement": workflow._build_implement_prompt(
@@ -370,7 +404,7 @@ class ForegroundOnlyPromptTest(unittest.TestCase):
         }
         for name, prompt in prompts.items():
             with self.subTest(prompt=name):
-                self.assertIn(self.MARKER, prompt)
+                self.assertIn(FOREGROUND_MARKER, prompt)
 
 
 class ConventionalPrTitleTest(
@@ -381,30 +415,30 @@ class ConventionalPrTitleTest(
     and falls back to a `<type>: <issue title>` form otherwise."""
 
     def test_uses_conventional_commit_subject(self) -> None:
-        gh, issue = self._seeded(issue_number=30)
+        gh, issue = self._seeded(issue_number=CONVENTIONAL_ISSUE)
 
         self._run_implementing(
             gh, issue,
-            run_agent=_agent(session_id="sess-1", last_message="done"),
+            run_agent=_agent(session_id=DEV_SESSION, last_message=DONE_MESSAGE),
             has_new_commits=[False, True],
             dirty_files=(),
             push_branch=True,
-            first_commit_subject="feat: add a sparkly thing",
+            first_commit_subject=SPARKLY_COMMIT_SUBJECT,
         )
 
         self.assertEqual(len(gh.opened_prs), 1)
         pr = gh.opened_prs[0]
         # First-commit subject is preserved verbatim, no extra prefix.
-        self.assertEqual(pr.title, "feat: add a sparkly thing")
+        self.assertEqual(pr.title, SPARKLY_COMMIT_SUBJECT)
         # Traceability still in body.
         self.assertIn(f"Resolves #{issue.number}", pr.body)
 
     def test_uses_scoped_conventional_subject(self) -> None:
-        gh, issue = self._seeded(issue_number=31)
+        gh, issue = self._seeded(issue_number=SCOPED_CONVENTIONAL_ISSUE)
 
         self._run_implementing(
             gh, issue,
-            run_agent=_agent(session_id="sess-1", last_message="done"),
+            run_agent=_agent(session_id=DEV_SESSION, last_message=DONE_MESSAGE),
             has_new_commits=[False, True],
             dirty_files=(),
             push_branch=True,
@@ -416,11 +450,11 @@ class ConventionalPrTitleTest(
         self.assertEqual(gh.opened_prs[0].title, "fix(api)!: drop legacy endpoint")
 
     def test_unconventional_falls_back_to_feat(self) -> None:
-        gh, issue = self._seeded(issue_number=32)
+        gh, issue = self._seeded(issue_number=UNCONVENTIONAL_ISSUE)
 
         self._run_implementing(
             gh, issue,
-            run_agent=_agent(session_id="sess-1", last_message="done"),
+            run_agent=_agent(session_id=DEV_SESSION, last_message=DONE_MESSAGE),
             has_new_commits=[False, True],
             dirty_files=(),
             push_branch=True,
@@ -429,15 +463,15 @@ class ConventionalPrTitleTest(
 
         pr = gh.opened_prs[0]
         # Fallback uses `feat:` (no bug label) and the issue title.
-        self.assertEqual(pr.title, "feat: add a sparkly thing")
+        self.assertEqual(pr.title, SPARKLY_COMMIT_SUBJECT)
         self.assertIn(f"Resolves #{issue.number}", pr.body)
 
     def test_bug_label_falls_back_to_fix(self) -> None:
-        gh, issue = self._seeded(issue_number=33, label_name="bug")
+        gh, issue = self._seeded(issue_number=BUG_FALLBACK_ISSUE, label_name="bug")
 
         self._run_implementing(
             gh, issue,
-            run_agent=_agent(session_id="sess-1", last_message="done"),
+            run_agent=_agent(session_id=DEV_SESSION, last_message=DONE_MESSAGE),
             has_new_commits=[False, True],
             dirty_files=(),
             push_branch=True,
@@ -448,18 +482,18 @@ class ConventionalPrTitleTest(
         self.assertEqual(gh.opened_prs[0].title, "fix: add a sparkly thing")
 
     def test_pr_title_fallback_when_no_commit_subject(self) -> None:
-        gh, issue = self._seeded(issue_number=34)
+        gh, issue = self._seeded(issue_number=EMPTY_SUBJECT_ISSUE)
 
         self._run_implementing(
             gh, issue,
-            run_agent=_agent(session_id="sess-1", last_message="done"),
+            run_agent=_agent(session_id=DEV_SESSION, last_message=DONE_MESSAGE),
             has_new_commits=[False, True],
             dirty_files=(),
             push_branch=True,
             first_commit_subject="",
         )
 
-        self.assertEqual(gh.opened_prs[0].title, "feat: add a sparkly thing")
+        self.assertEqual(gh.opened_prs[0].title, SPARKLY_COMMIT_SUBJECT)
 
 
 class ConventionalPrTitleFallbackTest(
@@ -470,13 +504,15 @@ class ConventionalPrTitleFallbackTest(
         # produce a doubled `feat: feat: ...` form.
         gh = FakeGitHubClient()
         issue = make_issue(
-            35, label="implementing", title="docs: clarify the README"
+            CONVENTIONAL_TITLE_ISSUE,
+            label=LABEL_IMPLEMENTING,
+            title="docs: clarify the README",
         )
         gh.add_issue(issue)
 
         self._run_implementing(
             gh, issue,
-            run_agent=_agent(session_id="sess-1", last_message="done"),
+            run_agent=_agent(session_id=DEV_SESSION, last_message=DONE_MESSAGE),
             has_new_commits=[False, True],
             dirty_files=(),
             push_branch=True,
@@ -489,11 +525,11 @@ class ConventionalPrTitleFallbackTest(
         # A repo-local prefix that is NOT a Conventional type (e.g. an
         # events repo's `event:`) must be preserved verbatim, not replaced
         # with a synthesized `feat:`.
-        gh, issue = self._seeded(issue_number=36)
+        gh, issue = self._seeded(issue_number=CUSTOM_PREFIX_ISSUE)
 
         self._run_implementing(
             gh, issue,
-            run_agent=_agent(session_id="sess-1", last_message="done"),
+            run_agent=_agent(session_id=DEV_SESSION, last_message=DONE_MESSAGE),
             has_new_commits=[False, True],
             dirty_files=(),
             push_branch=True,
@@ -506,11 +542,11 @@ class ConventionalPrTitleFallbackTest(
         # First commit subject is unprefixed, so the orchestrator must
         # synthesize a title -- and it honors the repo-local prefix that
         # `_infer_subject_prefix` reads from base history instead of `feat:`.
-        gh, issue = self._seeded(issue_number=37)
+        gh, issue = self._seeded(issue_number=INFERRED_PREFIX_ISSUE)
 
         self._run_implementing(
             gh, issue,
-            run_agent=_agent(session_id="sess-1", last_message="done"),
+            run_agent=_agent(session_id=DEV_SESSION, last_message=DONE_MESSAGE),
             has_new_commits=[False, True],
             dirty_files=(),
             push_branch=True,
@@ -620,42 +656,42 @@ class InferSubjectPrefixTest(unittest.TestCase, _SubjectPrefixFixtureMixin):
     def test_conventional_history_keeps_feat_default(self) -> None:
         # When the dominant prefix is itself a Conventional type, defer to
         # the bug/feat heuristic rather than echoing the history prefix.
-        self.assertEqual(self._infer("feat: a\nfix: b\nfeat: c\n"), "feat")
+        self.assertEqual(self._infer("feat: a\nfix: b\nfeat: c\n"), FEATURE_PREFIX)
 
     def test_conventional_history_bug_label_uses_fix(self) -> None:
         self.assertEqual(self._infer("feat: a\nfeat: b\n", bug=True), "fix")
 
     def test_empty_history_falls_back_to_feat(self) -> None:
-        self.assertEqual(self._infer(""), "feat")
+        self.assertEqual(self._infer(""), FEATURE_PREFIX)
 
     def test_unprefixed_history_falls_back_to_feat(self) -> None:
         # History with no `<prefix>:` subjects yields no dominant prefix.
-        self.assertEqual(self._infer("initial commit\nmore work\n"), "feat")
+        self.assertEqual(self._infer("initial commit\nmore work\n"), FEATURE_PREFIX)
 
 
 class InferSubjectPrefixGitRoutingTest(
     unittest.TestCase, _SubjectPrefixFixtureMixin,
 ):
     def test_git_error_falls_back_without_crashing(self) -> None:
-        issue = make_issue(51, title="do a thing")
+        issue = make_issue(GIT_ERROR_ISSUE, title="do a thing")
         git = _GitRecorder(returncode=1, stderr="fatal: bad revision")
-        with patch.object(branch_publication, "_git", git):
+        with patch.object(branch_publication, GIT_HELPER, git):
             prefix = workflow._infer_subject_prefix(
-                _TEST_SPEC, Path("/tmp/wt-not-real"), issue
+                _TEST_SPEC, FAKE_WORKTREE, issue
             )
-        self.assertEqual(prefix, "feat")
+        self.assertEqual(prefix, FEATURE_PREFIX)
 
     def test_reads_per_spec_base_and_remote(self) -> None:
         private_spec = config.RepoSpec(
             slug="acme/widget",
-            target_root=Path("/tmp/orchestrator-test-target-root"),
+            target_root=TEST_TARGET_ROOT,
             base_branch="master",
             remote_name="private",
         )
         git = _GitRecorder("event: x\n")
-        with patch.object(branch_publication, "_git", git):
+        with patch.object(branch_publication, GIT_HELPER, git):
             workflow._infer_subject_prefix(
-                private_spec, Path("/tmp/wt-not-real"), make_issue(52)
+                private_spec, FAKE_WORKTREE, make_issue(REMOTE_ROUTING_ISSUE)
             )
         args, _cwd = git.calls[0]
         # The history log targets `<remote>/<base>`, honoring the spec.
@@ -672,13 +708,13 @@ class FirstCommitSubjectBaseBranchTest(unittest.TestCase):
     def test_uses_per_spec_base_branch(self) -> None:
         master_spec = config.RepoSpec(
             slug="acme/legacy",
-            target_root=Path("/tmp/orchestrator-test-target-root"),
+            target_root=TEST_TARGET_ROOT,
             base_branch="master",
         )
         git = _GitRecorder("feat: hello\n")
-        with patch.object(branch_publication, "_git", git):
+        with patch.object(branch_publication, GIT_HELPER, git):
             subj = workflow._first_commit_subject(
-                master_spec, Path("/tmp/wt-not-real")
+                master_spec, FAKE_WORKTREE,
             )
         self.assertEqual(subj, "feat: hello")
         self.assertEqual(len(git.calls), 1)
@@ -686,34 +722,34 @@ class FirstCommitSubjectBaseBranchTest(unittest.TestCase):
         # The third positional arg to _git is the rev range; it must
         # reference master (the spec's base_branch), not the cached `main`.
         self.assertIn("origin/master..HEAD", args)
-        self.assertNotIn("origin/main..HEAD", args)
+        self.assertNotIn(DEFAULT_REVISION_RANGE, args)
 
     def test_default_spec_still_uses_main(self) -> None:
         # Sanity check: legacy single-repo deployments keep using `main`
         # because `_TEST_SPEC.base_branch` is `main`.
         git = _GitRecorder()
-        with patch.object(branch_publication, "_git", git):
-            workflow._first_commit_subject(_TEST_SPEC, Path("/tmp/wt-not-real"))
+        with patch.object(branch_publication, GIT_HELPER, git):
+            workflow._first_commit_subject(_TEST_SPEC, FAKE_WORKTREE)
         args, _cwd = git.calls[0]
-        self.assertIn("origin/main..HEAD", args)
+        self.assertIn(DEFAULT_REVISION_RANGE, args)
 
     def test_uses_per_spec_remote_name(self) -> None:
         # Multi-remote target clones (e.g. public `origin` + private fork
         # `private`) need the rev range to reference the configured remote.
         private_spec = config.RepoSpec(
             slug="acme/widget",
-            target_root=Path("/tmp/orchestrator-test-target-root"),
+            target_root=TEST_TARGET_ROOT,
             base_branch="main",
             remote_name="private",
         )
         git = _GitRecorder("feat: hi\n")
-        with patch.object(branch_publication, "_git", git):
+        with patch.object(branch_publication, GIT_HELPER, git):
             workflow._first_commit_subject(
-                private_spec, Path("/tmp/wt-not-real")
+                private_spec, FAKE_WORKTREE,
             )
         args, _cwd = git.calls[0]
         self.assertIn("private/main..HEAD", args)
-        self.assertNotIn("origin/main..HEAD", args)
+        self.assertNotIn(DEFAULT_REVISION_RANGE, args)
 
 
 class HasNewCommitsRemoteNameTest(unittest.TestCase):
@@ -726,12 +762,12 @@ class HasNewCommitsRemoteNameTest(unittest.TestCase):
         git = _GitRecorder("0\n")
         private_spec = config.RepoSpec(
             slug="acme/widget",
-            target_root=Path("/tmp/orchestrator-test-target-root"),
+            target_root=TEST_TARGET_ROOT,
             base_branch="main",
             remote_name="private",
         )
-        with patch.object(worktree_lifecycle, "_git", git):
-            workflow._has_new_commits(private_spec, Path("/tmp/wt-not-real"))
+        with patch.object(worktree_lifecycle, GIT_HELPER, git):
+            workflow._has_new_commits(private_spec, FAKE_WORKTREE)
         args, _cwd = git.calls[0]
         self.assertIn("private/main..HEAD", args)
-        self.assertNotIn("origin/main..HEAD", args)
+        self.assertNotIn(DEFAULT_REVISION_RANGE, args)

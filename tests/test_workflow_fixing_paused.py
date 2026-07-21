@@ -35,6 +35,7 @@ PR_HEAD_SHA = "cafe1234"
 DEV_AGENT = "claude"
 DEV_SESSION = "dev-sess"
 TRIGGER_ID = 2000
+INITIAL_COMMENT_WATERMARK = 1999
 DEBOUNCE_SECONDS = 600
 
 
@@ -68,7 +69,7 @@ def _seed_fixing_pause(gh: FakeGitHubClient) -> object:
         dev_agent=DEV_AGENT,
         dev_session_id=DEV_SESSION,
         review_round=1,
-        pr_last_comment_id=1999,
+        pr_last_comment_id=INITIAL_COMMENT_WATERMARK,
         pr_last_review_comment_id=0,
         pr_last_review_summary_id=0,
         pending_fix_at="2026-05-24T00:00:00+00:00",
@@ -112,11 +113,11 @@ class FixingLivePauseTest(unittest.TestCase, _PatchedWorkflowMixin):
         # route bookmark and park flag survive, and nothing is written -- so a
         # later tick re-discovers the same feedback once the label is removed.
         self.assertEqual(gh.write_state_calls, before_writes)
-        data = gh.pinned_data(ISSUE)
-        self.assertEqual(data.get("pr_last_comment_id"), 1999)
-        self.assertEqual(data.get("pending_fix_at"), "2026-05-24T00:00:00+00:00")
-        self.assertFalse(data.get("awaiting_human"))
-        self.assertEqual(data.get("dev_session_id"), DEV_SESSION)
+        pinned_data = gh.pinned_data(ISSUE)
+        self.assertEqual(pinned_data.get("pr_last_comment_id"), INITIAL_COMMENT_WATERMARK)
+        self.assertEqual(pinned_data.get("pending_fix_at"), "2026-05-24T00:00:00+00:00")
+        self.assertFalse(pinned_data.get("awaiting_human"))
+        self.assertEqual(pinned_data.get("dev_session_id"), DEV_SESSION)
 
     def test_unpause_republishes_via_resume(self) -> None:
         # End-to-end: tick 1 is frozen by a live pause and leaves the feedback
@@ -151,10 +152,10 @@ class FixingLivePauseTest(unittest.TestCase, _PatchedWorkflowMixin):
 
         mocks["_push_branch"].assert_called_once()
         self.assertIn((ISSUE, "validating"), gh.label_history)
-        data = gh.pinned_data(ISSUE)
-        self.assertEqual(data.get("review_round"), 0)
-        self.assertIsNone(data.get("pending_fix_at"))
-        self.assertGreaterEqual(data.get("pr_last_comment_id"), TRIGGER_ID)
+        pinned_data = gh.pinned_data(ISSUE)
+        self.assertEqual(pinned_data.get("review_round"), 0)
+        self.assertIsNone(pinned_data.get("pending_fix_at"))
+        self.assertGreaterEqual(pinned_data.get("pr_last_comment_id"), TRIGGER_ID)
 
 
 if __name__ == "__main__":

@@ -30,7 +30,52 @@ from tests.workflow_helpers import (
     _PatchedWorkflowMixin,
     _TEST_SPEC,
     _agent,
+    _issue_branch,
 )
+
+BACKEND_CLAUDE = "claude"
+KEY_AWAITING_HUMAN = "awaiting_human"
+LABEL_DONE = "done"
+LABEL_FIXING = "fixing"
+LABEL_IMPLEMENTING = "implementing"
+LABEL_REJECTED = "rejected"
+LABEL_RESOLVING_CONFLICT = "resolving_conflict"
+LABEL_VALIDATING = "validating"
+STATE_CLOSED = "closed"
+STATE_OPEN = "open"
+DEV_SESSION = "dev-sess"
+PR_HEAD_SHA = "cafe1234"
+PENDING_FIX_AT = "2026-05-23T00:00:00+00:00"
+INITIAL_COMMENT_WATERMARK = 1999
+ISSUE_FEEDBACK_ID = 2000
+REVIEW_FEEDBACK_ID = 3000
+SUMMARY_FEEDBACK_ID = 4000
+
+DISPATCH_ISSUE = 701
+MISSING_PR_ISSUE = 702
+IDEMPOTENT_PARK_ISSUE = 703
+CLOSED_WITHOUT_PR_ISSUE = 704
+MERGED_ISSUE = 705
+MERGED_PR = 801
+UNMERGED_ISSUE = 706
+UNMERGED_PR = 802
+OPEN_POLLABLE_ISSUE = 710
+CLOSED_POLLABLE_ISSUE = 711
+AUTO_MERGE_ISSUE = 720
+AUTO_MERGE_PR = 901
+
+CONFLICT_FIXTURE_ISSUE = 7
+CONFLICT_FIXTURE_PR = 42
+DRIFT_PR_NUMBER_OFFSET = 900
+DRIFT_FEEDBACK_WATERMARK = 5000
+DRIFT_PR_HEAD = "prhead00cafe1234"
+BEHIND_BASE_ISSUE = 30
+UNPUSHED_REBASE_ISSUE = 34
+IN_SYNC_ISSUE = 31
+DIRTY_WORKTREE_ISSUE = 33
+QUESTION_PARK_ISSUE = 35
+REVIEW_TRANSIENT_ISSUE = 36
+SILENT_PARK_ISSUE = 37
 
 
 class FixingLabelDefinitionTest(unittest.TestCase, _PatchedWorkflowMixin):
@@ -47,7 +92,7 @@ class FixingLabelDefinitionTest(unittest.TestCase, _PatchedWorkflowMixin):
     def test_label_is_recognized(self) -> None:
         from orchestrator.github import WORKFLOW_LABELS
 
-        self.assertIn("fixing", WORKFLOW_LABELS)
+        self.assertIn(LABEL_FIXING, WORKFLOW_LABELS)
 
     def test_fixing_label_is_in_bootstrap_specs(self) -> None:
         # Label bootstrap iterates WORKFLOW_LABEL_SPECS; if the spec entry
@@ -56,7 +101,7 @@ class FixingLabelDefinitionTest(unittest.TestCase, _PatchedWorkflowMixin):
         from orchestrator.github import WORKFLOW_LABEL_SPECS
 
         names = [name for name, _, _ in WORKFLOW_LABEL_SPECS]
-        self.assertIn("fixing", names)
+        self.assertIn(LABEL_FIXING, names)
 
     def test_label_between_review_and_conflict(
         self,
@@ -69,7 +114,7 @@ class FixingLabelDefinitionTest(unittest.TestCase, _PatchedWorkflowMixin):
 
         names = [name for name, _, _ in WORKFLOW_LABEL_SPECS]
         in_review_idx = names.index("in_review")
-        fixing_idx = names.index("fixing")
+        fixing_idx = names.index(LABEL_FIXING)
         self.assertEqual(fixing_idx, in_review_idx + 1)
 
     def test_fixing_label_is_not_family_aware(self) -> None:
@@ -77,7 +122,7 @@ class FixingLabelDefinitionTest(unittest.TestCase, _PatchedWorkflowMixin):
         # worktree, so the label must stay out of `_FAMILY_AWARE_LABELS` --
         # otherwise the parallel tick path would route it through the
         # single-threaded family bucket and defeat fan-out concurrency.
-        self.assertNotIn("fixing", workflow._FAMILY_AWARE_LABELS)
+        self.assertNotIn(LABEL_FIXING, workflow._FAMILY_AWARE_LABELS)
 
     def test_fixing_label_is_in_pr_refresh_detour_set(self) -> None:
         # Behind-base PR-having worktrees need to be routed through
@@ -86,19 +131,19 @@ class FixingLabelDefinitionTest(unittest.TestCase, _PatchedWorkflowMixin):
         # qualify) so it must be eligible for the same detour.
         from orchestrator.worktrees import _PR_REFRESH_DETOUR_LABELS
 
-        self.assertIn("fixing", _PR_REFRESH_DETOUR_LABELS)
+        self.assertIn(LABEL_FIXING, _PR_REFRESH_DETOUR_LABELS)
 
     def test_dispatcher_routes_fixing_to_handler(self) -> None:
         gh = FakeGitHubClient()
-        issue = make_issue(701, label="fixing")
+        issue = make_issue(DISPATCH_ISSUE, label=LABEL_FIXING)
         gh.add_issue(issue)
 
-        with patch.object(workflow, "_handle_fixing") as handler, \
+        with patch.object(workflow, "_handle_fixing") as fixing_handler, \
              patch.object(workflow, "_handle_pickup") as pickup, \
              patch.object(workflow, "_handle_implementing") as impl, \
              patch.object(workflow, "_handle_in_review") as in_review:
             workflow._process_issue(gh, _TEST_SPEC, issue)
-            handler.assert_called_once_with(gh, _TEST_SPEC, issue)
+            fixing_handler.assert_called_once_with(gh, _TEST_SPEC, issue)
             pickup.assert_not_called()
             impl.assert_not_called()
             in_review.assert_not_called()
@@ -112,24 +157,24 @@ class FixingTerminalRoutingTest(unittest.TestCase, _PatchedWorkflowMixin):
         # human; the label is left in place so the operator can fix
         # the relabel.
         gh = FakeGitHubClient()
-        issue = make_issue(702, label="fixing")
+        issue = make_issue(MISSING_PR_ISSUE, label=LABEL_FIXING)
         gh.add_issue(issue)
 
         workflow._process_issue(gh, _TEST_SPEC, issue)
 
         self.assertEqual(len(gh.posted_comments), 1)
         issue_number, body = gh.posted_comments[0]
-        self.assertEqual(issue_number, 702)
-        self.assertIn("fixing", body)
+        self.assertEqual(issue_number, MISSING_PR_ISSUE)
+        self.assertIn(LABEL_FIXING, body)
         self.assertIn("pr_number", body)
-        self.assertTrue(gh.pinned_data(702).get("awaiting_human"))
+        self.assertTrue(gh.pinned_data(MISSING_PR_ISSUE).get(KEY_AWAITING_HUMAN))
         # The `reason="missing_pr_number"` is recorded on the audit
         # event by `_park_awaiting_human`; the durable `park_reason`
         # field stays None (callers that need a transient/recoverable
         # tag re-set it explicitly -- this park is HITL-only).
         events_for_issue = [
             event for event in gh.recorded_events
-            if event.get("issue") == 702
+            if event.get("issue") == MISSING_PR_ISSUE
             and event.get("event") == "park_awaiting_human"
         ]
         self.assertEqual(len(events_for_issue), 1)
@@ -145,9 +190,9 @@ class FixingTerminalRoutingTest(unittest.TestCase, _PatchedWorkflowMixin):
         # not re-post the parking comment -- otherwise every polling
         # tick would spam the issue.
         gh = FakeGitHubClient()
-        issue = make_issue(703, label="fixing")
+        issue = make_issue(IDEMPOTENT_PARK_ISSUE, label=LABEL_FIXING)
         gh.add_issue(issue)
-        gh.seed_state(703, awaiting_human=True)
+        gh.seed_state(IDEMPOTENT_PARK_ISSUE, awaiting_human=True)
 
         workflow._process_issue(gh, _TEST_SPEC, issue)
 
@@ -161,7 +206,7 @@ class FixingTerminalRoutingTest(unittest.TestCase, _PatchedWorkflowMixin):
         # would spam a parking comment on a terminated thread); it leaves
         # the label alone and lets the operator relabel manually.
         gh = FakeGitHubClient()
-        issue = make_issue(704, label="fixing")
+        issue = make_issue(CLOSED_WITHOUT_PR_ISSUE, label=LABEL_FIXING)
         issue.closed = True
         gh.add_issue(issue)
 
@@ -179,27 +224,29 @@ class FixingTerminalRoutingTest(unittest.TestCase, _PatchedWorkflowMixin):
         # and run branch cleanup -- otherwise the issue sits closed +
         # `fixing` forever.
         gh = FakeGitHubClient()
-        issue = make_issue(705, label="fixing")
+        issue = make_issue(MERGED_ISSUE, label=LABEL_FIXING)
         issue.closed = True
         gh.add_issue(issue)
         pr = FakePR(
-            number=801, head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-705",
-            head=FakePRRef(sha="cafe1234"),
-            merged=True, state="closed",
+            number=MERGED_PR,
+            head_branch=_issue_branch(MERGED_ISSUE),
+            head=FakePRRef(sha=PR_HEAD_SHA),
+            merged=True,
+            state=STATE_CLOSED,
         )
         gh.add_pr(pr)
-        gh.seed_state(705, pr_number=pr.number, branch="orchestrator/geserdugarov__agent-orchestrator/issue-705")
+        gh.seed_state(MERGED_ISSUE, pr_number=pr.number, branch=_issue_branch(MERGED_ISSUE))
 
         mocks = self._run(
             lambda: workflow._process_issue(gh, _TEST_SPEC, issue),
             run_agent=_agent(),
         )
 
-        self.assertIn((705, "done"), gh.label_history)
-        self.assertIn("merged_at", gh.pinned_data(705))
+        self.assertIn((MERGED_ISSUE, LABEL_DONE), gh.label_history)
+        self.assertIn("merged_at", gh.pinned_data(MERGED_ISSUE))
         mocks["_cleanup_terminal_branch"].assert_called_once_with(
-            gh, _TEST_SPEC, 705,
-            branch="orchestrator/geserdugarov__agent-orchestrator/issue-705",
+            gh, _TEST_SPEC, MERGED_ISSUE,
+            branch=_issue_branch(MERGED_ISSUE),
         )
 
     def test_closed_unmerged_pr_finalizes_issue(
@@ -209,27 +256,29 @@ class FixingTerminalRoutingTest(unittest.TestCase, _PatchedWorkflowMixin):
         # was in `fixing`. Handler must flip to `rejected`, stamp
         # `closed_without_merge_at`, and run branch cleanup.
         gh = FakeGitHubClient()
-        issue = make_issue(706, label="fixing")
+        issue = make_issue(UNMERGED_ISSUE, label=LABEL_FIXING)
         issue.closed = True
         gh.add_issue(issue)
         pr = FakePR(
-            number=802, head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-706",
-            head=FakePRRef(sha="cafe1234"),
-            merged=False, state="closed",
+            number=UNMERGED_PR,
+            head_branch=_issue_branch(UNMERGED_ISSUE),
+            head=FakePRRef(sha=PR_HEAD_SHA),
+            merged=False,
+            state=STATE_CLOSED,
         )
         gh.add_pr(pr)
-        gh.seed_state(706, pr_number=pr.number, branch="orchestrator/geserdugarov__agent-orchestrator/issue-706")
+        gh.seed_state(UNMERGED_ISSUE, pr_number=pr.number, branch=_issue_branch(UNMERGED_ISSUE))
 
         mocks = self._run(
             lambda: workflow._process_issue(gh, _TEST_SPEC, issue),
             run_agent=_agent(),
         )
 
-        self.assertIn((706, "rejected"), gh.label_history)
-        self.assertIn("closed_without_merge_at", gh.pinned_data(706))
+        self.assertIn((UNMERGED_ISSUE, LABEL_REJECTED), gh.label_history)
+        self.assertIn("closed_without_merge_at", gh.pinned_data(UNMERGED_ISSUE))
         mocks["_cleanup_terminal_branch"].assert_called_once_with(
-            gh, _TEST_SPEC, 706,
-            branch="orchestrator/geserdugarov__agent-orchestrator/issue-706",
+            gh, _TEST_SPEC, UNMERGED_ISSUE,
+            branch=_issue_branch(UNMERGED_ISSUE),
         )
 
     def test_closed_issue_is_in_pollable_sweep(self) -> None:
@@ -237,14 +286,14 @@ class FixingTerminalRoutingTest(unittest.TestCase, _PatchedWorkflowMixin):
         # can finalize an externally-merged PR to `done` even when
         # `Resolves #N` already closed the issue.
         gh = FakeGitHubClient()
-        open_impl = make_issue(710, label="implementing")
-        closed_fixing = make_issue(711, label="fixing")
+        open_impl = make_issue(OPEN_POLLABLE_ISSUE, label=LABEL_IMPLEMENTING)
+        closed_fixing = make_issue(CLOSED_POLLABLE_ISSUE, label=LABEL_FIXING)
         closed_fixing.closed = True
         for pollable_issue in (open_impl, closed_fixing):
             gh.add_issue(pollable_issue)
 
         numbers = {issue.number for issue in gh.list_pollable_issues()}
-        self.assertEqual(numbers, {710, 711})
+        self.assertEqual(numbers, {OPEN_POLLABLE_ISSUE, CLOSED_POLLABLE_ISSUE})
 
     def test_auto_merge_skips_fixing_label(self) -> None:
         # Headline merge-safeguard contract: an approved + mergeable PR
@@ -256,26 +305,27 @@ class FixingTerminalRoutingTest(unittest.TestCase, _PatchedWorkflowMixin):
         # call back into in_review would still not fire here. The
         # `merge_calls == []` assertion below catches either drift.
         gh = FakeGitHubClient()
-        issue = make_issue(720, label="fixing")
+        issue = make_issue(AUTO_MERGE_ISSUE, label=LABEL_FIXING)
         gh.add_issue(issue)
         pr = FakePR(
-            number=901, head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-720",
-            head=FakePRRef(sha="cafe1234"),
+            number=AUTO_MERGE_PR,
+            head_branch=_issue_branch(AUTO_MERGE_ISSUE),
+            head=FakePRRef(sha=PR_HEAD_SHA),
             mergeable=True, check_state="success",
             approved=True,
         )
         gh.add_pr(pr)
         gh.seed_state(
-            720, pr_number=pr.number,
-            branch="orchestrator/geserdugarov__agent-orchestrator/issue-720",
-            dev_agent="claude",
-            dev_session_id="dev-sess",
-            pr_last_comment_id=1999,
+            AUTO_MERGE_ISSUE, pr_number=pr.number,
+            branch=_issue_branch(AUTO_MERGE_ISSUE),
+            dev_agent=BACKEND_CLAUDE,
+            dev_session_id=DEV_SESSION,
+            pr_last_comment_id=INITIAL_COMMENT_WATERMARK,
             pr_last_review_comment_id=0,
             pr_last_review_summary_id=0,
             # Pending feedback recorded by the prior in_review tick.
-            pending_fix_at="2026-05-23T00:00:00+00:00",
-            pending_fix_issue_max_id=2000,
+            pending_fix_at=PENDING_FIX_AT,
+            pending_fix_issue_max_id=ISSUE_FEEDBACK_ID,
         )
 
         self._run(
@@ -286,7 +336,7 @@ class FixingTerminalRoutingTest(unittest.TestCase, _PatchedWorkflowMixin):
         # No merge call, no flip to done -- the dispatcher routed to
         # fixing, so the in_review merge path never ran.
         self.assertEqual(gh.merge_calls, [])
-        self.assertNotIn((720, "done"), gh.label_history)
+        self.assertNotIn((AUTO_MERGE_ISSUE, LABEL_DONE), gh.label_history)
 
 
 class _FixingConflictFixtureMixin:
@@ -315,26 +365,27 @@ class _FixingConflictFixtureMixin:
         )
 
     def _seed_fixing_with_pending_feedback(self) -> None:
-        self.gh.add_issue(make_issue(7, label="fixing"))
+        self.gh.add_issue(make_issue(CONFLICT_FIXTURE_ISSUE, label=LABEL_FIXING))
         pr = FakePR(
-            number=42, head_branch="orchestrator/acme__widget/issue-7",
-            head=FakePRRef(sha="cafe1234"),
-            state="open",
+            number=CONFLICT_FIXTURE_PR,
+            head_branch="orchestrator/acme__widget/issue-7",
+            head=FakePRRef(sha=PR_HEAD_SHA),
+            state=STATE_OPEN,
         )
         self.gh.add_pr(pr)
         self.gh.seed_state(
-            7,
-            pr_number=42,
+            CONFLICT_FIXTURE_ISSUE,
+            pr_number=CONFLICT_FIXTURE_PR,
             branch="orchestrator/acme__widget/issue-7",
-            dev_agent="claude",
-            dev_session_id="dev-sess",
-            pr_last_comment_id=1999,
+            dev_agent=BACKEND_CLAUDE,
+            dev_session_id=DEV_SESSION,
+            pr_last_comment_id=INITIAL_COMMENT_WATERMARK,
             pr_last_review_comment_id=0,
             pr_last_review_summary_id=0,
-            pending_fix_at="2026-05-23T00:00:00+00:00",
-            pending_fix_issue_max_id=2000,
-            pending_fix_review_max_id=3000,
-            pending_fix_review_summary_max_id=4000,
+            pending_fix_at=PENDING_FIX_AT,
+            pending_fix_issue_max_id=ISSUE_FEEDBACK_ID,
+            pending_fix_review_max_id=REVIEW_FEEDBACK_ID,
+            pending_fix_review_summary_max_id=SUMMARY_FEEDBACK_ID,
         )
 
     def _assert_pending_feedback_intact(self) -> None:
@@ -343,14 +394,14 @@ class _FixingConflictFixtureMixin:
         # in_review watermark is unchanged so the rescan after
         # `validating` -> `in_review` surfaces the original triggering
         # comment as fresh feedback again.
-        data = self.gh.pinned_data(7)
-        self.assertEqual(data.get("pending_fix_at"), "2026-05-23T00:00:00+00:00")
-        self.assertEqual(data.get("pending_fix_issue_max_id"), 2000)
-        self.assertEqual(data.get("pending_fix_review_max_id"), 3000)
-        self.assertEqual(data.get("pending_fix_review_summary_max_id"), 4000)
-        self.assertEqual(data.get("pr_last_comment_id"), 1999)
-        self.assertEqual(data.get("pr_last_review_comment_id"), 0)
-        self.assertEqual(data.get("pr_last_review_summary_id"), 0)
+        pinned_data = self.gh.pinned_data(CONFLICT_FIXTURE_ISSUE)
+        self.assertEqual(pinned_data.get("pending_fix_at"), PENDING_FIX_AT)
+        self.assertEqual(pinned_data.get("pending_fix_issue_max_id"), ISSUE_FEEDBACK_ID)
+        self.assertEqual(pinned_data.get("pending_fix_review_max_id"), REVIEW_FEEDBACK_ID)
+        self.assertEqual(pinned_data.get("pending_fix_review_summary_max_id"), SUMMARY_FEEDBACK_ID)
+        self.assertEqual(pinned_data.get("pr_last_comment_id"), INITIAL_COMMENT_WATERMARK)
+        self.assertEqual(pinned_data.get("pr_last_review_comment_id"), 0)
+        self.assertEqual(pinned_data.get("pr_last_review_summary_id"), 0)
 
 
 class FixingConflictDetourTest(
@@ -376,11 +427,16 @@ class FixingConflictDetourTest(
              patch.object(base_sync, "_push_branch", push), \
              patch.object(base_sync, "_head_sha", head_sha), \
              git_mock:
-            workflow._sync_worktree_with_base(self.gh, self.spec, self.wt, 7)
+            workflow._sync_worktree_with_base(
+                self.gh,
+                self.spec,
+                self.wt,
+                CONFLICT_FIXTURE_ISSUE,
+            )
 
         # Clean rebase routed `fixing` straight to `validating`.
-        self.assertIn((7, "validating"), self.gh.label_history)
-        self.assertNotIn((7, "resolving_conflict"), self.gh.label_history)
+        self.assertIn((CONFLICT_FIXTURE_ISSUE, LABEL_VALIDATING), self.gh.label_history)
+        self.assertNotIn((CONFLICT_FIXTURE_ISSUE, LABEL_RESOLVING_CONFLICT), self.gh.label_history)
         self._assert_pending_feedback_intact()
 
     def test_conflict_rebase_keeps_pending_feedback(self) -> None:
@@ -405,10 +461,15 @@ class FixingConflictDetourTest(
              patch.object(base_sync, "_head_sha", head_sha), \
              patch.object(base_sync, "_git_hardened", hardened), \
              git_mock:
-            workflow._sync_worktree_with_base(self.gh, self.spec, self.wt, 7)
+            workflow._sync_worktree_with_base(
+                self.gh,
+                self.spec,
+                self.wt,
+                CONFLICT_FIXTURE_ISSUE,
+            )
 
-        self.assertIn((7, "resolving_conflict"), self.gh.label_history)
-        self.assertNotIn((7, "validating"), self.gh.label_history)
+        self.assertIn((CONFLICT_FIXTURE_ISSUE, LABEL_RESOLVING_CONFLICT), self.gh.label_history)
+        self.assertNotIn((CONFLICT_FIXTURE_ISSUE, LABEL_VALIDATING), self.gh.label_history)
         push.assert_not_called()
         self._assert_pending_feedback_intact()
 
@@ -424,8 +485,6 @@ class _FixingWorktreeDriftFixtureMixin:
     both drift shapes to `resolving_conflict` while leaving any park
     that could be hiding a real dev question parked for the human.
     """
-
-    PR_HEAD = "prhead00cafe1234"
 
     def setUp(self) -> None:
         # The router probes `wt.exists()`, so the patched `_worktree_path`
@@ -448,20 +507,20 @@ class _FixingWorktreeDriftFixtureMixin:
         park_reason: str | None = "push_failed",
         pending_fix_at: str | None = None,
     ) -> None:
-        issue = make_issue(number, label="fixing")
+        issue = make_issue(number, label=LABEL_FIXING)
         gh.add_issue(issue)
         pr = FakePR(
-            number=900 + number,
+            number=DRIFT_PR_NUMBER_OFFSET + number,
             head_branch=f"orchestrator/issue-{number}",
-            head=FakePRRef(sha=self.PR_HEAD),
-            state="open",
+            head=FakePRRef(sha=DRIFT_PR_HEAD),
+            state=STATE_OPEN,
         )
         gh.add_pr(pr)
         state = dict(
             pr_number=pr.number,
             branch=f"orchestrator/issue-{number}",
-            dev_agent="claude",
-            dev_session_id="dev-sess",
+            dev_agent=BACKEND_CLAUDE,
+            dev_session_id=DEV_SESSION,
             awaiting_human=True,
             # Default: a stuck validating-route transient (`push_failed`)
             # with no `pending_fix_at` so the validating-route recovery
@@ -470,7 +529,7 @@ class _FixingWorktreeDriftFixtureMixin:
             park_reason=park_reason,
             pending_fix_at=pending_fix_at,
             # Watermarks above any seeded comment so the rescan finds nothing.
-            pr_last_comment_id=5000,
+            pr_last_comment_id=DRIFT_FEEDBACK_WATERMARK,
             pr_last_review_comment_id=0,
             pr_last_review_summary_id=0,
             review_round=1,
@@ -483,7 +542,7 @@ class _FixingWorktreeDriftFixtureMixin:
         behind: int,
         *,
         dirty=(),
-        local_head=PR_HEAD,
+        local_head=DRIFT_PR_HEAD,
         recovery: str = "stuck",
     ):
         wt_path = Path(self._wt_dir)
@@ -513,13 +572,13 @@ class _FixingWorktreeDriftFixtureMixin:
             yield
 
     def _assert_routed(self, gh, number) -> None:
-        self.assertIn((number, "resolving_conflict"), gh.label_history)
-        data = gh.pinned_data(number)
-        self.assertFalse(data.get("awaiting_human"))
-        self.assertEqual(data.get("conflict_round"), 0)
+        self.assertIn((number, LABEL_RESOLVING_CONFLICT), gh.label_history)
+        pinned_data = gh.pinned_data(number)
+        self.assertFalse(pinned_data.get(KEY_AWAITING_HUMAN))
+        self.assertEqual(pinned_data.get("conflict_round"), 0)
         # The in_review watermark survives so the eventual in_review
         # re-entry can still re-discover any feedback past it.
-        self.assertEqual(data.get("pr_last_comment_id"), 5000)
+        self.assertEqual(pinned_data.get("pr_last_comment_id"), DRIFT_FEEDBACK_WATERMARK)
         self.post.assert_called_once()
         entered = [
             event for event in gh.recorded_events
@@ -528,7 +587,7 @@ class _FixingWorktreeDriftFixtureMixin:
             and event.get("action") == "entered"
         ]
         self.assertEqual(len(entered), 1)
-        self.assertEqual(entered[0].get("stage"), "fixing")
+        self.assertEqual(entered[0].get("stage"), LABEL_FIXING)
 
 
 class FixingWorktreeDriftRoutingTest(
@@ -538,10 +597,10 @@ class FixingWorktreeDriftRoutingTest(
         # Variant 1: stuck `push_failed` + worktree behind base ->
         # resolving_conflict rebases.
         gh = FakeGitHubClient()
-        self._seed_parked_fixing(gh, 30)
+        self._seed_parked_fixing(gh, BEHIND_BASE_ISSUE)
         with self._drift_patches(2):
-            workflow._handle_fixing(gh, _TEST_SPEC, gh.get_issue(30))
-        self._assert_routed(gh, 30)
+            workflow._handle_fixing(gh, _TEST_SPEC, gh.get_issue(BEHIND_BASE_ISSUE))
+        self._assert_routed(gh, BEHIND_BASE_ISSUE)
         self.recover.assert_called_once()
 
     def test_stuck_push_failed_unpushed_rebase_routes(self) -> None:
@@ -549,46 +608,46 @@ class FixingWorktreeDriftRoutingTest(
         # differs from the stale remote PR head -> resolving_conflict
         # recognises the already-rebased worktree and republishes it.
         gh = FakeGitHubClient()
-        self._seed_parked_fixing(gh, 34)
+        self._seed_parked_fixing(gh, UNPUSHED_REBASE_ISSUE)
         with self._drift_patches(0, local_head="079210cabc"):
-            workflow._handle_fixing(gh, _TEST_SPEC, gh.get_issue(34))
-        self._assert_routed(gh, 34)
+            workflow._handle_fixing(gh, _TEST_SPEC, gh.get_issue(UNPUSHED_REBASE_ISSUE))
+        self._assert_routed(gh, UNPUSHED_REBASE_ISSUE)
 
     def test_stuck_push_failed_in_sync_stays_parked(self) -> None:
         # On base AND local HEAD == PR head: drift is not the underlying
         # blocker. The recovery already declared "stuck" -> bail silently
         # so the human can investigate, do not re-post any comment.
         gh = FakeGitHubClient()
-        self._seed_parked_fixing(gh, 31)
-        with self._drift_patches(0, local_head=self.PR_HEAD):
-            workflow._handle_fixing(gh, _TEST_SPEC, gh.get_issue(31))
+        self._seed_parked_fixing(gh, IN_SYNC_ISSUE)
+        with self._drift_patches(0, local_head=DRIFT_PR_HEAD):
+            workflow._handle_fixing(gh, _TEST_SPEC, gh.get_issue(IN_SYNC_ISSUE))
 
-        self.assertNotIn((31, "resolving_conflict"), gh.label_history)
-        self.assertTrue(gh.pinned_data(31).get("awaiting_human"))
+        self.assertNotIn((IN_SYNC_ISSUE, LABEL_RESOLVING_CONFLICT), gh.label_history)
+        self.assertTrue(gh.pinned_data(IN_SYNC_ISSUE).get(KEY_AWAITING_HUMAN))
         self.post.assert_not_called()
 
     def test_stuck_push_failed_dirty_stays_parked(self) -> None:
         # A dirty worktree is a park an operator may be inspecting;
         # `resolving_conflict` would reset it to the remote, so leave it.
         gh = FakeGitHubClient()
-        self._seed_parked_fixing(gh, 33)
+        self._seed_parked_fixing(gh, DIRTY_WORKTREE_ISSUE)
         with self._drift_patches(5, dirty=("src/x.py",)):
-            workflow._handle_fixing(gh, _TEST_SPEC, gh.get_issue(33))
+            workflow._handle_fixing(gh, _TEST_SPEC, gh.get_issue(DIRTY_WORKTREE_ISSUE))
 
-        self.assertNotIn((33, "resolving_conflict"), gh.label_history)
-        self.assertTrue(gh.pinned_data(33).get("awaiting_human"))
+        self.assertNotIn((DIRTY_WORKTREE_ISSUE, LABEL_RESOLVING_CONFLICT), gh.label_history)
+        self.assertTrue(gh.pinned_data(DIRTY_WORKTREE_ISSUE).get(KEY_AWAITING_HUMAN))
         self.post.assert_not_called()
 
     def test_question_park_with_drift_stays_parked(self) -> None:
         # A `park_reason=None` `_on_question` shape could be a real agent
         # question or a "nothing to fix" remark; route neither by inspection.
         gh = FakeGitHubClient()
-        self._seed_parked_fixing(gh, 35, park_reason=None)
+        self._seed_parked_fixing(gh, QUESTION_PARK_ISSUE, park_reason=None)
         with self._drift_patches(7):
-            workflow._handle_fixing(gh, _TEST_SPEC, gh.get_issue(35))
+            workflow._handle_fixing(gh, _TEST_SPEC, gh.get_issue(QUESTION_PARK_ISSUE))
 
-        self.assertNotIn((35, "resolving_conflict"), gh.label_history)
-        self.assertTrue(gh.pinned_data(35).get("awaiting_human"))
+        self.assertNotIn((QUESTION_PARK_ISSUE, LABEL_RESOLVING_CONFLICT), gh.label_history)
+        self.assertTrue(gh.pinned_data(QUESTION_PARK_ISSUE).get(KEY_AWAITING_HUMAN))
         self.post.assert_not_called()
         self.recover.assert_not_called()
 
@@ -598,13 +657,13 @@ class FixingWorktreeDriftRoutingTest(
         # semantics differ from the validating route.
         gh = FakeGitHubClient()
         self._seed_parked_fixing(
-            gh, 36, pending_fix_at="2026-05-23T00:00:00+00:00",
+            gh, REVIEW_TRANSIENT_ISSUE, pending_fix_at=PENDING_FIX_AT,
         )
         with self._drift_patches(4):
-            workflow._handle_fixing(gh, _TEST_SPEC, gh.get_issue(36))
+            workflow._handle_fixing(gh, _TEST_SPEC, gh.get_issue(REVIEW_TRANSIENT_ISSUE))
 
-        self.assertNotIn((36, "resolving_conflict"), gh.label_history)
-        self.assertTrue(gh.pinned_data(36).get("awaiting_human"))
+        self.assertNotIn((REVIEW_TRANSIENT_ISSUE, LABEL_RESOLVING_CONFLICT), gh.label_history)
+        self.assertTrue(gh.pinned_data(REVIEW_TRANSIENT_ISSUE).get(KEY_AWAITING_HUMAN))
         self.post.assert_not_called()
         self.recover.assert_not_called()
 
@@ -613,12 +672,12 @@ class FixingWorktreeDriftRoutingTest(
         # (the silent-crash counter is the recovery channel, not drift)
         # so even with `pending_fix_at` unset the issue must stay parked.
         gh = FakeGitHubClient()
-        self._seed_parked_fixing(gh, 37, park_reason="agent_silent")
+        self._seed_parked_fixing(gh, SILENT_PARK_ISSUE, park_reason="agent_silent")
         with self._drift_patches(3):
-            workflow._handle_fixing(gh, _TEST_SPEC, gh.get_issue(37))
+            workflow._handle_fixing(gh, _TEST_SPEC, gh.get_issue(SILENT_PARK_ISSUE))
 
-        self.assertNotIn((37, "resolving_conflict"), gh.label_history)
-        self.assertTrue(gh.pinned_data(37).get("awaiting_human"))
+        self.assertNotIn((SILENT_PARK_ISSUE, LABEL_RESOLVING_CONFLICT), gh.label_history)
+        self.assertTrue(gh.pinned_data(SILENT_PARK_ISSUE).get(KEY_AWAITING_HUMAN))
         self.post.assert_not_called()
         self.recover.assert_not_called()
 
