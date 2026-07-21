@@ -556,22 +556,32 @@ class _SessionEvidence:
     """One logical session's availability + load evidence before window end.
 
     `available` unions every `skills_available` set the session reported;
-    `has_availability_meta` records whether any row carried that key at all,
-    so a legacy load (a trigger with no availability metadata anywhere in
-    the session) can imply availability. `adopted` unions the skills the
-    session loaded across its rows. All three are set-based, so folding the
-    same row twice (a window row is also returned by the history scan) never
-    double-counts.
+    `has_availability_meta` records whether any row carried the
+    `skills_available` *key* at all -- tracked by JSON key presence, not by
+    a non-empty array, so an explicit `skills_available: []` ("scanned,
+    found none") still registers as metadata. `adopted` unions the skills
+    the session loaded across its rows. All three are set-based, so folding
+    the same row twice (a window row is also returned by the history scan)
+    never double-counts.
     """
 
     available: set[str] = field(default_factory=set)
     adopted: set[str] = field(default_factory=set)
     has_availability_meta: bool = False
 
-    def observe(self, *, available: Sequence[str], triggered: Sequence[str]) -> None:
-        if available:
+    def observe(
+        self,
+        *,
+        available: Sequence[str],
+        available_present: bool,
+        triggered: Sequence[str],
+    ) -> None:
+        # `available_present` is the JSON key presence, kept apart from the
+        # parsed names: an explicit empty `skills_available` is metadata that
+        # blocks the legacy-load fallback, while an absent key is not.
+        if available_present:
             self.has_availability_meta = True
-            self.available.update(available)
+        self.available.update(available)
         self.adopted.update(triggered)
 
     def resolved_available(self) -> set[str]:
@@ -580,7 +590,10 @@ class _SessionEvidence:
         The reported `skills_available` union when the session carried any
         availability metadata; otherwise the loaded skills themselves -- a
         legacy load recorded before availability metadata existed implies
-        the skill was offered, so it still counts in the denominator.
+        the skill was offered, so it still counts in the denominator. An
+        explicit empty `skills_available` is metadata, so it does *not* fall
+        back: a load against a session that reported no offered skills does
+        not fabricate availability.
         """
         if self.has_availability_meta:
             return self.available
@@ -589,14 +602,12 @@ class _SessionEvidence:
 
 @dataclass(frozen=True)
 class _SkillWindowRun:
-    """One reporting-window `agent_exit` row's session + diagnostic fields."""
+    """One reporting-window `agent_exit` row's session + skill fields."""
 
     session_key: str
     cohort: _SkillCohort
     triggered: frozenset[str]
-    triggered_count: int
     incidental: frozenset[str]
-    incidental_count: int
 
 
 def _skill_window_run(row: Sequence[Any]) -> _SkillWindowRun:
@@ -604,9 +615,7 @@ def _skill_window_run(row: Sequence[Any]) -> _SkillWindowRun:
         session_key=_skill_session_key(row),
         cohort=_skill_cohort(row),
         triggered=frozenset(_as_skill_names(_row_value(row, 6, None))),
-        triggered_count=int(_row_value(row, 7, 0) or 0),
-        incidental=frozenset(_as_skill_names(_row_value(row, 8, None))),
-        incidental_count=int(_row_value(row, 9, 0) or 0),
+        incidental=frozenset(_as_skill_names(_row_value(row, 7, None))),
     )
 
 
@@ -622,9 +631,7 @@ def _skill_window_rows(
         "COALESCE(backend, 'unknown') AS backend_label, "
         "resume_session_id, session_id, id, "
         "extras -> 'skills_triggered' AS skills_triggered, "
-        "(extras ->> 'skills_triggered_count')::int AS skills_triggered_count, "
-        "extras -> 'skills_incidental' AS skills_incidental, "
-        "(extras ->> 'skills_incidental_count')::int AS skills_incidental_count "
+        "extras -> 'skills_incidental' AS skills_incidental "
         f"FROM analytics_events{clause}",
         bindings,
     )
@@ -643,6 +650,7 @@ def _skill_history_rows(
         "COALESCE(backend, 'unknown') AS backend_label, "
         "resume_session_id, session_id, id, "
         "extras -> 'skills_available' AS skills_available, "
+        "(extras -> 'skills_available') IS NOT NULL AS has_skills_available, "
         "extras -> 'skills_triggered' AS skills_triggered "
         f"FROM analytics_events{clause}",
         bindings,
@@ -667,7 +675,7 @@ def _skill_session_evidence(
     evidence: dict[str, _SessionEvidence] = {}
     for run in window_runs:
         evidence.setdefault(run.session_key, _SessionEvidence()).observe(
-            available=(), triggered=run.triggered,
+            available=(), available_present=False, triggered=run.triggered,
         )
     for row in _skill_history_rows(query, filters):
         session = evidence.get(_skill_session_key(row))
@@ -675,18 +683,26 @@ def _skill_session_evidence(
             continue
         session.observe(
             available=_as_skill_names(_row_value(row, 6, None)),
-            triggered=_as_skill_names(_row_value(row, 7, None)),
+            available_present=bool(_row_value(row, 7, False)),
+            triggered=_as_skill_names(_row_value(row, 8, None)),
         )
     return evidence
 
 
 @dataclass
 class _SkillAdoption:
-    """Per-`(repo, role, backend, skill)` session counts and window diagnostics."""
+    """Per-`(repo, role, backend, skill)` session counts and window diagnostics.
 
+    `cohort_runs` is the window `agent_exit` invocation count per
+    `(repo, role, backend)` cohort -- every run, whether or not it loaded a
+    skill -- so each skill's adoption reads against the cohort's run volume.
+    `load_rows` / `incidental` count the window runs that loaded /
+    incidentally referenced a given skill.
+    """
+
+    cohort_runs: dict[_SkillCohort, int] = field(default_factory=dict)
     sessions: dict[_SkillAdoptionKey, int] = field(default_factory=dict)
     adopted: dict[_SkillAdoptionKey, int] = field(default_factory=dict)
-    invocations: dict[_SkillAdoptionKey, int] = field(default_factory=dict)
     load_rows: dict[_SkillAdoptionKey, int] = field(default_factory=dict)
     incidental: dict[_SkillAdoptionKey, int] = field(default_factory=dict)
 
@@ -705,15 +721,13 @@ class _SkillAdoption:
         return counts
 
     def _observe_window(self, run: _SkillWindowRun) -> None:
-        # A per-run total attributed to each name the run carries: exact for
-        # the common single-skill run, an upper bound for a multi-skill one.
+        self.cohort_runs[run.cohort] = self.cohort_runs.get(run.cohort, 0) + 1
         for skill in run.triggered:
             key = (*run.cohort, skill)
-            self.invocations[key] = self.invocations.get(key, 0) + run.triggered_count
             self.load_rows[key] = self.load_rows.get(key, 0) + 1
         for skill in run.incidental:
             key = (*run.cohort, skill)
-            self.incidental[key] = self.incidental.get(key, 0) + run.incidental_count
+            self.incidental[key] = self.incidental.get(key, 0) + 1
 
     def _count_sessions(
         self,
@@ -737,7 +751,7 @@ class _SkillAdoption:
         # diagnostics (a purely incidental reference, or a load whose session
         # reported a different availability set) so no observation is dropped.
         keys = set(self.sessions)
-        keys.update(self.invocations)
+        keys.update(self.load_rows)
         keys.update(self.incidental)
         return keys
 
@@ -746,7 +760,7 @@ class _SkillAdoption:
         return [
             -self.sessions.get(key, 0),
             -self.adopted.get(key, 0),
-            -self.invocations.get(key, 0),
+            -self.cohort_runs.get((repo, role, backend), 0),
             repo,
             role,
             backend,
@@ -762,7 +776,7 @@ class _SkillAdoption:
             backend=backend,
             sessions=self.sessions.get(key, 0),
             adopted=self.adopted.get(key, 0),
-            invocations=self.invocations.get(key, 0),
+            invocations=self.cohort_runs.get((repo, role, backend), 0),
             load_rows=self.load_rows.get(key, 0),
             incidental=self.incidental.get(key, 0),
         )
@@ -819,12 +833,15 @@ def get_skill_adoption(
     included) when the events multiselect excludes `agent_exit` or is cleared.
 
     `sessions` is the denominator -- sessions in the cohort with the skill
-    available (its `skills_available` listed it, or a legacy load with no
-    availability metadata implied it). `adopted` counts the sessions that
-    loaded it, once per session. `invocations` / `load_rows` / `incidental`
-    are window-scoped diagnostics off the same window rows, so a load from
-    before the window counts toward `adopted` but not toward them. NULL
-    `agent_role` / `backend` bucket under `"unknown"`.
+    available (its `skills_available` listed it, or a legacy load with the
+    `skills_available` key absent implied it; an explicit empty set counts
+    as metadata, so it does not). `adopted` counts the sessions that loaded
+    it, once per session. `invocations` is the cohort's window `agent_exit`
+    run count (every run, so a low `load_rows` reads against it); `load_rows`
+    / `incidental` count the window runs that loaded / incidentally
+    referenced the skill. All three are window-scoped, so a load from before
+    the window counts toward `adopted` but not toward them. NULL `agent_role`
+    / `backend` bucket under `"unknown"`.
 
     Rows are ordered by `sessions` DESC, then `adopted` DESC, then
     `invocations` DESC, then a stable `(repo, agent_role, backend, skill)`

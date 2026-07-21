@@ -476,24 +476,25 @@ class SkillAdoptionRow:
     with no DDL and no rollup change, mirroring `SkillTriggerMatrixRow`.
 
     `sessions` is the denominator: how many logical sessions in the
-    cohort had this skill *available* (its `skills_available` set listed
-    the skill, or -- for a legacy load recorded before availability
-    metadata existed -- the skill was loaded and the session carried no
-    availability metadata at all, so the load implies it was offered).
-    `adopted` is the numerator: how many of those sessions actually loaded
-    the skill, counted once per session no matter how many runs or
-    invocations reached for it. `adoption_rate` is `adopted / sessions`.
+    cohort had this skill *available* -- its `skills_available` set listed
+    the skill, or, for a legacy load recorded before availability metadata
+    existed, the skill was loaded while the session's `skills_available`
+    key was absent entirely (an explicit empty set counts as metadata, so
+    it does not imply availability). `adopted` is the numerator: how many
+    of those sessions actually loaded the skill, counted once per session
+    no matter how many runs reached for it. `adoption_rate` is
+    `adopted / sessions`.
 
     `invocations`, `load_rows`, and `incidental` are explicitly
     window-scoped diagnostics -- they count only the reporting-window
-    `agent_exit` rows, not the historical evidence. `invocations` sums
-    `skills_triggered_count` over the window rows that loaded the skill
-    (three `develop` pulls in one run weigh three); `load_rows` counts
-    those rows (one per run per distinct loaded name, so the same three
-    pulls weigh one); `incidental` sums `skills_incidental_count` over
-    window rows that referenced the skill's `SKILL.md` without loading it.
-    A per-row total is attributed to each name the row carries, which is
-    exact for the common single-skill run.
+    `agent_exit` rows, not the historical evidence. `invocations` is the
+    cohort's window run count: every `(repo, agent_role, backend)` run in
+    the window, whether or not it loaded this skill, so a low `load_rows`
+    reads against the cohort's run volume (mirroring
+    `SkillTriggerMatrixRow.runs`). `load_rows` counts the window runs that
+    loaded the skill (one per run per distinct loaded name); `incidental`
+    counts the window runs that referenced the skill's `SKILL.md` without
+    loading it.
 
     `agent_role` / `backend` bucket NULLs under `"unknown"` so a cohort is
     never silently dropped. The same `TRACK_SKILL_TRIGGERS`-off caveat as

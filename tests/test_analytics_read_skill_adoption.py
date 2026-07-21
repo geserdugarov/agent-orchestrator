@@ -14,7 +14,7 @@ from tests.analytics_read_helpers import (
 _EVENT_AGENT_EXIT = "event = 'agent_exit'"
 _STAGE_ENTER = "stage_enter"
 
-# The window scan selects the incidental columns; the history scan selects
+# The window scan selects the incidental column; the history scan selects
 # `skills_available`. Each substring is unique to its query, so the fake
 # cursor routes the two `agent_exit` scans to their own canned rows
 # regardless of registration order.
@@ -42,15 +42,10 @@ def _window_row(
     resume: str | None = None,
     session: str | None = None,
     triggered: list[str] | None = None,
-    triggered_count: int | None = None,
     incidental: list[str] | None = None,
-    incidental_count: int | None = None,
 ) -> tuple:
-    """A reporting-window `agent_exit` scan row (diagnostics + identity)."""
-    return (
-        repo, role, backend, resume, session, row_id,
-        triggered, triggered_count, incidental, incidental_count,
-    )
+    """A reporting-window `agent_exit` scan row (identity + skill names)."""
+    return (repo, role, backend, resume, session, row_id, triggered, incidental)
 
 
 def _history_row(
@@ -62,10 +57,22 @@ def _history_row(
     resume: str | None = None,
     session: str | None = None,
     available: list[str] | None = None,
+    available_present: bool | None = None,
     triggered: list[str] | None = None,
 ) -> tuple:
-    """A before-window-end `agent_exit` scan row (availability + loads)."""
-    return (repo, role, backend, resume, session, row_id, available, triggered)
+    """A before-window-end `agent_exit` scan row (availability + loads).
+
+    `available_present` mirrors the SQL `(extras -> 'skills_available') IS
+    NOT NULL` key-presence flag; it defaults to "the array is not None" so a
+    caller passing `available=[]` models an explicit empty offered-set while
+    `available=None` models an absent key.
+    """
+    if available_present is None:
+        available_present = available is not None
+    return (
+        repo, role, backend, resume, session, row_id,
+        available, available_present, triggered,
+    )
 
 
 class SkillAdoptionTest(unittest.TestCase):
@@ -75,8 +82,8 @@ class SkillAdoptionTest(unittest.TestCase):
     rows, reads their availability / load evidence from every `agent_exit`
     row before the window end (ignoring the window start and stage filter),
     counts adoption once per session against the per-session
-    `skills_available` denominator, and keeps invocation loads and
-    incidental references as window-scoped diagnostics.
+    `skills_available` denominator, and keeps the cohort's window run count
+    and per-skill load / incidental rows as window-scoped diagnostics.
     """
 
     def test_unset_db_url_returns_empty(self) -> None:
@@ -106,42 +113,31 @@ class SkillAdoptionTest(unittest.TestCase):
         window_rows: list[tuple] = []
         history_rows: list[tuple] = []
         row_id = 0
-        # 36 sessions that each loaded `develop` in a single window run.
-        for index in range(36):
-            row_id += 1
-            session = f"single-{index}"
-            window_rows.append(_window_row(
-                row_id=row_id, session=session,
-                triggered=[_DEVELOP], triggered_count=3,
-            ))
-            history_rows.append(_history_row(
-                row_id=row_id, session=session,
-                available=[_DEVELOP], triggered=[_DEVELOP],
-            ))
-        # One session split across two resumed runs (shared resume id): still
-        # one adopting session, but two load rows and its own invocations.
-        for index in range(2):
-            row_id += 1
-            window_rows.append(_window_row(
-                row_id=row_id, resume="resume-1", session=f"resume-{index}",
-                triggered=[_DEVELOP], triggered_count=7,
-            ))
-            history_rows.append(_history_row(
-                row_id=row_id, resume="resume-1", session=f"resume-{index}",
-                available=[_DEVELOP], triggered=[_DEVELOP],
-            ))
-        # 4 sessions offered `develop` but that never reached for it.
-        for index in range(4):
-            row_id += 1
-            session = f"available-{index}"
-            window_rows.append(_window_row(row_id=row_id, session=session))
-            history_rows.append(_history_row(
-                row_id=row_id, session=session, available=[_DEVELOP],
-            ))
+        # 41 sessions, each a resume-anchored chain of window runs, for 122
+        # window agent_exit invocations in one cohort. 38 of those runs load
+        # `develop`, spread over 37 distinct (adopting) sessions.
+        for index in range(41):
+            anchor = f"anchor-{index}"
+            run_count = 3 if index < 40 else 2
+            load_count = 1 if index <= 35 else (2 if index == 36 else 0)
+            for run in range(run_count):
+                row_id += 1
+                triggered = [_DEVELOP] if run < load_count else None
+                window_rows.append(_window_row(
+                    row_id=row_id, resume=anchor, session=f"run-{row_id}",
+                    triggered=triggered,
+                ))
+                history_rows.append(_history_row(
+                    row_id=row_id, resume=anchor, session=f"run-{row_id}",
+                    available=[_DEVELOP], triggered=triggered,
+                ))
         conn.rows_for = {
             _WINDOW_SCAN: window_rows,
             _HISTORY_SCAN: history_rows,
         }
+        # The fixture really holds 122 window rows; `invocations` counts them,
+        # not manufactured per-load trigger totals.
+        self.assertEqual(len(window_rows), 122)
         rows = _reload_read().get_skill_adoption(connect=conn.as_connect)
         self.assertEqual(len(rows), 1)
         row = rows[0]
@@ -149,9 +145,8 @@ class SkillAdoptionTest(unittest.TestCase):
             (row.repo, row.skill, row.agent_role, row.backend),
             (_REPO, _DEVELOP, _DEVELOPER, _CLAUDE),
         )
-        # 37 of 41 sessions adopted `develop` across 122 invocations logged
-        # over 38 load rows (the resume session contributes two load rows and
-        # 14 invocations but one adopting session).
+        # 37 of 41 sessions adopted `develop` across 122 window invocations
+        # over 38 load rows.
         self.assertEqual(row.sessions, 41)
         self.assertEqual(row.adopted, 37)
         self.assertEqual(row.invocations, 122)
@@ -180,10 +175,10 @@ class SkillAdoptionTest(unittest.TestCase):
         rows = _reload_read().get_skill_adoption(connect=conn.as_connect)
         self.assertEqual(len(rows), 1)
         row = rows[0]
-        # The prior-run load keeps the session adopted, yet it stays out of
-        # the window-scoped diagnostics.
+        # The prior-run load keeps the session adopted; the window shows its
+        # one in-window invocation but no load row.
         self.assertEqual((row.sessions, row.adopted), (1, 1))
-        self.assertEqual((row.invocations, row.load_rows), (0, 0))
+        self.assertEqual((row.invocations, row.load_rows), (1, 0))
 
     def test_history_scan_drops_start_and_stage_keeps_end(self) -> None:
         conn = _FakeConnection()
@@ -211,12 +206,10 @@ class SkillAdoptionTest(unittest.TestCase):
         conn.rows_for = {
             _WINDOW_SCAN: [
                 _window_row(
-                    row_id=1, resume="r", session="a",
-                    triggered=[_DEVELOP], triggered_count=2,
+                    row_id=1, resume="r", session="a", triggered=[_DEVELOP],
                 ),
                 _window_row(
-                    row_id=2, resume="r", session="b",
-                    triggered=[_DEVELOP], triggered_count=3,
+                    row_id=2, resume="r", session="b", triggered=[_DEVELOP],
                 ),
             ],
             _HISTORY_SCAN: [
@@ -233,17 +226,17 @@ class SkillAdoptionTest(unittest.TestCase):
         rows = _reload_read().get_skill_adoption(connect=conn.as_connect)
         self.assertEqual(len(rows), 1)
         row = rows[0]
-        # Two runs sharing a resume id are one adopting session, but their
-        # window invocations and load rows both still count.
+        # Two runs sharing a resume id are one adopting session, but both
+        # their window invocations and load rows still count.
         self.assertEqual((row.sessions, row.adopted), (1, 1))
-        self.assertEqual((row.load_rows, row.invocations), (2, 5))
+        self.assertEqual((row.invocations, row.load_rows), (2, 2))
 
     def test_idless_rows_are_distinct_sessions(self) -> None:
         conn = _FakeConnection()
         conn.rows_for = {
             _WINDOW_SCAN: [
-                _window_row(row_id=1, triggered=[_DEVELOP], triggered_count=1),
-                _window_row(row_id=2, triggered=[_DEVELOP], triggered_count=1),
+                _window_row(row_id=1, triggered=[_DEVELOP]),
+                _window_row(row_id=2, triggered=[_DEVELOP]),
                 _window_row(row_id=3),
             ],
             _HISTORY_SCAN: [
@@ -256,18 +249,15 @@ class SkillAdoptionTest(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         row = rows[0]
         # Every ID-less row is its own session rather than merged into one
-        # anonymous bucket, so three distinct sessions, two of them adopting.
+        # anonymous bucket: three distinct sessions, two of them adopting.
         self.assertEqual((row.sessions, row.adopted), (3, 2))
-        self.assertEqual(row.load_rows, 2)
+        self.assertEqual((row.invocations, row.load_rows), (3, 2))
 
     def test_legacy_load_implies_availability_without_metadata(self) -> None:
         conn = _FakeConnection()
         conn.rows_for = {
             _WINDOW_SCAN: [
-                _window_row(
-                    row_id=1, session="legacy",
-                    triggered=[_DEVELOP], triggered_count=1,
-                ),
+                _window_row(row_id=1, session="legacy", triggered=[_DEVELOP]),
                 _window_row(row_id=2, session="quiet"),
             ],
             _HISTORY_SCAN: [
@@ -278,10 +268,38 @@ class SkillAdoptionTest(unittest.TestCase):
         rows = _reload_read().get_skill_adoption(connect=conn.as_connect)
         self.assertEqual(len(rows), 1)
         row = rows[0]
-        # A load with no availability metadata implies the skill was offered,
-        # so it counts in the denominator; the metadata-less quiet session
-        # with no load fabricates no availability.
+        # A load whose session never carried the `skills_available` key
+        # implies the skill was offered, so it counts in the denominator;
+        # the metadata-less quiet session with no load fabricates nothing.
         self.assertEqual((row.skill, row.sessions, row.adopted), (_DEVELOP, 1, 1))
+
+    def test_empty_availability_metadata_blocks_implied_availability(self) -> None:
+        conn = _FakeConnection()
+        conn.rows_for = {
+            _WINDOW_SCAN: [
+                _window_row(row_id=1, session="explicit-empty", triggered=[_DEVELOP]),
+                _window_row(row_id=2, session="offered", triggered=[_DEVELOP]),
+            ],
+            _HISTORY_SCAN: [
+                # Explicit "scanned, found none": the key is present but the
+                # array is empty, so the load must NOT imply availability.
+                _history_row(
+                    row_id=1, session="explicit-empty",
+                    available=[], triggered=[_DEVELOP],
+                ),
+                _history_row(
+                    row_id=2, session="offered",
+                    available=[_DEVELOP], triggered=[_DEVELOP],
+                ),
+            ],
+        }
+        rows = _reload_read().get_skill_adoption(connect=conn.as_connect)
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        # Only the genuinely-offered session counts in the denominator; the
+        # explicit-empty session's load is still a visible load row.
+        self.assertEqual((row.sessions, row.adopted), (1, 1))
+        self.assertEqual(row.load_rows, 2)
 
     def test_incidental_reference_is_window_scoped_diagnostic(self) -> None:
         conn = _FakeConnection()
@@ -289,8 +307,7 @@ class SkillAdoptionTest(unittest.TestCase):
             _WINDOW_SCAN: [
                 _window_row(
                     row_id=1, session="s1",
-                    triggered=[_DEVELOP], triggered_count=2,
-                    incidental=[_REVIEW], incidental_count=4,
+                    triggered=[_DEVELOP], incidental=[_REVIEW],
                 ),
             ],
             _HISTORY_SCAN: [
@@ -306,24 +323,24 @@ class SkillAdoptionTest(unittest.TestCase):
         self.assertEqual(
             (develop.sessions, develop.adopted, develop.invocations,
              develop.load_rows, develop.incidental),
-            (1, 1, 2, 1, 0),
+            (1, 1, 1, 1, 0),
         )
         # A path-only reference never becomes availability or adoption, but
-        # its own diagnostic row stays visible.
+        # its own diagnostic row stays visible with the cohort run count.
         review = by_skill[_REVIEW]
         self.assertEqual(
-            (review.sessions, review.adopted, review.incidental),
-            (0, 0, 4),
+            (review.sessions, review.adopted, review.load_rows, review.incidental),
+            (0, 0, 0, 1),
         )
 
     def test_null_role_and_backend_bucket_unknown(self) -> None:
         conn = _FakeConnection()
         conn.rows_for = {
             _WINDOW_SCAN: [
-                (_REPO, None, None, None, "s1", 1, [_DEVELOP], 1, None, None),
+                (_REPO, None, None, None, "s1", 1, [_DEVELOP], None),
             ],
             _HISTORY_SCAN: [
-                (_REPO, None, None, None, "s1", 1, [_DEVELOP], [_DEVELOP]),
+                (_REPO, None, None, None, "s1", 1, [_DEVELOP], True, [_DEVELOP]),
             ],
         }
         rows = _reload_read().get_skill_adoption(connect=conn.as_connect)

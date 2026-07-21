@@ -845,11 +845,12 @@ window / filter `WHERE`-clause builders).
   visible, while the retained `end` bound stops a later load from leaking backward. A session is keyed by
   `resume_session_id`, then `session_id`, then the row's primary key (an ID-less row is its own session, never merged
   into one anonymous bucket). `sessions` is the denominator — sessions in the cohort with the skill available (its
-  `skills_available` listed it, or a legacy load with no availability metadata implied it) — and `adopted` counts the
-  sessions that loaded it, once per session, with a derived `adoption_rate`. `invocations` (`SUM` of
-  `skills_triggered_count`), `load_rows` (rows that loaded the skill), and `incidental` (`SUM` of
-  `skills_incidental_count`) are explicitly window-scoped diagnostics off the same window rows, so a pre-window load
-  counts toward `adopted` but not toward them. Rows are ordered by `sessions` DESC, then `adopted` DESC, then
+  `skills_available` listed it, or a legacy load with the `skills_available` key absent implied it — an explicit empty
+  set does not) — and `adopted` counts the sessions that loaded it, once per session, with a derived `adoption_rate`.
+  `invocations` is the cohort's window `agent_exit` run count (every run, so a low `load_rows` reads against it);
+  `load_rows` counts the window runs that loaded the skill and `incidental` the window runs that referenced it without
+  loading. All three are window-scoped, so a pre-window load counts toward `adopted` but not toward them. Rows are
+  ordered by `sessions` DESC, then `adopted` DESC, then
   `invocations` DESC, then a stable `(repo, agent_role, backend, skill)` tiebreak, and the list is capped at `limit`
   (default `SKILL_ADOPTION_ROW_LIMIT` = 100; a non-positive `limit` disables the cap). The agent-exit event-filter
   short-circuit (no scans at all), NULL `"unknown"` bucketing, and `extras JSONB` / no-DDL / `TRACK_SKILL_TRIGGERS`-off
