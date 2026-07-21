@@ -71,6 +71,29 @@ KEY_CONFLICT_ROUND = "conflict_round"
 KEY_LAST_ACTION_COMMENT_ID = "last_action_comment_id"
 KEY_PR_LAST_COMMENT_ID = "pr_last_comment_id"
 
+# Git output, command, and event fields shared by the scenario assertions.
+THREE_BEHIND_STDOUT = "3\n"
+TWO_BEHIND_STDOUT = "2\n"
+UP_TO_DATE_STDOUT = "0\n"
+REBASE_COMMAND = "rebase"
+ABORT_FLAG = "--abort"
+RESET_COMMAND = "reset"
+HARD_RESET_FLAG = "--hard"
+FORCE_WITH_LEASE_KWARG = "force_with_lease"
+EVENT_FIELD = "event"
+SHA_FIELD = "sha"
+METHOD_FIELD = "method"
+
+# Stable identities and values used across park and recovery scenarios.
+HUMAN_LOGIN = "human"
+PARK_WATERMARK_COMMENT_ID = 99
+RETRY_COMMENT_ID = 200
+OUTSIDER_COMMENT_ID = 201
+UNREAD_COMMENT_ID = 500
+GIT_FAILURE_EXIT_CODE = 128
+MISSING_ISSUE_NUMBER = 9999
+NEW_REBASED_SHA = "new-rebased-sha"
+
 
 def _git_result(
     *, returncode: int = 0, stdout: str = "", stderr: str = "",
@@ -129,7 +152,7 @@ class _RebaseAnchorRecorder:
 # one place so a helper rename lands here instead of in every `with` block.
 _BASE_SYNC_TARGETS = MappingProxyType({
     "dirty": "_worktree_dirty_files",
-    "rebase": "_rebase_base_into_worktree",
+    REBASE_COMMAND: "_rebase_base_into_worktree",
     "push": "_push_branch",
     "head_sha": "_head_sha",
     "git": "_git",
@@ -212,7 +235,10 @@ class RefreshBaseAndWorktreesUnitTest(unittest.TestCase):
         ):
             workflow._refresh_base_and_worktrees(self.gh, self.spec)
 
-        called_numbers = sorted(c.args[3] for c in sync.call_args_list)
+        called_numbers = sorted(
+            recorded_call.args[3]
+            for recorded_call in sync.call_args_list
+        )
         self.assertEqual(called_numbers, [7, 42])
 
     def test_per_worktree_exception_is_swallowed(self) -> None:
@@ -348,7 +374,7 @@ class CleanRebaseRoutingUnitTest(_SyncWorktreeWithBaseFixture, unittest.TestCase
         push = MagicMock(return_value=True)
         head_sha = MagicMock(side_effect=[BEFORE_SHA, AFTER_SHA])
         # Behind base by 3 commits.
-        git_mock = MagicMock(return_value=_git_result(stdout="3\n"))
+        git_mock = MagicMock(return_value=_git_result(stdout=THREE_BEHIND_STDOUT))
         with _patch_base_sync(
             dirty=MagicMock(return_value=[]), rebase=merge, push=push,
             head_sha=head_sha, git=git_mock,
@@ -359,7 +385,7 @@ class CleanRebaseRoutingUnitTest(_SyncWorktreeWithBaseFixture, unittest.TestCase
         # Push with force-with-lease pinned to the pre-rebase SHA.
         push.assert_called_once()
         push_kwargs = push.call_args.kwargs
-        self.assertEqual(push_kwargs.get("force_with_lease"), BEFORE_SHA)
+        self.assertEqual(push_kwargs.get(FORCE_WITH_LEASE_KWARG), BEFORE_SHA)
         # Label flipped to validating, NOT resolving_conflict.
         self.assertIn((ISSUE, LABEL_VALIDATING), self.gh.label_history)
         self.assertNotIn((ISSUE, LABEL_RESOLVING_CONFLICT), self.gh.label_history)
@@ -373,13 +399,13 @@ class CleanRebaseRoutingUnitTest(_SyncWorktreeWithBaseFixture, unittest.TestCase
         # `conflict_round` was NOT seeded -- this is no longer a conflict path.
         self.assertIsNone(state.get(KEY_CONFLICT_ROUND))
         # A `base_rebased` audit event was emitted carrying the new head SHA.
-        rebased = [e for e in self.gh.recorded_events if e.get("event") == EVENT_BASE_REBASED]
+        rebased = [event for event in self.gh.recorded_events if event.get(EVENT_FIELD) == EVENT_BASE_REBASED]
         self.assertEqual(len(rebased), 1)
-        self.assertEqual(rebased[0].get("sha"), AFTER_SHA)
+        self.assertEqual(rebased[0].get(SHA_FIELD), AFTER_SHA)
         self.assertEqual(rebased[0].get("stage"), LABEL_IN_REVIEW)
         # No `conflict_round` audit event for a clean rebase.
         conflict_rounds = [
-            e for e in self.gh.recorded_events if e.get("event") == EVENT_CONFLICT_ROUND
+            event for event in self.gh.recorded_events if event.get(EVENT_FIELD) == EVENT_CONFLICT_ROUND
         ]
         self.assertEqual(conflict_rounds, [])
 
@@ -400,7 +426,7 @@ class CleanRebaseRoutingUnitTest(_SyncWorktreeWithBaseFixture, unittest.TestCase
         merge = MagicMock(return_value=(False, ["src/feature.py", "tests/foo.py"]))
         push = MagicMock()
         head_sha = MagicMock(return_value=BEFORE_SHA)
-        git_mock = MagicMock(return_value=_git_result(stdout="3\n"))
+        git_mock = MagicMock(return_value=_git_result(stdout=THREE_BEHIND_STDOUT))
         hardened = MagicMock(return_value=_git_result())
         with _patch_base_sync(
             dirty=MagicMock(return_value=[]), rebase=merge, push=push,
@@ -410,8 +436,8 @@ class CleanRebaseRoutingUnitTest(_SyncWorktreeWithBaseFixture, unittest.TestCase
         # Rebase was attempted, then aborted.
         merge.assert_called_once()
         abort_calls = [
-            c for c in hardened.call_args_list
-            if c.args[:2] == ("rebase", "--abort")
+            recorded_call for recorded_call in hardened.call_args_list
+            if recorded_call.args[:2] == (REBASE_COMMAND, ABORT_FLAG)
         ]
         self.assertEqual(len(abort_calls), 1)
         # Push MUST NOT have been called -- the agent resolves the conflicts.
@@ -433,12 +459,12 @@ class CleanRebaseRoutingUnitTest(_SyncWorktreeWithBaseFixture, unittest.TestCase
         # too -- a null sha here would silently break event-log
         # downstreams that key off the field.
         entered = [
-            e for e in self.gh.recorded_events
-            if e.get("event") == EVENT_CONFLICT_ROUND and e.get("action") == "entered"
+            event for event in self.gh.recorded_events
+            if event.get(EVENT_FIELD) == EVENT_CONFLICT_ROUND and event.get("action") == "entered"
         ]
         self.assertEqual(len(entered), 1)
         self.assertEqual(entered[0].get("stage"), LABEL_IN_REVIEW)
-        self.assertEqual(entered[0].get("sha"), CONFLICT_PR_HEAD_SHA)
+        self.assertEqual(entered[0].get(SHA_FIELD), CONFLICT_PR_HEAD_SHA)
 
     def test_validating_rebase_stays_validating(self) -> None:
         # Validating + clean rebase: stays validating (label flip is a
@@ -450,7 +476,7 @@ class CleanRebaseRoutingUnitTest(_SyncWorktreeWithBaseFixture, unittest.TestCase
         merge = MagicMock(return_value=(True, []))
         push = MagicMock(return_value=True)
         head_sha = MagicMock(side_effect=[BEFORE_SHA, AFTER_SHA])
-        git_mock = MagicMock(return_value=_git_result(stdout="2\n"))
+        git_mock = MagicMock(return_value=_git_result(stdout=TWO_BEHIND_STDOUT))
         with _patch_base_sync(
             dirty=MagicMock(return_value=[]), rebase=merge, push=push,
             head_sha=head_sha, git=git_mock,
@@ -474,7 +500,7 @@ class CleanRebaseRoutingUnitTest(_SyncWorktreeWithBaseFixture, unittest.TestCase
         merge = MagicMock(return_value=(True, []))
         push = MagicMock(return_value=True)
         head_sha = MagicMock(side_effect=[BEFORE_SHA, AFTER_SHA])
-        git_mock = MagicMock(return_value=_git_result(stdout="2\n"))
+        git_mock = MagicMock(return_value=_git_result(stdout=TWO_BEHIND_STDOUT))
         with _patch_base_sync(
             dirty=MagicMock(return_value=[]), rebase=merge, push=push,
             head_sha=head_sha, git=git_mock,
@@ -499,7 +525,7 @@ class CleanRebaseRoutingUnitTest(_SyncWorktreeWithBaseFixture, unittest.TestCase
         merge = MagicMock(return_value=(True, []))
         push = MagicMock(return_value=False)  # lease rejection
         head_sha = MagicMock(side_effect=[BEFORE_SHA, AFTER_SHA])
-        git_mock = MagicMock(return_value=_git_result(stdout="2\n"))
+        git_mock = MagicMock(return_value=_git_result(stdout=TWO_BEHIND_STDOUT))
         hardened = MagicMock(return_value=_git_result())
         with _patch_base_sync(
             dirty=MagicMock(return_value=[]), rebase=merge, push=push,
@@ -517,8 +543,8 @@ class CleanRebaseRoutingUnitTest(_SyncWorktreeWithBaseFixture, unittest.TestCase
         # the validating reviewer / in_review handler do not read a
         # local HEAD that is NOT on the PR.
         reset_calls = [
-            c for c in hardened.call_args_list
-            if c.args[:3] == ("reset", "--hard", BEFORE_SHA)
+            recorded_call for recorded_call in hardened.call_args_list
+            if recorded_call.args[:3] == (RESET_COMMAND, HARD_RESET_FLAG, BEFORE_SHA)
         ]
         self.assertEqual(
             len(reset_calls), 1,
@@ -556,7 +582,7 @@ class CleanRebaseRoutingUnitTest(_SyncWorktreeWithBaseFixture, unittest.TestCase
         merge = MagicMock(return_value=(True, []))
         push = MagicMock(return_value=False)
         head_sha = MagicMock(side_effect=[BEFORE_SHA, AFTER_SHA])
-        git_mock = MagicMock(return_value=_git_result(stdout="2\n"))
+        git_mock = MagicMock(return_value=_git_result(stdout=TWO_BEHIND_STDOUT))
         hardened = MagicMock(return_value=_git_result())
 
         # Spy on `_handle_in_review` so we can assert it ran exactly
@@ -603,14 +629,14 @@ class RebaseFailureRoutingUnitTest(_SyncWorktreeWithBaseFixture, unittest.TestCa
         merge = MagicMock(return_value=(True, []))
         push = MagicMock()
         head_sha = MagicMock(side_effect=[BEFORE_SHA, AFTER_SHA])
-        git_mock = MagicMock(return_value=_git_result(stdout="2\n"))
+        git_mock = MagicMock(return_value=_git_result(stdout=TWO_BEHIND_STDOUT))
         hardened = MagicMock(return_value=_git_result())
 
         # First dirty-check (the pre-rebase pre-flight) clean; second
         # dirty-check (after the rebase, just before push) dirty.
         dirty_calls = iter([[], ["scratch.py"]])
         with _patch_base_sync(
-            dirty=MagicMock(side_effect=lambda *_a, **_k: next(dirty_calls)),
+            dirty=MagicMock(side_effect=lambda *_args, **_kwargs: next(dirty_calls)),
             rebase=merge, push=push, head_sha=head_sha, git=git_mock,
             hardened=hardened,
         ):
@@ -622,13 +648,13 @@ class RebaseFailureRoutingUnitTest(_SyncWorktreeWithBaseFixture, unittest.TestCa
         # Reset local HEAD back to the pre-rebase SHA and clean up
         # untracked files left by the rebase.
         reset_calls = [
-            c for c in hardened.call_args_list
-            if c.args[:3] == ("reset", "--hard", BEFORE_SHA)
+            recorded_call for recorded_call in hardened.call_args_list
+            if recorded_call.args[:3] == (RESET_COMMAND, HARD_RESET_FLAG, BEFORE_SHA)
         ]
         self.assertEqual(len(reset_calls), 1, hardened.call_args_list)
         clean_calls = [
-            c for c in hardened.call_args_list
-            if c.args[:2] == ("clean", "-fd")
+            recorded_call for recorded_call in hardened.call_args_list
+            if recorded_call.args[:2] == ("clean", "-fd")
         ]
         self.assertEqual(len(clean_calls), 1, hardened.call_args_list)
         # Parked awaiting human with the auto-rebase dirty reason.
@@ -652,7 +678,7 @@ class RebaseFailureRoutingUnitTest(_SyncWorktreeWithBaseFixture, unittest.TestCa
         merge = MagicMock(return_value=(False, []))
         push = MagicMock()
         head_sha = MagicMock(return_value=BEFORE_SHA)
-        git_mock = MagicMock(return_value=_git_result(stdout="2\n"))
+        git_mock = MagicMock(return_value=_git_result(stdout=TWO_BEHIND_STDOUT))
         hardened = MagicMock(return_value=_git_result())
         with _patch_base_sync(
             dirty=MagicMock(return_value=[]), rebase=merge, push=push,
@@ -661,8 +687,8 @@ class RebaseFailureRoutingUnitTest(_SyncWorktreeWithBaseFixture, unittest.TestCa
             workflow._sync_worktree_with_base(self.gh, self.spec, self.wt, ISSUE)
         # `git rebase --abort` issued exactly once.
         abort_calls = [
-            c for c in hardened.call_args_list
-            if c.args[:2] == ("rebase", "--abort")
+            recorded_call for recorded_call in hardened.call_args_list
+            if recorded_call.args[:2] == (REBASE_COMMAND, ABORT_FLAG)
         ]
         self.assertEqual(len(abort_calls), 1, hardened.call_args_list)
         # No push, no label flip.
@@ -688,15 +714,15 @@ class AutoRebaseParkUnitTest(_SyncWorktreeWithBaseFixture, unittest.TestCase):
         self._seed_pr_issue(
             awaiting_human=True,
             park_reason=PARK_PUSH_FAILED,
-            last_action_comment_id=99,
+            last_action_comment_id=PARK_WATERMARK_COMMENT_ID,
         )
         self._add_pr()
         # Fresh human comment landed after the park's watermark.
-        self._add_comment(200, "branch reconciled, please retry", "human")
+        self._add_comment(RETRY_COMMENT_ID, "branch reconciled, please retry", HUMAN_LOGIN)
         merge = MagicMock(return_value=(True, []))
         push = MagicMock(return_value=True)
         head_sha = MagicMock(side_effect=[BEFORE_SHA, AFTER_SHA])
-        git_mock = MagicMock(return_value=_git_result(stdout="2\n"))
+        git_mock = MagicMock(return_value=_git_result(stdout=TWO_BEHIND_STDOUT))
         with _patch_base_sync(
             dirty=MagicMock(return_value=[]), rebase=merge, push=push,
             head_sha=head_sha, git=git_mock,
@@ -707,7 +733,7 @@ class AutoRebaseParkUnitTest(_SyncWorktreeWithBaseFixture, unittest.TestCase):
         state = self.gh.pinned_data(ISSUE)
         self.assertFalse(state.get(KEY_AWAITING_HUMAN))
         self.assertIsNone(state.get(KEY_PARK_REASON))
-        self.assertEqual(state.get(KEY_LAST_ACTION_COMMENT_ID), 200)
+        self.assertEqual(state.get(KEY_LAST_ACTION_COMMENT_ID), RETRY_COMMENT_ID)
         # Clean rebase + push succeeded; issue routed to validating.
         merge.assert_called_once()
         push.assert_called_once()
@@ -728,16 +754,16 @@ class AutoRebaseParkUnitTest(_SyncWorktreeWithBaseFixture, unittest.TestCase):
         self._seed_pr_issue(
             awaiting_human=True,
             park_reason=PARK_PUSH_FAILED,
-            last_action_comment_id=99,
+            last_action_comment_id=PARK_WATERMARK_COMMENT_ID,
         )
         self._add_pr()
         # Fresh human comment past the watermark.
-        self._add_comment(200, "reconciled, please retry", "human")
+        self._add_comment(RETRY_COMMENT_ID, "reconciled, please retry", HUMAN_LOGIN)
         # The pre-rebase dirty check fires (worktree has uncommitted
         # changes left by some external race after the prior park).
         merge = MagicMock()
         push = MagicMock()
-        git_mock = MagicMock(return_value=_git_result(stdout="2\n"))
+        git_mock = MagicMock(return_value=_git_result(stdout=TWO_BEHIND_STDOUT))
         with _patch_base_sync(
             dirty=MagicMock(return_value=["scratch.py"]),
             rebase=merge, push=push, git=git_mock,
@@ -755,7 +781,7 @@ class AutoRebaseParkUnitTest(_SyncWorktreeWithBaseFixture, unittest.TestCase):
         self.assertEqual(
             pinned_state.get(KEY_PARK_REASON), PARK_PUSH_FAILED,
         )
-        self.assertEqual(pinned_state.get(KEY_LAST_ACTION_COMMENT_ID), 99)
+        self.assertEqual(pinned_state.get(KEY_LAST_ACTION_COMMENT_ID), PARK_WATERMARK_COMMENT_ID)
 
     def test_auto_park_survives_pr_fetch_failure(
         self,
@@ -766,13 +792,13 @@ class AutoRebaseParkUnitTest(_SyncWorktreeWithBaseFixture, unittest.TestCase):
         self._seed_pr_issue(
             awaiting_human=True,
             park_reason=PARK_PUSH_FAILED,
-            last_action_comment_id=99,
+            last_action_comment_id=PARK_WATERMARK_COMMENT_ID,
         )
         # No PR added -- `gh.get_pr` raises.
-        self._add_comment(200, "retry", "human")
+        self._add_comment(RETRY_COMMENT_ID, "retry", HUMAN_LOGIN)
         merge = MagicMock()
         push = MagicMock()
-        git_mock = MagicMock(return_value=_git_result(stdout="2\n"))
+        git_mock = MagicMock(return_value=_git_result(stdout=TWO_BEHIND_STDOUT))
         with _patch_base_sync(
             dirty=MagicMock(return_value=[]), rebase=merge, push=push,
             git=git_mock,
@@ -786,7 +812,7 @@ class AutoRebaseParkUnitTest(_SyncWorktreeWithBaseFixture, unittest.TestCase):
         self.assertEqual(
             state.get(KEY_PARK_REASON), PARK_PUSH_FAILED,
         )
-        self.assertEqual(state.get(KEY_LAST_ACTION_COMMENT_ID), 99)
+        self.assertEqual(state.get(KEY_LAST_ACTION_COMMENT_ID), PARK_WATERMARK_COMMENT_ID)
 
     def test_auto_park_stays_parked_without_comment(self) -> None:
         # No new human comment after the park's watermark -- the human
@@ -795,14 +821,14 @@ class AutoRebaseParkUnitTest(_SyncWorktreeWithBaseFixture, unittest.TestCase):
         self._seed_pr_issue(
             awaiting_human=True,
             park_reason=PARK_PUSH_FAILED,
-            last_action_comment_id=99,
+            last_action_comment_id=PARK_WATERMARK_COMMENT_ID,
         )
         self._add_pr()
         # No new comments past the watermark.
         merge = MagicMock()
         push = MagicMock()
         head_sha = MagicMock()
-        git_mock = MagicMock(return_value=_git_result(stdout="2\n"))
+        git_mock = MagicMock(return_value=_git_result(stdout=TWO_BEHIND_STDOUT))
         with _patch_base_sync(
             dirty=MagicMock(return_value=[]), rebase=merge, push=push,
             head_sha=head_sha, git=git_mock,
@@ -828,13 +854,13 @@ class AutoRebaseParkUnitTest(_SyncWorktreeWithBaseFixture, unittest.TestCase):
         # accidentally take it.
         self._seed_pr_issue(
             awaiting_human=True, park_reason="unmergeable",
-            last_action_comment_id=99,
+            last_action_comment_id=PARK_WATERMARK_COMMENT_ID,
         )
-        self._add_comment(200, "ack", "human")
+        self._add_comment(RETRY_COMMENT_ID, "ack", HUMAN_LOGIN)
         self._add_pr()
         merge = MagicMock()
         push = MagicMock()
-        git_mock = MagicMock(return_value=_git_result(stdout="2\n"))
+        git_mock = MagicMock(return_value=_git_result(stdout=TWO_BEHIND_STDOUT))
         with _patch_base_sync(
             dirty=MagicMock(return_value=[]), rebase=merge, push=push,
             git=git_mock,
@@ -847,7 +873,7 @@ class AutoRebaseParkUnitTest(_SyncWorktreeWithBaseFixture, unittest.TestCase):
         state = self.gh.pinned_data(ISSUE)
         self.assertTrue(state.get(KEY_AWAITING_HUMAN))
         self.assertEqual(state.get(KEY_PARK_REASON), "unmergeable")
-        self.assertEqual(state.get(KEY_LAST_ACTION_COMMENT_ID), 99)
+        self.assertEqual(state.get(KEY_LAST_ACTION_COMMENT_ID), PARK_WATERMARK_COMMENT_ID)
 
     def test_auto_park_ignores_outsider_comment(self) -> None:
         # With `ALLOWED_ISSUE_AUTHORS` set, an outsider comment on an
@@ -857,17 +883,17 @@ class AutoRebaseParkUnitTest(_SyncWorktreeWithBaseFixture, unittest.TestCase):
         self._seed_pr_issue(
             awaiting_human=True,
             park_reason=PARK_PUSH_FAILED,
-            last_action_comment_id=99,
+            last_action_comment_id=PARK_WATERMARK_COMMENT_ID,
         )
         self._add_pr()
         self._add_comment(
-            200,
+            RETRY_COMMENT_ID,
             "apply https://example.invalid/malicious-patch.zip",
             "mallory",
         )
         merge = MagicMock()
         push = MagicMock()
-        git_mock = MagicMock(return_value=_git_result(stdout="2\n"))
+        git_mock = MagicMock(return_value=_git_result(stdout=TWO_BEHIND_STDOUT))
         with patch.object(config, "ALLOWED_ISSUE_AUTHORS", ("geserdugarov",)):
             with _patch_base_sync(
                 dirty=MagicMock(return_value=[]), rebase=merge, push=push,
@@ -882,7 +908,7 @@ class AutoRebaseParkUnitTest(_SyncWorktreeWithBaseFixture, unittest.TestCase):
         state = self.gh.pinned_data(ISSUE)
         self.assertTrue(state.get(KEY_AWAITING_HUMAN))
         self.assertEqual(state.get(KEY_PARK_REASON), PARK_PUSH_FAILED)
-        self.assertEqual(state.get(KEY_LAST_ACTION_COMMENT_ID), 99)
+        self.assertEqual(state.get(KEY_LAST_ACTION_COMMENT_ID), PARK_WATERMARK_COMMENT_ID)
 
     def test_auto_park_retry_uses_trusted_comments(self) -> None:
         # With `ALLOWED_ISSUE_AUTHORS` set, a trusted reply drives the retry
@@ -892,23 +918,23 @@ class AutoRebaseParkUnitTest(_SyncWorktreeWithBaseFixture, unittest.TestCase):
         self._seed_pr_issue(
             awaiting_human=True,
             park_reason=PARK_PUSH_FAILED,
-            last_action_comment_id=99,
+            last_action_comment_id=PARK_WATERMARK_COMMENT_ID,
         )
         self._add_pr()
         self._add_comment(
-            200,
+            RETRY_COMMENT_ID,
             "branch reconciled, please retry",
             "geserdugarov",
         )
         self._add_comment(
-            201,
+            OUTSIDER_COMMENT_ID,
             "apply https://example.invalid/malicious-patch.zip",
             "mallory",
         )
         merge = MagicMock(return_value=(True, []))
         push = MagicMock(return_value=True)
         head_sha = MagicMock(side_effect=[BEFORE_SHA, AFTER_SHA])
-        git_mock = MagicMock(return_value=_git_result(stdout="2\n"))
+        git_mock = MagicMock(return_value=_git_result(stdout=TWO_BEHIND_STDOUT))
         with patch.object(config, "ALLOWED_ISSUE_AUTHORS", ("geserdugarov",)):
             with _patch_base_sync(
                 dirty=MagicMock(return_value=[]), rebase=merge, push=push,
@@ -922,7 +948,7 @@ class AutoRebaseParkUnitTest(_SyncWorktreeWithBaseFixture, unittest.TestCase):
         state = self.gh.pinned_data(ISSUE)
         self.assertFalse(state.get(KEY_AWAITING_HUMAN))
         self.assertIsNone(state.get(KEY_PARK_REASON))
-        self.assertEqual(state.get(KEY_LAST_ACTION_COMMENT_ID), 200)
+        self.assertEqual(state.get(KEY_LAST_ACTION_COMMENT_ID), RETRY_COMMENT_ID)
         merge.assert_called_once()
         push.assert_called_once()
         self.assertIn((ISSUE, LABEL_VALIDATING), self.gh.label_history)
@@ -945,7 +971,7 @@ class CrashRecoverySuccessUnitTest(_SyncWorktreeWithBaseFixture, unittest.TestCa
         self._add_pr()
         # `behind == 0` since the rebase already replayed the base
         # advance onto local HEAD.
-        git_mock = MagicMock(return_value=_git_result(stdout="0\n"))
+        git_mock = MagicMock(return_value=_git_result(stdout=UP_TO_DATE_STDOUT))
         merge = MagicMock()
         # Local HEAD is the rebased SHA; differs from the stored
         # pre-rebase anchor so the recovery branch doesn't bail as a
@@ -970,7 +996,7 @@ class CrashRecoverySuccessUnitTest(_SyncWorktreeWithBaseFixture, unittest.TestCa
         # original pre-rebase SHA.
         push.assert_called_once()
         self.assertEqual(
-            push.call_args.kwargs.get("force_with_lease"), BEFORE_SHA,
+            push.call_args.kwargs.get(FORCE_WITH_LEASE_KWARG), BEFORE_SHA,
         )
         # Normal rebase did NOT run again -- recovery handled it.
         merge.assert_not_called()
@@ -981,10 +1007,10 @@ class CrashRecoverySuccessUnitTest(_SyncWorktreeWithBaseFixture, unittest.TestCa
         self.assertIsNone(state.get(KEY_PENDING_PUSH_SHA))
         self.assertEqual(state.get(KEY_REVIEW_ROUND), 0)
         # `base_rebased` audit event records the crash-recovery method.
-        rebased = [e for e in self.gh.recorded_events if e.get("event") == EVENT_BASE_REBASED]
+        rebased = [event for event in self.gh.recorded_events if event.get(EVENT_FIELD) == EVENT_BASE_REBASED]
         self.assertEqual(len(rebased), 1)
-        self.assertEqual(rebased[0].get("method"), "crash_recovery_pushed")
-        self.assertEqual(rebased[0].get("sha"), REBASED_SHA)
+        self.assertEqual(rebased[0].get(METHOD_FIELD), "crash_recovery_pushed")
+        self.assertEqual(rebased[0].get(SHA_FIELD), REBASED_SHA)
 
     def test_crash_recovery_finishes_landed_push(self) -> None:
         # Scenario 2: a prior tick set the anchor, rebased, AND pushed
@@ -1000,7 +1026,7 @@ class CrashRecoverySuccessUnitTest(_SyncWorktreeWithBaseFixture, unittest.TestCa
             review_round=3,
         )
         self._add_pr()
-        git_mock = MagicMock(return_value=_git_result(stdout="0\n"))
+        git_mock = MagicMock(return_value=_git_result(stdout=UP_TO_DATE_STDOUT))
         merge = MagicMock()
         head_sha = MagicMock(return_value=REBASED_SHA)
         # Local HEAD == remote PR head: ahead == 0, behind == 0.
@@ -1027,10 +1053,10 @@ class CrashRecoverySuccessUnitTest(_SyncWorktreeWithBaseFixture, unittest.TestCa
         state = self.gh.pinned_data(ISSUE)
         self.assertIsNone(state.get(KEY_PENDING_PUSH_SHA))
         self.assertEqual(state.get(KEY_REVIEW_ROUND), 0)
-        rebased = [e for e in self.gh.recorded_events if e.get("event") == EVENT_BASE_REBASED]
+        rebased = [event for event in self.gh.recorded_events if event.get(EVENT_FIELD) == EVENT_BASE_REBASED]
         self.assertEqual(len(rebased), 1)
         self.assertEqual(
-            rebased[0].get("method"), "crash_recovery_relabel_only",
+            rebased[0].get(METHOD_FIELD), "crash_recovery_relabel_only",
         )
 
     def test_crash_recovery_clears_same_head_flag(
@@ -1047,7 +1073,7 @@ class CrashRecoverySuccessUnitTest(_SyncWorktreeWithBaseFixture, unittest.TestCa
         self._add_pr()
         # Behind base by 2 (the original behind that triggered the
         # rebase before the crash).
-        git_mock = MagicMock(return_value=_git_result(stdout="2\n"))
+        git_mock = MagicMock(return_value=_git_result(stdout=TWO_BEHIND_STDOUT))
         # First `_head_sha` (recovery) reports the pre-rebase SHA
         # (matches the anchor); subsequent calls (normal flow) also
         # return the same value until the new rebase moves HEAD.
@@ -1073,10 +1099,10 @@ class CrashRecoverySuccessUnitTest(_SyncWorktreeWithBaseFixture, unittest.TestCa
         # Normal-flow rebase event, NOT a crash-recovery one.
         base_rebased_events = [
             event for event in self.gh.recorded_events
-            if event.get("event") == EVENT_BASE_REBASED
+            if event.get(EVENT_FIELD) == EVENT_BASE_REBASED
         ]
         self.assertEqual(len(base_rebased_events), 1)
-        self.assertEqual(base_rebased_events[0].get("method"), "auto_clean_rebase")
+        self.assertEqual(base_rebased_events[0].get(METHOD_FIELD), "auto_clean_rebase")
 
 
 class _CrashRecoveryVerificationFixture(_SyncWorktreeWithBaseFixture):
@@ -1102,7 +1128,7 @@ class _CrashRecoveryVerificationFixture(_SyncWorktreeWithBaseFixture):
             review_round=3,
         )
         self._add_pr()
-        git_mock = MagicMock(return_value=_git_result(stdout="0\n"))
+        git_mock = MagicMock(return_value=_git_result(stdout=UP_TO_DATE_STDOUT))
         head_sha_mock = MagicMock(return_value=local_head)
         ahead_behind_mock = MagicMock(return_value=ahead_behind)
         fetch_mock = MagicMock(
@@ -1141,8 +1167,8 @@ class _CrashRecoveryVerificationFixture(_SyncWorktreeWithBaseFixture):
         """
         # Reset to the pre-rebase SHA was issued.
         reset_calls = [
-            c for c in hardened_mock.call_args_list
-            if c.args[:3] == ("reset", "--hard", BEFORE_SHA)
+            recorded_call for recorded_call in hardened_mock.call_args_list
+            if recorded_call.args[:3] == (RESET_COMMAND, HARD_RESET_FLAG, BEFORE_SHA)
         ]
         self.assertEqual(len(reset_calls), 1, hardened_mock.call_args_list)
         # No push, no merge, no relabel -- recovery aborted before
@@ -1160,8 +1186,8 @@ class _CrashRecoveryVerificationFixture(_SyncWorktreeWithBaseFixture):
         )
         # No `base_rebased` event -- we did NOT route to validating.
         rebased = [
-            e for e in self.gh.recorded_events
-            if e.get("event") == EVENT_BASE_REBASED
+            event for event in self.gh.recorded_events
+            if event.get(EVENT_FIELD) == EVENT_BASE_REBASED
         ]
         self.assertEqual(rebased, [])
 
@@ -1180,7 +1206,7 @@ class CrashRecoveryVerificationUnitTest(
         # the PR. The fix resets HEAD to the pre-rebase anchor and
         # parks awaiting human so handler dispatch short-circuits.
         hardened_mock, push_mock, merge_mock = self._run_unverifiable_recovery(
-            fetch_returncode=128,
+            fetch_returncode=GIT_FAILURE_EXIT_CODE,
         )
         self._assert_recovery_unverified_reset_and_park(
             hardened_mock, push_mock, merge_mock,
@@ -1194,7 +1220,7 @@ class CrashRecoveryVerificationUnitTest(
         # (which may not be on the PR) and stamp its review against
         # a SHA the human-merge gate cannot match.
         hardened_mock, push_mock, merge_mock = self._run_unverifiable_recovery(
-            rev_parse_returncode=128, rev_parse_stdout="",
+            rev_parse_returncode=GIT_FAILURE_EXIT_CODE, rev_parse_stdout="",
         )
         self._assert_recovery_unverified_reset_and_park(
             hardened_mock, push_mock, merge_mock,
@@ -1234,7 +1260,7 @@ class CrashRecoveryDivergenceUnitTest(
     _SyncWorktreeWithBaseFixture,
     unittest.TestCase,
 ):
-    def test_crash_case_2_behind_falls_through(
+    def test_landed_push_behind_falls_through(
         self,
     ) -> None:
         # Regression: case 2 (HEAD == remote PR head; push landed on
@@ -1255,13 +1281,13 @@ class CrashRecoveryDivergenceUnitTest(
         )
         self._add_pr()
         # `behind == 2`: base advanced after the interrupted rebase.
-        git_mock = MagicMock(return_value=_git_result(stdout="2\n"))
+        git_mock = MagicMock(return_value=_git_result(stdout=TWO_BEHIND_STDOUT))
         # Sequence of `_head_sha` reads:
         #   1. recovery's read after the fetch -> "rebased-sha"
         #   2. normal flow's `before_sha = _head_sha(worktree)` -> "rebased-sha"
         #   3. normal flow's `after_sha = _head_sha(worktree)` -> "new-rebased-sha"
         head_sha = MagicMock(
-            side_effect=[REBASED_SHA, REBASED_SHA, "new-rebased-sha"],
+            side_effect=[REBASED_SHA, REBASED_SHA, NEW_REBASED_SHA],
         )
         # Remote PR head == local HEAD (recovery's case-2 SHA match).
         hardened = MagicMock(side_effect=_RemoteHeadGit(REBASED_SHA))
@@ -1280,7 +1306,7 @@ class CrashRecoveryDivergenceUnitTest(
         # Lease is pinned to the recovery's confirmed remote SHA (=
         # the recovered head that is now the live PR head).
         self.assertEqual(
-            push.call_args.kwargs.get("force_with_lease"), REBASED_SHA,
+            push.call_args.kwargs.get(FORCE_WITH_LEASE_KWARG), REBASED_SHA,
         )
         # Final label is `validating`, anchor cleared, review_round
         # reset (was 3, now 0).
@@ -1290,16 +1316,16 @@ class CrashRecoveryDivergenceUnitTest(
         self.assertEqual(state.get(KEY_REVIEW_ROUND), 0)
         # Two `base_rebased` events: one for the case-2 finalize-
         # without-relabel and one for the normal-flow rebase + push.
-        rebased = [e for e in self.gh.recorded_events if e.get("event") == EVENT_BASE_REBASED]
+        rebased = [event for event in self.gh.recorded_events if event.get(EVENT_FIELD) == EVENT_BASE_REBASED]
         self.assertEqual(len(rebased), 2)
-        methods = [e.get("method") for e in rebased]
+        methods = [event.get(METHOD_FIELD) for event in rebased]
         self.assertEqual(
             methods, ["crash_recovery_relabel_only", "auto_clean_rebase"],
         )
         # Final head SHA on the audit trail is the freshly-rebased one.
-        self.assertEqual(rebased[1].get("sha"), "new-rebased-sha")
+        self.assertEqual(rebased[1].get(SHA_FIELD), NEW_REBASED_SHA)
 
-    def test_crash_case_3_behind_falls_through(
+    def test_pending_push_behind_falls_through(
         self,
     ) -> None:
         # Same regression for case 3 (HEAD ahead of remote PR head;
@@ -1316,13 +1342,13 @@ class CrashRecoveryDivergenceUnitTest(
         self._add_pr()
         # `behind == 2`: base advanced again since the interrupted
         # rebase.
-        git_mock = MagicMock(return_value=_git_result(stdout="2\n"))
+        git_mock = MagicMock(return_value=_git_result(stdout=TWO_BEHIND_STDOUT))
         # `_head_sha` reads in order:
         #   1. recovery's read after fetch -> "rebased-sha"
         #   2. normal flow's `before_sha` -> "rebased-sha" (recovery's push didn't move HEAD locally)
         #   3. normal flow's `after_sha` -> "new-rebased-sha"
         head_sha = MagicMock(
-            side_effect=[REBASED_SHA, REBASED_SHA, "new-rebased-sha"],
+            side_effect=[REBASED_SHA, REBASED_SHA, NEW_REBASED_SHA],
         )
         # Recovery sees HEAD ahead of remote (case 3).
         ahead_behind = MagicMock(return_value=(1, 0))
@@ -1341,7 +1367,10 @@ class CrashRecoveryDivergenceUnitTest(
         # pre-rebase anchor) and once by the normal flow (lease against
         # the post-recovery local HEAD = the just-pushed recovered SHA).
         self.assertEqual(push.call_count, 2)
-        leases = [c.kwargs.get("force_with_lease") for c in push.call_args_list]
+        leases = [
+            recorded_call.kwargs.get(FORCE_WITH_LEASE_KWARG)
+            for recorded_call in push.call_args_list
+        ]
         self.assertEqual(leases, [BEFORE_SHA, REBASED_SHA])
         # Rebase ran exactly once -- the recovery's case 3 does NOT
         # re-run the rebase locally (the recovered SHA already carries
@@ -1353,13 +1382,13 @@ class CrashRecoveryDivergenceUnitTest(
         self.assertIsNone(state.get(KEY_PENDING_PUSH_SHA))
         self.assertEqual(state.get(KEY_REVIEW_ROUND), 0)
         # Two `base_rebased` events: recovery + normal flow.
-        rebased = [e for e in self.gh.recorded_events if e.get("event") == EVENT_BASE_REBASED]
+        rebased = [event for event in self.gh.recorded_events if event.get(EVENT_FIELD) == EVENT_BASE_REBASED]
         self.assertEqual(len(rebased), 2)
-        methods = [e.get("method") for e in rebased]
+        methods = [event.get(METHOD_FIELD) for event in rebased]
         self.assertEqual(
             methods, ["crash_recovery_pushed", "auto_clean_rebase"],
         )
-        self.assertEqual(rebased[1].get("sha"), "new-rebased-sha")
+        self.assertEqual(rebased[1].get(SHA_FIELD), NEW_REBASED_SHA)
 
     def test_crash_divergence_resets_and_parks(self) -> None:
         # Scenario 4: a prior tick set the anchor, rebased, and the
@@ -1372,7 +1401,7 @@ class CrashRecoveryDivergenceUnitTest(
             pending_auto_base_rebase_push_sha=BEFORE_SHA,
         )
         self._add_pr()
-        git_mock = MagicMock(return_value=_git_result(stdout="0\n"))
+        git_mock = MagicMock(return_value=_git_result(stdout=UP_TO_DATE_STDOUT))
         head_sha = MagicMock(return_value=REBASED_SHA)
         # Truly diverged: ahead 1, behind 1.
         ahead_behind = MagicMock(return_value=(1, 1))
@@ -1392,8 +1421,8 @@ class CrashRecoveryDivergenceUnitTest(
             workflow._sync_worktree_with_base(self.gh, self.spec, self.wt, ISSUE)
         # Reset to the pre-rebase SHA was issued.
         reset_calls = [
-            c for c in hardened.call_args_list
-            if c.args[:3] == ("reset", "--hard", BEFORE_SHA)
+            recorded_call for recorded_call in hardened.call_args_list
+            if recorded_call.args[:3] == (RESET_COMMAND, HARD_RESET_FLAG, BEFORE_SHA)
         ]
         self.assertEqual(len(reset_calls), 1, hardened.call_args_list)
         # No push, no rebase, no relabel -- park with the recovery's
@@ -1427,7 +1456,7 @@ class CrashRecoveryAnchorUnitTest(_SyncWorktreeWithBaseFixture, unittest.TestCas
 
         push = MagicMock(return_value=True)
         head_sha = MagicMock(side_effect=[BEFORE_SHA, AFTER_SHA])
-        git_mock = MagicMock(return_value=_git_result(stdout="3\n"))
+        git_mock = MagicMock(return_value=_git_result(stdout=THREE_BEHIND_STDOUT))
         with _patch_base_sync(
             dirty=MagicMock(return_value=[]),
             rebase=MagicMock(side_effect=rebase),
@@ -1457,7 +1486,7 @@ class CrashRecoveryAnchorUnitTest(_SyncWorktreeWithBaseFixture, unittest.TestCas
         merge = MagicMock(return_value=(True, []))
         push = MagicMock(return_value=False)
         head_sha = MagicMock(side_effect=[BEFORE_SHA, AFTER_SHA])
-        git_mock = MagicMock(return_value=_git_result(stdout="2\n"))
+        git_mock = MagicMock(return_value=_git_result(stdout=TWO_BEHIND_STDOUT))
         hardened = MagicMock(return_value=_git_result())
         with _patch_base_sync(
             dirty=MagicMock(return_value=[]), rebase=merge, push=push,
@@ -1486,7 +1515,7 @@ class CrashRecoveryAnchorUnitTest(_SyncWorktreeWithBaseFixture, unittest.TestCas
         merge = MagicMock()
         push = MagicMock()
         head_sha = MagicMock(return_value="")  # unreadable HEAD
-        git_mock = MagicMock(return_value=_git_result(stdout="3\n"))
+        git_mock = MagicMock(return_value=_git_result(stdout=THREE_BEHIND_STDOUT))
         with _patch_base_sync(
             dirty=MagicMock(return_value=[]), rebase=merge, push=push,
             head_sha=head_sha, git=git_mock,
@@ -1524,7 +1553,7 @@ class CrashRecoveryAnchorUnitTest(_SyncWorktreeWithBaseFixture, unittest.TestCas
         push = MagicMock()
         # Pre-rebase HEAD readable, post-rebase HEAD unreadable.
         head_sha = MagicMock(side_effect=[BEFORE_SHA, ""])
-        git_mock = MagicMock(return_value=_git_result(stdout="2\n"))
+        git_mock = MagicMock(return_value=_git_result(stdout=TWO_BEHIND_STDOUT))
         hardened = MagicMock(return_value=_git_result())
         with _patch_base_sync(
             dirty=MagicMock(return_value=[]), rebase=merge, push=push,
@@ -1535,8 +1564,8 @@ class CrashRecoveryAnchorUnitTest(_SyncWorktreeWithBaseFixture, unittest.TestCas
         # is restored to a known state instead of left on whatever
         # SHA the rebase produced.
         reset_calls = [
-            c for c in hardened.call_args_list
-            if c.args[:3] == ("reset", "--hard", BEFORE_SHA)
+            recorded_call for recorded_call in hardened.call_args_list
+            if recorded_call.args[:3] == (RESET_COMMAND, HARD_RESET_FLAG, BEFORE_SHA)
         ]
         self.assertEqual(len(reset_calls), 1, hardened.call_args_list)
         push.assert_not_called()
@@ -1567,7 +1596,7 @@ class CrashRecoveryAnchorUnitTest(_SyncWorktreeWithBaseFixture, unittest.TestCas
         self._add_pr()
         # Worktree is dirty (the crash left uncommitted edits behind).
         # `behind == 0` because the rebased SHA already contains base.
-        git_mock = MagicMock(return_value=_git_result(stdout="0\n"))
+        git_mock = MagicMock(return_value=_git_result(stdout=UP_TO_DATE_STDOUT))
         merge = MagicMock()
         head_sha = MagicMock(return_value=REBASED_SHA)
         # Recovery's `_branch_ahead_behind`: HEAD is ahead of remote
@@ -1588,13 +1617,13 @@ class CrashRecoveryAnchorUnitTest(_SyncWorktreeWithBaseFixture, unittest.TestCas
         # Recovery's case-3 dirty branch ran: reset HEAD back to the
         # anchor and `git clean -fd`.
         reset_calls = [
-            c for c in hardened.call_args_list
-            if c.args[:3] == ("reset", "--hard", BEFORE_SHA)
+            recorded_call for recorded_call in hardened.call_args_list
+            if recorded_call.args[:3] == (RESET_COMMAND, HARD_RESET_FLAG, BEFORE_SHA)
         ]
         self.assertEqual(len(reset_calls), 1, hardened.call_args_list)
         clean_calls = [
-            c for c in hardened.call_args_list
-            if c.args[:2] == ("clean", "-fd")
+            recorded_call for recorded_call in hardened.call_args_list
+            if recorded_call.args[:2] == ("clean", "-fd")
         ]
         self.assertEqual(len(clean_calls), 1, hardened.call_args_list)
         # Push MUST NOT have run -- the worktree was dirty.
@@ -1627,7 +1656,7 @@ class CrashRecoveryAnchorUnitTest(_SyncWorktreeWithBaseFixture, unittest.TestCas
             pending_auto_base_rebase_push_sha="stale-anchor",
         )
         self._add_pr()
-        git_mock = MagicMock(return_value=_git_result(stdout="3\n"))
+        git_mock = MagicMock(return_value=_git_result(stdout=THREE_BEHIND_STDOUT))
         merge = MagicMock()
         push = MagicMock()
         head_sha = MagicMock()
@@ -1668,7 +1697,7 @@ class PrRefreshRoutingGuardUnitTest(
         )
         # Merged PR -- terminal.
         self._add_pr(merged=True, state="closed")
-        git_mock = MagicMock(return_value=_git_result(stdout="3\n"))
+        git_mock = MagicMock(return_value=_git_result(stdout=THREE_BEHIND_STDOUT))
         merge = MagicMock()
         push = MagicMock()
         with _patch_base_sync(
@@ -1691,7 +1720,7 @@ class PrRefreshRoutingGuardUnitTest(
         self._seed_pr_issue(extra_labels=[BACKLOG_LABEL])
         self._add_pr()
         merge = MagicMock()
-        git_mock = MagicMock(return_value=_git_result(stdout="3\n"))
+        git_mock = MagicMock(return_value=_git_result(stdout=THREE_BEHIND_STDOUT))
         with _patch_base_sync(
             dirty=MagicMock(return_value=[]), rebase=merge, git=git_mock,
         ):
@@ -1706,7 +1735,7 @@ class PrRefreshRoutingGuardUnitTest(
         issue.labels.append(FakeLabel(BACKLOG_LABEL))
         self.gh.add_issue(issue)
         merge = MagicMock()
-        git_mock = MagicMock(return_value=_git_result(stdout="3\n"))
+        git_mock = MagicMock(return_value=_git_result(stdout=THREE_BEHIND_STDOUT))
         with _patch_base_sync(
             dirty=MagicMock(return_value=[]), rebase=merge, git=git_mock,
         ):
@@ -1722,7 +1751,7 @@ class PrRefreshRoutingGuardUnitTest(
         self._seed_pr_issue(extra_labels=[PAUSED_LABEL])
         self._add_pr()
         merge = MagicMock()
-        git_mock = MagicMock(return_value=_git_result(stdout="3\n"))
+        git_mock = MagicMock(return_value=_git_result(stdout=THREE_BEHIND_STDOUT))
         with _patch_base_sync(
             dirty=MagicMock(return_value=[]), rebase=merge, git=git_mock,
         ):
@@ -1737,7 +1766,7 @@ class PrRefreshRoutingGuardUnitTest(
         issue.labels.append(FakeLabel(PAUSED_LABEL))
         self.gh.add_issue(issue)
         merge = MagicMock()
-        git_mock = MagicMock(return_value=_git_result(stdout="3\n"))
+        git_mock = MagicMock(return_value=_git_result(stdout=THREE_BEHIND_STDOUT))
         with _patch_base_sync(
             dirty=MagicMock(return_value=[]), rebase=merge, git=git_mock,
         ):
@@ -1751,7 +1780,7 @@ class PrRefreshRoutingGuardUnitTest(
         # second label flip is pointless and would re-post the PR notice.
         self._seed_pr_issue(label=LABEL_RESOLVING_CONFLICT)
         self._add_pr()
-        git_mock = MagicMock(return_value=_git_result(stdout="3\n"))
+        git_mock = MagicMock(return_value=_git_result(stdout=THREE_BEHIND_STDOUT))
         with _patch_base_sync(
             dirty=MagicMock(return_value=[]), git=git_mock,
         ):
@@ -1768,7 +1797,7 @@ class PrRefreshOutcomeUnitTest(_SyncWorktreeWithBaseFixture, unittest.TestCase):
         # behind = 0 short-circuits: nothing to refresh, no detour.
         self._seed_pr_issue()
         self._add_pr()
-        git_mock = MagicMock(return_value=_git_result(stdout="0\n"))
+        git_mock = MagicMock(return_value=_git_result(stdout=UP_TO_DATE_STDOUT))
         with _patch_base_sync(
             dirty=MagicMock(return_value=[]), git=git_mock,
         ):
@@ -1811,7 +1840,7 @@ class PrRefreshOutcomeUnitTest(_SyncWorktreeWithBaseFixture, unittest.TestCase):
         # do its job.
         self._seed_pr_issue()
         self._add_pr(merged=True, state="closed")
-        git_mock = MagicMock(return_value=_git_result(stdout="3\n"))
+        git_mock = MagicMock(return_value=_git_result(stdout=THREE_BEHIND_STDOUT))
         with _patch_base_sync(
             dirty=MagicMock(return_value=[]), git=git_mock,
         ):
@@ -1825,7 +1854,7 @@ class PrRefreshOutcomeUnitTest(_SyncWorktreeWithBaseFixture, unittest.TestCase):
         # `resolving_conflict`. The handler will finalize to `rejected`.
         self._seed_pr_issue()
         self._add_pr(merged=False, state="closed")
-        git_mock = MagicMock(return_value=_git_result(stdout="3\n"))
+        git_mock = MagicMock(return_value=_git_result(stdout=THREE_BEHIND_STDOUT))
         with _patch_base_sync(
             dirty=MagicMock(return_value=[]), git=git_mock,
         ):
@@ -1839,7 +1868,7 @@ class PrRefreshOutcomeUnitTest(_SyncWorktreeWithBaseFixture, unittest.TestCase):
         # than racing a half-known state.
         self._seed_pr_issue()
         # No PR added -- get_pr will raise KeyError on the FakeGitHubClient.
-        git_mock = MagicMock(return_value=_git_result(stdout="3\n"))
+        git_mock = MagicMock(return_value=_git_result(stdout=THREE_BEHIND_STDOUT))
         with _patch_base_sync(
             dirty=MagicMock(return_value=[]), git=git_mock,
         ):
@@ -1864,7 +1893,7 @@ class PrRefreshOutcomeUnitTest(_SyncWorktreeWithBaseFixture, unittest.TestCase):
         # An UNREAD human comment landed AFTER the current watermark of 100.
         # If we bump the watermark to `latest_comment_id` (max id seen, which
         # would include this human comment), it gets silently consumed.
-        self._add_comment(500, "do not merge yet", "human")
+        self._add_comment(UNREAD_COMMENT_ID, "do not merge yet", HUMAN_LOGIN)
         merge = MagicMock(return_value=(True, []))
         push = MagicMock(return_value=True)
         head_sha = MagicMock(side_effect=[BEFORE_SHA, AFTER_SHA])
@@ -1891,7 +1920,7 @@ class PrRefreshOutcomeUnitTest(_SyncWorktreeWithBaseFixture, unittest.TestCase):
         self._seed_pr_issue(
             awaiting_human=True, park_reason="unmergeable",
         )
-        git_mock = MagicMock(return_value=_git_result(stdout="3\n"))
+        git_mock = MagicMock(return_value=_git_result(stdout=THREE_BEHIND_STDOUT))
         with _patch_base_sync(
             dirty=MagicMock(return_value=[]), git=git_mock,
         ):
@@ -1914,7 +1943,7 @@ class PrePrRefreshUnitTest(_SyncWorktreeWithBaseFixture, unittest.TestCase):
 
     def test_skips_when_already_up_to_date(self) -> None:
         merge = MagicMock()
-        git_mock = MagicMock(return_value=_git_result(stdout="0\n"))
+        git_mock = MagicMock(return_value=_git_result(stdout=UP_TO_DATE_STDOUT))
         with _patch_base_sync(
             dirty=MagicMock(return_value=[]), git=git_mock, rebase=merge,
         ):
@@ -1923,7 +1952,7 @@ class PrePrRefreshUnitTest(_SyncWorktreeWithBaseFixture, unittest.TestCase):
 
     def test_skips_when_rev_list_fails(self) -> None:
         merge = MagicMock()
-        git_mock = MagicMock(return_value=_git_result(returncode=128))
+        git_mock = MagicMock(return_value=_git_result(returncode=GIT_FAILURE_EXIT_CODE))
         with _patch_base_sync(
             dirty=MagicMock(return_value=[]), git=git_mock, rebase=merge,
         ):
@@ -1932,7 +1961,7 @@ class PrePrRefreshUnitTest(_SyncWorktreeWithBaseFixture, unittest.TestCase):
 
     def test_clean_rebase_when_behind(self) -> None:
         merge = MagicMock(return_value=(True, []))
-        git_mock = MagicMock(return_value=_git_result(stdout="3\n"))
+        git_mock = MagicMock(return_value=_git_result(stdout=THREE_BEHIND_STDOUT))
         hardened = MagicMock(return_value=_git_result())
         with _patch_base_sync(
             dirty=MagicMock(return_value=[]), git=git_mock, rebase=merge,
@@ -1942,12 +1971,15 @@ class PrePrRefreshUnitTest(_SyncWorktreeWithBaseFixture, unittest.TestCase):
         merge.assert_called_once()
         # No abort issued on success.
         self.assertFalse(
-            any(c.args[:1] == ("rebase",) for c in hardened.call_args_list)
+            any(
+                recorded_call.args[:1] == (REBASE_COMMAND,)
+                for recorded_call in hardened.call_args_list
+            )
         )
 
     def test_conflict_aborts_and_swallows(self) -> None:
         merge = MagicMock(return_value=(False, ["a.py", "b.py"]))
-        git_mock = MagicMock(return_value=_git_result(stdout="2\n"))
+        git_mock = MagicMock(return_value=_git_result(stdout=TWO_BEHIND_STDOUT))
         hardened = MagicMock(return_value=_git_result())
         with _patch_base_sync(
             dirty=MagicMock(return_value=[]), git=git_mock, rebase=merge,
@@ -1956,8 +1988,8 @@ class PrePrRefreshUnitTest(_SyncWorktreeWithBaseFixture, unittest.TestCase):
             workflow._sync_worktree_with_base(self.gh, self.spec, self.wt, ISSUE)
         # Abort issued exactly once.
         abort_calls = [
-            c for c in hardened.call_args_list
-            if c.args[:2] == ("rebase", "--abort")
+            recorded_call for recorded_call in hardened.call_args_list
+            if recorded_call.args[:2] == (REBASE_COMMAND, ABORT_FLAG)
         ]
         self.assertEqual(len(abort_calls), 1)
 
@@ -1966,7 +1998,7 @@ class PrePrRefreshUnitTest(_SyncWorktreeWithBaseFixture, unittest.TestCase):
         # must not crash the refresh -- skip silently.
         merge = MagicMock()
         with _patch_base_sync(rebase=merge):
-            workflow._sync_worktree_with_base(self.gh, self.spec, self.wt, 9999)
+            workflow._sync_worktree_with_base(self.gh, self.spec, self.wt, MISSING_ISSUE_NUMBER)
         merge.assert_not_called()
 
 

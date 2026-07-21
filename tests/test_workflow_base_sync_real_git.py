@@ -26,6 +26,14 @@ BASE_BRANCH = "main"
 PR_BRANCH = "orchestrator/acme__widget/issue-7"
 KEY_CONFLICT_ROUND = "conflict_round"
 KEY_REVIEW_ROUND = "review_round"
+GIT_COMMAND = "git"
+ADD_COMMAND = "add"
+PUSH_COMMAND = "push"
+ORIGIN_REMOTE = "origin"
+WORKTREES_DIR_NAME = "worktrees"
+WORKTREES_DIR_ATTR = "WORKTREES_DIR"
+EXTRA_FILENAME = "extra.txt"
+PR_NUMBER = 42
 
 
 def _branch(issue_number: int) -> str:
@@ -34,7 +42,7 @@ def _branch(issue_number: int) -> str:
 
 def _local_fetch(spec, branch):
     return subprocess.run(
-        ["git", "fetch", "--quiet", spec.remote_name, branch],
+        [GIT_COMMAND, "fetch", "--quiet", spec.remote_name, branch],
         cwd=str(spec.target_root),
         capture_output=True,
         text=True,
@@ -57,12 +65,12 @@ class _LocalBranchPusher:
     ) -> bool:
         self.branch = branch
         self.force_with_lease = force_with_lease or ""
-        result = subprocess.run(
+        push_result = subprocess.run(
             [
-                "git",
-                "push",
+                GIT_COMMAND,
+                PUSH_COMMAND,
                 f"--force-with-lease=refs/heads/{branch}:{force_with_lease or ''}",
-                "origin",
+                ORIGIN_REMOTE,
                 f"HEAD:refs/heads/{branch}",
             ],
             cwd=str(worktree),
@@ -70,7 +78,7 @@ class _LocalBranchPusher:
             text=True,
             env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
         )
-        return result.returncode == 0
+        return push_result.returncode == 0
 
 
 class _RefreshBaseRealGitFixture:
@@ -86,12 +94,12 @@ class _RefreshBaseRealGitFixture:
 
         self.remote = self.tmpdir / "remote.git"
         subprocess.run(
-            ["git", "init", "--bare", "-b", BASE_BRANCH, str(self.remote)],
+            [GIT_COMMAND, "init", "--bare", "-b", BASE_BRANCH, str(self.remote)],
             check=True, capture_output=True,
         )
         self.work = self.tmpdir / "work"
         subprocess.run(
-            ["git", "clone", str(self.remote), str(self.work)],
+            [GIT_COMMAND, "clone", str(self.remote), str(self.work)],
             check=True, capture_output=True,
         )
         author_env = {
@@ -100,20 +108,20 @@ class _RefreshBaseRealGitFixture:
         }
         self._author_env = author_env
         (self.work / "README.md").write_text("hello\n")
-        self._git("add", ".", cwd=self.work)
+        self._git(ADD_COMMAND, ".", cwd=self.work)
         self._git("commit", "-m", "initial", cwd=self.work, env_extra=author_env)
-        self._git("push", "origin", BASE_BRANCH, cwd=self.work)
+        self._git(PUSH_COMMAND, ORIGIN_REMOTE, BASE_BRANCH, cwd=self.work)
 
         # Per-issue worktree branched off origin/main, with one local commit.
-        self.wt_root = self.tmpdir / "worktrees" / "acme__widget"
+        self.wt_root = self.tmpdir / WORKTREES_DIR_NAME / "acme__widget"
         self.wt_root.mkdir(parents=True)
         self.wt = self.wt_root / "issue-7"
         self._git(
-            "worktree", "add", "-b", PR_BRANCH,
+            "worktree", ADD_COMMAND, "-b", PR_BRANCH,
             str(self.wt), "origin/main", cwd=self.work,
         )
         (self.wt / "feature.py").write_text("feature\n")
-        self._git("add", ".", cwd=self.wt)
+        self._git(ADD_COMMAND, ".", cwd=self.wt)
         self._git(
             "commit", "-m", "feat: add feature", cwd=self.wt,
             env_extra=author_env,
@@ -140,11 +148,11 @@ class _RefreshBaseRealGitFixture:
         env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
         if env_extra:
             env.update(env_extra)
-        result = subprocess.run(
-            ["git", *args], cwd=str(cwd),
+        git_result = subprocess.run(
+            [GIT_COMMAND, *args], cwd=str(cwd),
             capture_output=True, text=True, env=env, check=True,
         )
-        return result.stdout
+        return git_result.stdout
 
     def _seed_pr_state(
         self, issue_number: int, pr_number: int = 999, *,
@@ -166,15 +174,15 @@ class _RefreshBaseRealGitFixture:
         will conflict with the local feature commit.
         """
         self._git("checkout", BASE_BRANCH, cwd=self.work)
-        filename = "feature.py" if conflicting else "extra.txt"
+        filename = "feature.py" if conflicting else EXTRA_FILENAME
         path = self.work / filename
         path.write_text("base side\n")
-        self._git("add", ".", cwd=self.work)
+        self._git(ADD_COMMAND, ".", cwd=self.work)
         self._git(
             "commit", "-m", "base advance", cwd=self.work,
             env_extra=self._author_env,
         )
-        self._git("push", "origin", BASE_BRANCH, cwd=self.work)
+        self._git(PUSH_COMMAND, ORIGIN_REMOTE, BASE_BRANCH, cwd=self.work)
 
     def _wt_head(self) -> str:
         return self._git("rev-parse", "HEAD", cwd=self.wt).strip()
@@ -186,8 +194,8 @@ class _RefreshBaseRealGitFixture:
     def _refresh(self) -> None:
         with patch.object(
             workflow.config,
-            "WORKTREES_DIR",
-            self.tmpdir / "worktrees",
+            WORKTREES_DIR_ATTR,
+            self.tmpdir / WORKTREES_DIR_NAME,
         ):
             workflow._refresh_base_and_worktrees(self.gh, self.spec)
 
@@ -200,7 +208,7 @@ class RefreshPrePrRealGitTest(_RefreshBaseRealGitFixture, unittest.TestCase):
         head_after = self._wt_head()
         self.assertNotEqual(head_before, head_after)
         # The base file landed in the worktree's tree.
-        self.assertTrue((self.wt / "extra.txt").exists())
+        self.assertTrue((self.wt / EXTRA_FILENAME).exists())
         self.assertEqual(
             self._git("log", "-1", "--format=%s", cwd=self.wt).strip(),
             "feat: add feature",
@@ -232,7 +240,7 @@ class RefreshPrePrRealGitTest(_RefreshBaseRealGitFixture, unittest.TestCase):
         self.assertEqual(head_before, self._wt_head())
         # Untracked file still present, nothing else was added.
         self.assertTrue((self.wt / "scratch.py").exists())
-        self.assertFalse((self.wt / "extra.txt").exists())
+        self.assertFalse((self.wt / EXTRA_FILENAME).exists())
 
 
 class RefreshPrRealGitTest(_RefreshBaseRealGitFixture, unittest.TestCase):
@@ -249,17 +257,17 @@ class RefreshPrRealGitTest(_RefreshBaseRealGitFixture, unittest.TestCase):
         self.gh = FakeGitHubClient()
         self.gh.add_issue(make_issue(7, label=LABEL_IN_REVIEW))
         self.gh.seed_state(
-            7, pr_number=42, branch=PR_BRANCH, review_round=4,
+            7, pr_number=PR_NUMBER, branch=PR_BRANCH, review_round=4,
         )
         self.gh.add_pr(FakePR(
-            number=42, head_branch=PR_BRANCH,
+            number=PR_NUMBER, head_branch=PR_BRANCH,
             merged=False, state=STATE_OPEN,
         ))
         # Publish the orchestrator branch to the bare remote so the
         # force-with-lease check has a known SHA to compare against
         # (the production PR flow does the same first push when
         # `_handle_implementing` opens the PR).
-        self._git("push", "origin", PR_BRANCH, cwd=self.wt)
+        self._git(PUSH_COMMAND, ORIGIN_REMOTE, PR_BRANCH, cwd=self.wt)
         self._advance_base(conflicting=False)
         head_before = self._wt_head()
 
@@ -272,7 +280,8 @@ class RefreshPrRealGitTest(_RefreshBaseRealGitFixture, unittest.TestCase):
 
         with patch.object(base_sync, "_push_branch", side_effect=pusher), \
              patch.object(
-                workflow.config, "WORKTREES_DIR", self.tmpdir / "worktrees",
+                workflow.config, WORKTREES_DIR_ATTR,
+                self.tmpdir / WORKTREES_DIR_NAME,
              ):
             workflow._refresh_base_and_worktrees(self.gh, self.spec)
 
@@ -280,7 +289,7 @@ class RefreshPrRealGitTest(_RefreshBaseRealGitFixture, unittest.TestCase):
         # onto the new base, then the push delivered the rewrite.
         self.assertNotEqual(head_before, self._wt_head())
         # The base file landed in the worktree -- the rebase result.
-        self.assertTrue((self.wt / "extra.txt").exists())
+        self.assertTrue((self.wt / EXTRA_FILENAME).exists())
         # Worktree is clean.
         self.assertTrue(self._is_clean())
         # The push was issued with force-with-lease pinned to the
@@ -308,14 +317,14 @@ class RefreshPrRealGitTest(_RefreshBaseRealGitFixture, unittest.TestCase):
         # and the next refresh tick picks the work up again.
         self.gh = FakeGitHubClient()
         self.gh.add_issue(make_issue(7, label=LABEL_IN_REVIEW))
-        self.gh.seed_state(7, pr_number=42, branch=PR_BRANCH)
+        self.gh.seed_state(7, pr_number=PR_NUMBER, branch=PR_BRANCH)
         self.gh.add_pr(FakePR(
-            number=42, head_branch=PR_BRANCH,
+            number=PR_NUMBER, head_branch=PR_BRANCH,
             merged=False, state=STATE_OPEN,
         ))
         # Publish the branch so the lease has a real SHA to compare
         # against, then advance base cleanly.
-        self._git("push", "origin", PR_BRANCH, cwd=self.wt)
+        self._git(PUSH_COMMAND, ORIGIN_REMOTE, PR_BRANCH, cwd=self.wt)
         self._advance_base(conflicting=False)
         head_before = self._wt_head()
 
@@ -326,7 +335,8 @@ class RefreshPrRealGitTest(_RefreshBaseRealGitFixture, unittest.TestCase):
 
         with patch.object(base_sync, "_push_branch", push), \
              patch.object(
-                workflow.config, "WORKTREES_DIR", self.tmpdir / "worktrees",
+                workflow.config, WORKTREES_DIR_ATTR,
+                self.tmpdir / WORKTREES_DIR_NAME,
              ):
             workflow._refresh_base_and_worktrees(self.gh, self.spec)
 
@@ -338,7 +348,7 @@ class RefreshPrRealGitTest(_RefreshBaseRealGitFixture, unittest.TestCase):
         self.assertEqual(head_before, self._wt_head())
         # The base file did NOT land in the worktree -- the reset
         # restored the tree to its pre-rebase state.
-        self.assertFalse((self.wt / "extra.txt").exists())
+        self.assertFalse((self.wt / EXTRA_FILENAME).exists())
         # Worktree is clean.
         self.assertTrue(self._is_clean())
         # Label stays put; no relabel to `validating` or
@@ -360,9 +370,9 @@ class RefreshPrRealGitTest(_RefreshBaseRealGitFixture, unittest.TestCase):
         # that still enters `resolving_conflict` from the refresh.
         self.gh = FakeGitHubClient()
         self.gh.add_issue(make_issue(7, label=LABEL_IN_REVIEW))
-        self.gh.seed_state(7, pr_number=42, branch=PR_BRANCH)
+        self.gh.seed_state(7, pr_number=PR_NUMBER, branch=PR_BRANCH)
         self.gh.add_pr(FakePR(
-            number=42, head_branch=PR_BRANCH,
+            number=PR_NUMBER, head_branch=PR_BRANCH,
             merged=False, state=STATE_OPEN,
         ))
         self._advance_base(conflicting=True)
@@ -371,7 +381,8 @@ class RefreshPrRealGitTest(_RefreshBaseRealGitFixture, unittest.TestCase):
         push = MagicMock()
         with patch.object(base_sync, "_push_branch", push), \
              patch.object(
-                workflow.config, "WORKTREES_DIR", self.tmpdir / "worktrees",
+                workflow.config, WORKTREES_DIR_ATTR,
+                self.tmpdir / WORKTREES_DIR_NAME,
              ):
             workflow._refresh_base_and_worktrees(self.gh, self.spec)
 

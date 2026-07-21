@@ -26,6 +26,14 @@ from orchestrator import (
     worktrees,
 )
 
+GIT_COMMAND = "git"
+BASE_BRANCH = "main"
+ORIGIN_REMOTE = "origin"
+PROBE_DELAY_SECONDS = 0.02
+THREAD_TIMEOUT_SECONDS = 10.0
+BARRIER_TIMEOUT_SECONDS = 5.0
+REAL_GIT_TIMEOUT_SECONDS = 30.0
+
 
 def _git_result() -> MagicMock:
     return MagicMock(returncode=0, stdout="", stderr="")
@@ -37,7 +45,7 @@ def _has_no_new_commits(*_args, **_kwargs) -> bool:
 
 def _local_fetch(spec, branch):
     return subprocess.run(
-        ["git", "fetch", "--quiet", spec.remote_name, branch],
+        [GIT_COMMAND, "fetch", "--quiet", spec.remote_name, branch],
         cwd=str(spec.target_root),
         capture_output=True,
         text=True,
@@ -53,15 +61,15 @@ def _run_git(
     env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
     if env_extra:
         env.update(env_extra)
-    result = subprocess.run(
-        ["git", *args],
+    git_result = subprocess.run(
+        [GIT_COMMAND, *args],
         cwd=str(cwd),
         capture_output=True,
         text=True,
         env=env,
         check=True,
     )
-    return result.stdout
+    return git_result.stdout
 
 
 def _start_and_join(threads: list[threading.Thread], *, timeout: float) -> None:
@@ -75,7 +83,7 @@ class _ConcurrencyProbe:
     def __init__(
         self,
         *,
-        delay: float = 0.0,
+        delay: float = 0,
         barrier: threading.Barrier | None = None,
     ) -> None:
         self.maximum_in_flight = 0
@@ -120,21 +128,21 @@ class _ConcurrencyProbe:
 
 class _EnsureRecorder:
     def __init__(self, spec: config.RepoSpec) -> None:
-        self.results: list[tuple[int, Path | None, BaseException | None]] = []
+        self.outcomes: list[tuple[int, Path | None, BaseException | None]] = []
         self._spec = spec
         self._lock = threading.Lock()
 
     def __call__(self, issue_number: int) -> None:
         try:
-            result = (
+            outcome = (
                 issue_number,
                 worktrees._ensure_worktree(self._spec, issue_number),
                 None,
             )
         except BaseException as error:  # noqa: BLE001 - asserted by the test
-            result = (issue_number, None, error)
+            outcome = (issue_number, None, error)
         with self._lock:
-            self.results.append(result)
+            self.outcomes.append(outcome)
 
 
 class WorktreePlumbingSerializationTest(unittest.TestCase):
@@ -174,9 +182,9 @@ class WorktreePlumbingSerializationTest(unittest.TestCase):
         # assertion here.
         target_root = Path("/tmp/orchestrator-test-shared-target-root")
         spec = config.RepoSpec(
-            slug="acme/widget", target_root=target_root, base_branch="main",
+            slug="acme/widget", target_root=target_root, base_branch=BASE_BRANCH,
         )
-        probe = _ConcurrencyProbe(delay=0.02)
+        probe = _ConcurrencyProbe(delay=PROBE_DELAY_SECONDS)
 
         with (
             patch.object(worktree_lifecycle, "_git", side_effect=probe.git),
@@ -189,8 +197,8 @@ class WorktreePlumbingSerializationTest(unittest.TestCase):
                 "_has_new_commits",
                 _has_no_new_commits,
             ),
-            patch.object(Path, "exists", lambda self: False),
-            patch.object(Path, "mkdir", lambda self, **_kw: None),
+            patch.object(Path, "exists", lambda _path: False),
+            patch.object(Path, "mkdir", lambda _path, **_kwargs: None),
         ):
             threads = [
                 threading.Thread(
@@ -199,7 +207,7 @@ class WorktreePlumbingSerializationTest(unittest.TestCase):
                 )
                 for issue_number in (1, 2, 3, 4)
             ]
-            _start_and_join(threads, timeout=10.0)
+            _start_and_join(threads, timeout=THREAD_TIMEOUT_SECONDS)
             for thread in threads:
                 self.assertFalse(thread.is_alive(), "worker timed out")
 
@@ -230,11 +238,11 @@ class WorktreePlumbingSerializationTest(unittest.TestCase):
         # section and asserts max-in-flight == 1.
         target_root = Path("/tmp/orchestrator-test-authed-fetch-target-root")
         spec = config.RepoSpec(
-            slug="acme/widget", target_root=target_root, base_branch="main",
+            slug="acme/widget", target_root=target_root, base_branch=BASE_BRANCH,
         )
         wt = Path("/tmp/orchestrator-test-authed-fetch-worktree")
 
-        probe = _ConcurrencyProbe(delay=0.02)
+        probe = _ConcurrencyProbe(delay=PROBE_DELAY_SECONDS)
 
         # `_resolve_github_token` must return non-empty so `_authed_fetch`
         # does not short-circuit before the lock.
@@ -248,12 +256,16 @@ class WorktreePlumbingSerializationTest(unittest.TestCase):
             threads = [
                 threading.Thread(
                     target=worktrees._authed_fetch,
-                    args=(spec, "+refs/heads/main:refs/remotes/origin/main"),
+                    args=(
+                        spec,
+                        f"+refs/heads/{BASE_BRANCH}:refs/remotes/"
+                        f"{ORIGIN_REMOTE}/{BASE_BRANCH}",
+                    ),
                     kwargs={"cwd": wt},
                 )
                 for _index in range(4)
             ]
-            _start_and_join(threads, timeout=10.0)
+            _start_and_join(threads, timeout=THREAD_TIMEOUT_SECONDS)
             for thread in threads:
                 self.assertFalse(thread.is_alive())
 
@@ -272,18 +284,18 @@ class WorktreePlumbingSerializationTest(unittest.TestCase):
         spec_a = config.RepoSpec(
             slug="acme/one",
             target_root=Path("/tmp/orchestrator-test-target-root-A"),
-            base_branch="main",
+            base_branch=BASE_BRANCH,
         )
         spec_b = config.RepoSpec(
             slug="acme/two",
             target_root=Path("/tmp/orchestrator-test-target-root-B"),
-            base_branch="main",
+            base_branch=BASE_BRANCH,
         )
 
         # Block both threads inside `fake_git` simultaneously; if the
         # locks WERE shared across target_roots, one of the threads
         # would queue and the barrier would time out.
-        barrier = threading.Barrier(2, timeout=5.0)
+        barrier = threading.Barrier(2, timeout=BARRIER_TIMEOUT_SECONDS)
         probe = _ConcurrencyProbe(barrier=barrier)
 
         with (
@@ -297,8 +309,8 @@ class WorktreePlumbingSerializationTest(unittest.TestCase):
                 "_has_new_commits",
                 _has_no_new_commits,
             ),
-            patch.object(Path, "exists", lambda self: False),
-            patch.object(Path, "mkdir", lambda self, **_kw: None),
+            patch.object(Path, "exists", lambda _path: False),
+            patch.object(Path, "mkdir", lambda _path, **_kwargs: None),
         ):
             threads = [
                 threading.Thread(
@@ -307,7 +319,7 @@ class WorktreePlumbingSerializationTest(unittest.TestCase):
                 )
                 for spec in (spec_a, spec_b)
             ]
-            _start_and_join(threads, timeout=10.0)
+            _start_and_join(threads, timeout=THREAD_TIMEOUT_SECONDS)
             self.assertFalse(any(thread.is_alive() for thread in threads))
 
         # Both threads cleared the barrier together, so they were
@@ -337,12 +349,12 @@ class EnsureWorktreeRealGitConcurrencyTest(unittest.TestCase):
 
         self.remote = self.tmpdir / "remote.git"
         subprocess.run(
-            ["git", "init", "--bare", "-b", "main", str(self.remote)],
+            [GIT_COMMAND, "init", "--bare", "-b", BASE_BRANCH, str(self.remote)],
             check=True, capture_output=True,
         )
         self.work = self.tmpdir / "work"
         subprocess.run(
-            ["git", "clone", str(self.remote), str(self.work)],
+            [GIT_COMMAND, "clone", str(self.remote), str(self.work)],
             check=True, capture_output=True,
         )
         author_env = {
@@ -352,7 +364,7 @@ class EnsureWorktreeRealGitConcurrencyTest(unittest.TestCase):
         (self.work / "README.md").write_text("hello\n")
         _run_git("add", ".", cwd=self.work)
         _run_git("commit", "-m", "initial", cwd=self.work, env_extra=author_env)
-        _run_git("push", "origin", "main", cwd=self.work)
+        _run_git("push", ORIGIN_REMOTE, BASE_BRANCH, cwd=self.work)
 
         # Point WORKTREES_DIR at our tmp dir for the duration of the test
         # so `_repo_worktrees_root` creates worktrees here, not in the
@@ -364,8 +376,8 @@ class EnsureWorktreeRealGitConcurrencyTest(unittest.TestCase):
         self.addCleanup(self._wd_patch.stop)
 
         self.spec = config.RepoSpec(
-            slug="acme/widget", target_root=self.work, base_branch="main",
-            remote_name="origin",
+            slug="acme/widget", target_root=self.work, base_branch=BASE_BRANCH,
+            remote_name=ORIGIN_REMOTE,
         )
 
         self._fetch_patch = patch.object(
@@ -385,7 +397,7 @@ class EnsureWorktreeRealGitConcurrencyTest(unittest.TestCase):
             threading.Thread(target=recorder, args=(issue_number,))
             for issue_number in issue_numbers
         ]
-        _start_and_join(threads, timeout=30.0)
+        _start_and_join(threads, timeout=REAL_GIT_TIMEOUT_SECONDS)
         for thread in threads:
             self.assertFalse(
                 thread.is_alive(), "worker timed out (possible lock contention)",
@@ -394,7 +406,7 @@ class EnsureWorktreeRealGitConcurrencyTest(unittest.TestCase):
         # No worker raised; every requested worktree path exists on disk.
         errors = [
             (number, error)
-            for number, _, error in recorder.results
+            for number, _, error in recorder.outcomes
             if error is not None
         ]
         self.assertEqual(
@@ -402,10 +414,10 @@ class EnsureWorktreeRealGitConcurrencyTest(unittest.TestCase):
             f"concurrent _ensure_worktree raised: {errors!r}",
         )
         self.assertEqual(
-            sorted(number for number, _, _ in recorder.results),
+            sorted(number for number, _, _ in recorder.outcomes),
             issue_numbers,
         )
-        for issue_number, worktree, _ in recorder.results:
+        for issue_number, worktree, _ in recorder.outcomes:
             self.assertIsNotNone(worktree)
             self.assertTrue(
                 worktree.exists(),

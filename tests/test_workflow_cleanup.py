@@ -14,6 +14,15 @@ from tests.workflow_helpers import _TEST_SPEC
 
 CLEANUP_ISSUE_NUMBER = 99
 CLEANUP_BRANCH = "orchestrator/geserdugarov__agent-orchestrator/issue-99"
+DECOMPOSE_ISSUE_NUMBER = 77
+REMOTE_BRANCH = "orchestrator/geserdugarov__agent-orchestrator/issue-1"
+REMOTE_REF = f"heads/{REMOTE_BRANCH}"
+WORKTREE_COMMAND = "worktree"
+REV_PARSE_COMMAND = "rev-parse"
+BRANCH_COMMAND = "branch"
+GIT_HELPER_ATTR = "_git"
+NOT_FOUND_STATUS = 404
+FORBIDDEN_STATUS = 403
 
 
 def _git_result(*, returncode: int = 0, stderr: str = "") -> MagicMock:
@@ -27,7 +36,7 @@ class _CleanupGit:
 
     def __call__(self, *args, cwd):
         command = args[0]
-        if command == "rev-parse":
+        if command == REV_PARSE_COMMAND:
             return _git_result(returncode=self._rev_parse_returncode)
         if self._fail_deletes:
             return _git_result(returncode=1, stderr="boom")
@@ -54,7 +63,7 @@ def _run_cleanup(*, worktree_exists: bool, local_branch_exists: bool):
         exists=worktree_exists,
         path=f"/tmp/issue-{CLEANUP_ISSUE_NUMBER}",
     )
-    with patch.object(worktree_lifecycle, "_git", git_mock), patch.object(
+    with patch.object(worktree_lifecycle, GIT_HELPER_ATTR, git_mock), patch.object(
         worktree_lifecycle,
         "_worktree_path",
         return_value=worktree_path,
@@ -99,11 +108,12 @@ class CleanupTerminalBranchTest(unittest.TestCase):
         cmds = [call.args[0] for call in git_mock.call_args_list]
         self.assertEqual(
             cmds[:3],
-            ["worktree", "rev-parse", "branch"],
+            [WORKTREE_COMMAND, REV_PARSE_COMMAND, BRANCH_COMMAND],
         )
         # The branch -D invocation targets the per-issue branch by name.
         branch_call = next(
-            call for call in git_mock.call_args_list if call.args[0] == "branch"
+            call for call in git_mock.call_args_list
+            if call.args[0] == BRANCH_COMMAND
         )
         self.assertEqual(branch_call.args[1], "-D")
         self.assertEqual(branch_call.args[2], CLEANUP_BRANCH)
@@ -118,9 +128,9 @@ class CleanupTerminalBranchTest(unittest.TestCase):
         )
 
         cmds = [call.args[0] for call in git_mock.call_args_list]
-        self.assertNotIn("worktree", cmds)
-        self.assertIn("rev-parse", cmds)
-        self.assertIn("branch", cmds)
+        self.assertNotIn(WORKTREE_COMMAND, cmds)
+        self.assertIn(REV_PARSE_COMMAND, cmds)
+        self.assertIn(BRANCH_COMMAND, cmds)
         self.assertEqual(gh.deleted_remote_branches, [CLEANUP_BRANCH])
 
     def test_skips_local_delete_when_branch_absent(self) -> None:
@@ -132,9 +142,9 @@ class CleanupTerminalBranchTest(unittest.TestCase):
         )
 
         cmds = [call.args[0] for call in git_mock.call_args_list]
-        self.assertIn("worktree", cmds)
-        self.assertIn("rev-parse", cmds)
-        self.assertNotIn("branch", cmds)
+        self.assertIn(WORKTREE_COMMAND, cmds)
+        self.assertIn(REV_PARSE_COMMAND, cmds)
+        self.assertNotIn(BRANCH_COMMAND, cmds)
         self.assertEqual(gh.deleted_remote_branches, [CLEANUP_BRANCH])
 
     def test_swallows_all_failures(self) -> None:
@@ -154,7 +164,7 @@ class CleanupTerminalBranchTest(unittest.TestCase):
             path=f"/tmp/issue-{CLEANUP_ISSUE_NUMBER}",
         )
 
-        with patch.object(worktree_lifecycle, "_git", git_mock), \
+        with patch.object(worktree_lifecycle, GIT_HELPER_ATTR, git_mock), \
              patch.object(worktree_lifecycle, "_worktree_path", return_value=wt_path):
             # Must NOT raise even though every sub-step failed.
             workflow._cleanup_terminal_branch(
@@ -176,7 +186,7 @@ class CleanupTerminalBranchTest(unittest.TestCase):
             path=f"/tmp/issue-{CLEANUP_ISSUE_NUMBER}",
         )
 
-        with patch.object(worktree_lifecycle, "_git", git_mock), \
+        with patch.object(worktree_lifecycle, GIT_HELPER_ATTR, git_mock), \
              patch.object(worktree_lifecycle, "_worktree_path", return_value=wt_path):
             # Must NOT raise even though every `_git` invocation throws.
             workflow._cleanup_terminal_branch(
@@ -195,8 +205,6 @@ class CleanupDecomposeWorktreeTest(unittest.TestCase):
     path, rides the best-effort guard.
     """
 
-    ISSUE_NUMBER = 77
-
     def test_swallows_path_resolution_failure(self) -> None:
         # Path resolution rides inside the best-effort guard: a raise here
         # (e.g. a malformed spec) must be logged, not propagated, or it
@@ -207,7 +215,7 @@ class CleanupDecomposeWorktreeTest(unittest.TestCase):
         ):
             # Must NOT raise.
             worktree_lifecycle._cleanup_decompose_worktree(
-                _TEST_SPEC, self.ISSUE_NUMBER,
+                _TEST_SPEC, DECOMPOSE_ISSUE_NUMBER,
             )
 
     def test_swallows_git_removal_failure(self) -> None:
@@ -222,11 +230,12 @@ class CleanupDecomposeWorktreeTest(unittest.TestCase):
             worktree_lifecycle, "_decompose_worktree_path",
             return_value=wt_path,
         ), patch.object(
-            worktree_lifecycle, "_git", side_effect=OSError("git not found"),
+            worktree_lifecycle, GIT_HELPER_ATTR,
+            side_effect=OSError("git not found"),
         ):
             # Must NOT raise even though the git removal throws.
             worktree_lifecycle._cleanup_decompose_worktree(
-                _TEST_SPEC, self.ISSUE_NUMBER,
+                _TEST_SPEC, DECOMPOSE_ISSUE_NUMBER,
             )
 
 
@@ -239,18 +248,18 @@ class DeleteRemoteBranchTest(unittest.TestCase):
 
     def test_success(self) -> None:
         client = _client_with_ref(raise_status=None)
-        self.assertTrue(client.delete_remote_branch("orchestrator/geserdugarov__agent-orchestrator/issue-1"))
+        self.assertTrue(client.delete_remote_branch(REMOTE_BRANCH))
         client.repo.get_git_ref.assert_called_once_with(
-            "heads/orchestrator/geserdugarov__agent-orchestrator/issue-1"
+            REMOTE_REF
         )
 
-    def test_404_treated_as_success(self) -> None:
-        client = _client_with_ref(raise_status=404)
-        self.assertTrue(client.delete_remote_branch("orchestrator/geserdugarov__agent-orchestrator/issue-1"))
+    def test_missing_ref_treated_as_success(self) -> None:
+        client = _client_with_ref(raise_status=NOT_FOUND_STATUS)
+        self.assertTrue(client.delete_remote_branch(REMOTE_BRANCH))
 
     def test_other_error_returns_false(self) -> None:
-        client = _client_with_ref(raise_status=403)
-        self.assertFalse(client.delete_remote_branch("orchestrator/geserdugarov__agent-orchestrator/issue-1"))
+        client = _client_with_ref(raise_status=FORBIDDEN_STATUS)
+        self.assertFalse(client.delete_remote_branch(REMOTE_BRANCH))
 
 
 if __name__ == "__main__":

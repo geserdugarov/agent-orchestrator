@@ -9,12 +9,25 @@ from pathlib import Path
 from orchestrator import config, workflow
 from orchestrator.github import PinnedState
 
+BASE_BRANCH = "main"
+MIGRATION_REPO_SLUG = "geserdugarov/agent-orchestrator"
+MIGRATION_TARGET_ROOT = Path("/tmp/x")
+ALICE_REPO_SLUG = "alice/repo"
+LOCK_SUFFIX_SLUG = "owner/foo.lock"
+DOUBLE_DOT_SLUG = "owner/foo..bar"
+BRANCH_KEY = "branch"
+LEGACY_BRANCH = "orchestrator/issue-7"
+NAMESPACED_BRANCH = "orchestrator/geserdugarov__agent-orchestrator/issue-7"
+STAGE_LAYOUT_ISSUE_NUMBER = 11
+SHARED_BRANCH_ISSUE_NUMBER = 15
+PR_NUMBER = 42
+
 
 def _spec(repo_slug: str) -> config.RepoSpec:
     return config.RepoSpec(
         slug=repo_slug,
         target_root=Path(f"/tmp/{workflow._sanitize_slug(repo_slug)}-target"),
-        base_branch="main",
+        base_branch=BASE_BRANCH,
     )
 
 
@@ -24,14 +37,14 @@ def _branch(repo_slug: str, issue_number: int = 1) -> str:
 
 def _migration_spec() -> config.RepoSpec:
     return config.RepoSpec(
-        slug="geserdugarov/agent-orchestrator",
-        target_root=Path("/tmp/x"),
-        base_branch="main",
+        slug=MIGRATION_REPO_SLUG,
+        target_root=MIGRATION_TARGET_ROOT,
+        base_branch=BASE_BRANCH,
     )
 
 
-def _state(data=None) -> PinnedState:
-    return PinnedState(comment_id=None, data=dict(data or {}))
+def _state(state_data=None) -> PinnedState:
+    return PinnedState(comment_id=None, data=dict(state_data or {}))
 
 
 class WorktreePathSlugNamespaceTest(unittest.TestCase):
@@ -43,7 +56,7 @@ class WorktreePathSlugNamespaceTest(unittest.TestCase):
     """
 
     def test_distinct_slugs_same_number_never_collide(self) -> None:
-        spec_a = _spec("alice/repo")
+        spec_a = _spec(ALICE_REPO_SLUG)
         spec_b = _spec("bob/repo")
         path_a = workflow._worktree_path(spec_a, 7)
         path_b = workflow._worktree_path(spec_b, 7)
@@ -56,7 +69,7 @@ class WorktreePathSlugNamespaceTest(unittest.TestCase):
         self.assertEqual(path_b.parent.parent, config.WORKTREES_DIR)
 
     def test_decompose_path_also_namespaced_by_slug(self) -> None:
-        spec_a = _spec("alice/repo")
+        spec_a = _spec(ALICE_REPO_SLUG)
         spec_b = _spec("bob/repo")
         self.assertNotEqual(
             workflow._decompose_worktree_path(spec_a, 7),
@@ -68,8 +81,8 @@ class WorktreePathSlugNamespaceTest(unittest.TestCase):
         # share the per-repo subdirectory so cleanup on the parent dir
         # also reaps the decomposer scratch.
         spec = _spec("owner/name")
-        impl = workflow._worktree_path(spec, 11)
-        dec = workflow._decompose_worktree_path(spec, 11)
+        impl = workflow._worktree_path(spec, STAGE_LAYOUT_ISSUE_NUMBER)
+        dec = workflow._decompose_worktree_path(spec, STAGE_LAYOUT_ISSUE_NUMBER)
         self.assertEqual(impl.parent, dec.parent)
 
 
@@ -113,9 +126,9 @@ class SanitizeSlugTest(unittest.TestCase):
     def test_default_repo_spec_path_format(self) -> None:
         # Anchor the documented `<owner>__<name>/issue-N` layout.
         spec = config.RepoSpec(
-            slug="geserdugarov/agent-orchestrator",
-            target_root=Path("/tmp/x"),
-            base_branch="main",
+            slug=MIGRATION_REPO_SLUG,
+            target_root=MIGRATION_TARGET_ROOT,
+            base_branch=BASE_BRANCH,
         )
         path = workflow._worktree_path(spec, 9)
         self.assertEqual(
@@ -136,24 +149,24 @@ class BranchNameSlugNamespaceTest(unittest.TestCase):
         spec_a = config.RepoSpec(
             slug="geserdugarov/lance-open-source",
             target_root=Path("/tmp/shared-clone"),
-            base_branch="main",
+            base_branch=BASE_BRANCH,
         )
         spec_b = config.RepoSpec(
             slug="geserdugarov/lance-private",
             target_root=Path("/tmp/shared-clone"),
-            base_branch="main",
+            base_branch=BASE_BRANCH,
         )
 
         self.assertNotEqual(
-            workflow._branch_name(spec_a, 15),
-            workflow._branch_name(spec_b, 15),
+            workflow._branch_name(spec_a, SHARED_BRANCH_ISSUE_NUMBER),
+            workflow._branch_name(spec_b, SHARED_BRANCH_ISSUE_NUMBER),
         )
 
     def test_branch_name_format(self) -> None:
         spec = config.RepoSpec(
-            slug="geserdugarov/agent-orchestrator",
-            target_root=Path("/tmp/x"),
-            base_branch="main",
+            slug=MIGRATION_REPO_SLUG,
+            target_root=MIGRATION_TARGET_ROOT,
+            base_branch=BASE_BRANCH,
         )
         self.assertEqual(
             workflow._branch_name(spec, 9),
@@ -163,14 +176,14 @@ class BranchNameSlugNamespaceTest(unittest.TestCase):
     def test_branch_name_keeps_orchestrator_prefix(self) -> None:
         # `_cleanup_terminal_branch` relies on the `orchestrator/` prefix
         # to constrain what branches it is willing to delete.
-        for repo_slug in ("alice/repo", "bob/repo", "weird name/x"):
+        for repo_slug in (ALICE_REPO_SLUG, "bob/repo", "weird name/x"):
             spec = config.RepoSpec(
                 slug=repo_slug,
-                target_root=Path("/tmp/x"),
-                base_branch="main",
+                target_root=MIGRATION_TARGET_ROOT,
+                base_branch=BASE_BRANCH,
             )
             self.assertTrue(
-                workflow._branch_name(spec, 42).startswith("orchestrator/"),
+                workflow._branch_name(spec, PR_NUMBER).startswith("orchestrator/"),
                 repo_slug,
             )
 
@@ -191,7 +204,7 @@ class SanitizeBranchSegmentTest(unittest.TestCase):
         # injectivity suffix is appended because the ref-only rewrite
         # is information-lossy (`foo.lock` and `foo_lock` would
         # otherwise collide).
-        out = workflow._sanitize_branch_segment("owner/foo.lock")
+        out = workflow._sanitize_branch_segment(LOCK_SUFFIX_SLUG)
         self.assertTrue(
             out.startswith("owner__foo_lock__h"),
             f"unexpected sanitized form: {out!r}",
@@ -201,7 +214,7 @@ class SanitizeBranchSegmentTest(unittest.TestCase):
         self.assertRegex(out, r"^owner__foo_lock__h[0-9a-f]{16}$")
 
     def test_double_dot_collapses_to_underscore(self) -> None:
-        out = workflow._sanitize_branch_segment("owner/foo..bar")
+        out = workflow._sanitize_branch_segment(DOUBLE_DOT_SLUG)
         self.assertRegex(out, r"^owner__foo_bar__h[0-9a-f]{16}$")
         # Triple+ dot runs collapse to a single `_` too.
         out3 = workflow._sanitize_branch_segment("a/...b")
@@ -218,8 +231,8 @@ class SanitizeBranchSegmentTest(unittest.TestCase):
         # injectivity suffix is appended because the filesystem-safe
         # form is already git-ref-safe.
         for repo_slug in (
-            "geserdugarov/agent-orchestrator",
-            "alice/repo",
+            MIGRATION_REPO_SLUG,
+            ALICE_REPO_SLUG,
             "acme/widget-private",
         ):
             self.assertEqual(
@@ -236,18 +249,19 @@ class SanitizeBranchSegmentTest(unittest.TestCase):
         # the same branch and the slug-namespacing fix would regress
         # for those slug shapes.
         ambiguous_pairs = [
-            ("owner/foo.lock", "owner/foo_lock"),
-            ("owner/foo..bar", "owner/foo_bar"),
+            (LOCK_SUFFIX_SLUG, "owner/foo_lock"),
+            (DOUBLE_DOT_SLUG, "owner/foo_bar"),
             ("owner/foo.", "owner/foo_"),
             ("owner/foo...bar", "owner/foo_bar"),
             ("owner/...", "owner/__"),
         ]
-        for a, b in ambiguous_pairs:
-            seg_a = workflow._sanitize_branch_segment(a)
-            seg_b = workflow._sanitize_branch_segment(b)
+        for first_slug, second_slug in ambiguous_pairs:
+            seg_a = workflow._sanitize_branch_segment(first_slug)
+            seg_b = workflow._sanitize_branch_segment(second_slug)
             self.assertNotEqual(
                 seg_a, seg_b,
-                f"slugs {a!r} and {b!r} both produced {seg_a!r}",
+                f"slugs {first_slug!r} and {second_slug!r} both produced "
+                f"{seg_a!r}",
             )
 
     def test_hash_suffix_is_deterministic(self) -> None:
@@ -255,7 +269,7 @@ class SanitizeBranchSegmentTest(unittest.TestCase):
         # always produces the same branch -- a stage handler must be
         # able to recompute the branch on every tick without needing
         # to read prior state.
-        repo_slug = "owner/foo.lock"
+        repo_slug = LOCK_SUFFIX_SLUG
         self.assertEqual(
             workflow._sanitize_branch_segment(repo_slug),
             workflow._sanitize_branch_segment(repo_slug),
@@ -272,8 +286,8 @@ class BranchRefFormatTest(unittest.TestCase):
         # filesystem-only sanitizer would smuggle through to the
         # first `git worktree add`.
         pathological = [
-            "owner/foo.lock",
-            "owner/foo..bar",
+            LOCK_SUFFIX_SLUG,
+            DOUBLE_DOT_SLUG,
             "owner/foo.",
             "owner/.foo",
             "owner/foo.lock.lock",
@@ -288,14 +302,14 @@ class BranchRefFormatTest(unittest.TestCase):
         ]
         for repo_slug in pathological:
             branch = _branch(repo_slug, 1)
-            r = subprocess.run(
+            git_result = subprocess.run(
                 ["git", "check-ref-format", "--branch", branch],
                 capture_output=True, text=True,
             )
             self.assertEqual(
-                r.returncode, 0,
+                git_result.returncode, 0,
                 f"slug={repo_slug!r} produced invalid branch "
-                f"{branch!r}: stderr={r.stderr!r}",
+                f"{branch!r}: stderr={git_result.stderr!r}",
             )
 
     def test_branch_name_uses_branch_safe_segment(self) -> None:
@@ -303,11 +317,11 @@ class BranchRefFormatTest(unittest.TestCase):
         # sanitizer, not the filesystem-only one -- regression guard
         # for the bug.
         self.assertRegex(
-            _branch("owner/foo.lock", 7),
+            _branch(LOCK_SUFFIX_SLUG, 7),
             r"^orchestrator/owner__foo_lock__h[0-9a-f]{16}/issue-7$",
         )
         self.assertRegex(
-            _branch("owner/foo..bar", 7),
+            _branch(DOUBLE_DOT_SLUG, 7),
             r"^orchestrator/owner__foo_bar__h[0-9a-f]{16}/issue-7$",
         )
 
@@ -327,10 +341,10 @@ class ResolveBranchNamePinnedTest(unittest.TestCase):
 
     def test_pinned_legacy_branch_is_honored(self) -> None:
         spec = _migration_spec()
-        state = _state({"branch": "orchestrator/issue-7"})
+        state = _state({BRANCH_KEY: LEGACY_BRANCH})
         self.assertEqual(
             workflow._resolve_branch_name(state, spec, 7),
-            "orchestrator/issue-7",
+            LEGACY_BRANCH,
         )
 
     def test_no_pinned_uses_namespaced_default(self) -> None:
@@ -338,7 +352,7 @@ class ResolveBranchNamePinnedTest(unittest.TestCase):
         state = _state({})
         self.assertEqual(
             workflow._resolve_branch_name(state, spec, 7),
-            "orchestrator/geserdugarov__agent-orchestrator/issue-7",
+            NAMESPACED_BRANCH,
         )
 
     def test_outside_namespace_pin_is_ignored(
@@ -349,10 +363,10 @@ class ResolveBranchNamePinnedTest(unittest.TestCase):
         # check keeps `_cleanup_terminal_branch`'s "orchestrator-owned
         # namespace" invariant intact.
         spec = _migration_spec()
-        state = _state({"branch": "feature/foreign-branch"})
+        state = _state({BRANCH_KEY: "feature/foreign-branch"})
         self.assertEqual(
             workflow._resolve_branch_name(state, spec, 7),
-            "orchestrator/geserdugarov__agent-orchestrator/issue-7",
+            NAMESPACED_BRANCH,
         )
 
     def test_pinned_namespaced_branch_round_trips(self) -> None:
@@ -360,7 +374,7 @@ class ResolveBranchNamePinnedTest(unittest.TestCase):
         # tick honors it unchanged.
         spec = _migration_spec()
         state = _state({
-            "branch": "orchestrator/geserdugarov__agent-orchestrator/issue-9",
+            BRANCH_KEY: "orchestrator/geserdugarov__agent-orchestrator/issue-9",
         })
         self.assertEqual(
             workflow._resolve_branch_name(state, spec, 9),
@@ -369,11 +383,11 @@ class ResolveBranchNamePinnedTest(unittest.TestCase):
 
     def test_non_string_pinned_branch_falls_back(self) -> None:
         spec = _migration_spec()
-        for bad in (None, 42, ["orchestrator/issue-7"]):
-            state = _state({"branch": bad})
+        for bad in (None, PR_NUMBER, [LEGACY_BRANCH]):
+            state = _state({BRANCH_KEY: bad})
             self.assertEqual(
                 workflow._resolve_branch_name(state, spec, 7),
-                "orchestrator/geserdugarov__agent-orchestrator/issue-7",
+                NAMESPACED_BRANCH,
                 f"bad pinned value {bad!r} did not fall back",
             )
 
@@ -390,10 +404,10 @@ class ResolveBranchNamePrMigrationTest(unittest.TestCase):
         # new slug-namespaced branch, push there, open a duplicate
         # PR, and orphan the original.
         spec = _migration_spec()
-        state = _state({"pr_number": 42})
+        state = _state({"pr_number": PR_NUMBER})
         self.assertEqual(
             workflow._resolve_branch_name(state, spec, 7),
-            "orchestrator/issue-7",
+            LEGACY_BRANCH,
         )
 
     def test_pinned_legacy_pr_honors_pin(self) -> None:
@@ -404,12 +418,12 @@ class ResolveBranchNamePrMigrationTest(unittest.TestCase):
         # form, but the pinned-value path is more specific.
         spec = _migration_spec()
         state = _state({
-            "pr_number": 42,
-            "branch": "orchestrator/issue-7",
+            "pr_number": PR_NUMBER,
+            BRANCH_KEY: LEGACY_BRANCH,
         })
         self.assertEqual(
             workflow._resolve_branch_name(state, spec, 7),
-            "orchestrator/issue-7",
+            LEGACY_BRANCH,
         )
 
     def test_fresh_pr_namespaced_pin_wins(self) -> None:
@@ -419,12 +433,12 @@ class ResolveBranchNamePrMigrationTest(unittest.TestCase):
         # every new PR would silently route through the legacy ref.
         spec = _migration_spec()
         state = _state({
-            "pr_number": 42,
-            "branch": "orchestrator/geserdugarov__agent-orchestrator/issue-7",
+            "pr_number": PR_NUMBER,
+            BRANCH_KEY: NAMESPACED_BRANCH,
         })
         self.assertEqual(
             workflow._resolve_branch_name(state, spec, 7),
-            "orchestrator/geserdugarov__agent-orchestrator/issue-7",
+            NAMESPACED_BRANCH,
         )
 
 

@@ -44,7 +44,7 @@ Do not mark a stage complete until its completion gate is satisfied.
 | 3 | Remaining production complexity | 5/6 | [ ] |
 | 4 | Remaining production style and structure | 5/5 | [x] |
 | 5 | Test structure and complexity | 7/7 | [x] |
-| 6 | Test literals and naming | 2/7 | [ ] |
+| 6 | Test literals and naming | 3/7 | [ ] |
 | 7 | Long-tail cleanup and final verification | 0/5 | [ ] |
 
 ## Finding-count progress
@@ -385,7 +385,7 @@ Apply these rules consistently:
 
 ### Package 6.3 — Scheduler, base-sync, git, and worktree test literals
 
-- [ ] Resolve the same rule groups in scheduler, synchronization, publication, and worktree tests.
+- [x] Resolve the same rule groups in scheduler, synchronization, publication, and worktree tests.
 
 ### Package 6.4 — Decomposition, question, and documenting test literals
 
@@ -970,9 +970,10 @@ considered.
   `tests/test_workflow_worktree_serialization.py`.
 - Rule: `WPS204`, `WPS210`, and `WPS213`.
 - Reason: Shared schedulers, event gates, patch bundles, git results, state recorders, and worktree fixtures were
-  extracted. The remaining expressions and locals describe distinct ordered calls, state transitions, concurrency
-  signals, or per-field outcomes. Further extraction either hides the scenario sequence behind a generic assertion
-  helper or merely trades repeated expressions for additional locals.
+  extracted. Stable repo keys, wait budgets, command and event fields, and fixture identities are named. The remaining
+  expressions and locals describe distinct ordered calls, state transitions, concurrency signals, or per-field
+  outcomes. Further extraction either hides the scenario sequence behind a generic assertion helper or merely trades
+  repeated expressions for additional locals.
 - Protected by: the 167 focused Package 5.3 tests.
 - Reviewed: [x]
 
@@ -1220,7 +1221,23 @@ Add one row for every implementation session, including partial sessions.
 | 2026-07-20 | 5.5 | Complete | WPS 680->560; 234 focused; gate 2149p/3s | Not committed | Start Package 5.6 |
 | 2026-07-20 | 5.6 | Complete | WPS 1272->1161; 282 focused; gate 2149p/3s | Not committed | Start Package 5.7 |
 | 2026-07-21 | 5.7 | Complete | WPS 851->650; 287 focused; gate 2161p/3s | Not committed | Start Package 6.2 |
-| 2026-07-21 | 6.2 | Complete | WPS 566->288; target 374->130; 275 focused; gate 2173p/3s | Not committed | Start Package 6.3 |
+| 2026-07-21 | 6.2 | Complete | WPS 566->288; target 374->130; 275 focused; 2173p/3s | None | Start 6.3 |
+| 2026-07-21 | 6.3 | Complete | WPS 363->117; target 279->33; 167f; 2204p/3s | None | Start 6.4 |
+
+Package 6.3 is **complete**. The pass covered scheduler execution and routing, base-sync unit and real-git scenarios,
+branch publication, cleanup, worktree path resolution, and worktree serialization. Repository slugs, git commands and
+outputs, branch and event fields, wait budgets, and issue / PR / comment identities now use names tied to their test
+domain. Ambiguous call, event, subprocess-result, and outcome variables were renamed; the decompose issue constant
+moved to module scope; and numeric crash-recovery / HTTP-status test names now describe their behavior.
+
+The scoped `--select=WPS` count fell from 363 to 117. The Package 6.3 rule set fell from 279 to 33: `WPS110` (8),
+`WPS111` (33), `WPS114` (3), `WPS115` (1), `WPS117` (4), `WPS226` (43), `WPS358` (1), and `WPS432` (153) were
+cleared. The 33 retained `WPS204` findings are the reviewed direct scheduler and base-sync scenario expressions in the
+accepted-remainder register. The 116 structural findings assigned to Stage 5 remain unchanged, as does the single
+`WPS237` long-tail finding assigned to Stage 7; no new rule family was introduced.
+
+All 167 focused tests and repository-wide Ruff pass. The complete tracked suite passes with 2,204 tests and 3
+live-Postgres skips; both committed-range and working-tree diff checks are clean.
 
 Package 6.2 is **complete**. The pass covered `test_agents.py`, `test_usage.py`, `test_main.py`, `test_config.py`,
 and `main_helpers.py`. Backend / CLI / environment tokens, repository fixtures, timing budgets, signal exit codes,
