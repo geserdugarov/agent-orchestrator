@@ -27,15 +27,40 @@ from tests.workflow_helpers import (
 )
 
 
+_BACKEND_CLAUDE = "claude"
+_COST_SOURCE_ESTIMATED = "estimated"
+_COST_SOURCE_REPORTED = "reported"
+_COST_SOURCE_UNKNOWN = "unknown-price"
+_RUNS_KEY = "issue_agent_runs"
+_TOKENS_KEY = "issue_total_tokens"
+_COST_KEY = "issue_total_cost_usd"
+_COST_SOURCES_KEY = "issue_cost_sources"
+_RESUME_ISSUE_NUMBER = 940
+_DEVELOPER_ISSUE_NUMBER = 30
+_INTERRUPTED_DEVELOPER_ISSUE_NUMBER = 31
+_REVIEWER_ISSUE_NUMBER = 32
+_INTERRUPTED_REVIEWER_ISSUE_NUMBER = 33
+_CLAUDE_OUTPUT_TOKENS = 50
+_CLAUDE_CACHE_READ_TOKENS = 30
+_CLAUDE_CACHE_WRITE_TOKENS = 20
+_CLAUDE_RUN_COST = 1.5
+_CLAUDE_TOTAL_TOKENS = 200
+_CODEX_OUTPUT_TOKENS = 40
+_CODEX_TOTAL_TOKENS = 140
+_MULTI_RUN_COST = 2.0
+_MULTI_RUN_TOKENS = 22
+_MULTI_RUN_TOTAL_COST = 3.0
+
+
 def _usage(**overrides) -> UsageMetrics:
-    base = dict(backend="claude", cost_source="estimated")
+    base = dict(backend=_BACKEND_CLAUDE, cost_source=_COST_SOURCE_ESTIMATED)
     base.update(overrides)
     return UsageMetrics(**base)
 
 
 def _resume_seed():
     gh = FakeGitHubClient()
-    issue = make_issue(940, label="resolving_conflict")
+    issue = make_issue(_RESUME_ISSUE_NUMBER, label="resolving_conflict")
     gh.add_issue(issue)
     return gh, issue
 
@@ -63,15 +88,18 @@ class AccumulateIssueUsageHelperTest(unittest.TestCase):
         workflow._accumulate_issue_usage(
             state,
             _usage(
-                input_tokens=100, output_tokens=50,
-                cache_read_tokens=30, cache_write_tokens=20,
-                cost_usd=1.5, cost_source="estimated",
+                input_tokens=100,
+                output_tokens=_CLAUDE_OUTPUT_TOKENS,
+                cache_read_tokens=_CLAUDE_CACHE_READ_TOKENS,
+                cache_write_tokens=_CLAUDE_CACHE_WRITE_TOKENS,
+                cost_usd=_CLAUDE_RUN_COST,
+                cost_source=_COST_SOURCE_ESTIMATED,
             ),
         )
-        self.assertEqual(state.get("issue_agent_runs"), 1)
-        self.assertEqual(state.get("issue_total_tokens"), 200)
-        self.assertEqual(state.get("issue_total_cost_usd"), 1.5)
-        self.assertEqual(state.get("issue_cost_sources"), ["estimated"])
+        self.assertEqual(state.get(_RUNS_KEY), 1)
+        self.assertEqual(state.get(_TOKENS_KEY), _CLAUDE_TOTAL_TOKENS)
+        self.assertEqual(state.get(_COST_KEY), _CLAUDE_RUN_COST)
+        self.assertEqual(state.get(_COST_SOURCES_KEY), [_COST_SOURCE_ESTIMATED])
 
     def test_codex_cached_tokens_excluded_from_total(self) -> None:
         # codex reports `input_tokens` as the whole prompt and `cached_tokens`
@@ -82,11 +110,14 @@ class AccumulateIssueUsageHelperTest(unittest.TestCase):
             state,
             _usage(
                 backend="codex",
-                input_tokens=100, output_tokens=40, cached_tokens=60,
-                cost_usd=0.5, cost_source="reported",
+                input_tokens=100,
+                output_tokens=_CODEX_OUTPUT_TOKENS,
+                cached_tokens=60,
+                cost_usd=0.5,
+                cost_source=_COST_SOURCE_REPORTED,
             ),
         )
-        self.assertEqual(state.get("issue_total_tokens"), 140)
+        self.assertEqual(state.get(_TOKENS_KEY), _CODEX_TOTAL_TOKENS)
 
     def test_runs_dedupe_sources_and_none_cost(
         self,
@@ -95,22 +126,37 @@ class AccumulateIssueUsageHelperTest(unittest.TestCase):
         # A priced run, an unpriced run (cost None), and a second priced run
         # sharing the first's source.
         workflow._accumulate_issue_usage(
-            usage_state, _usage(input_tokens=10, cost_usd=1.0, cost_source="estimated"),
+            usage_state,
+            _usage(
+                input_tokens=10,
+                cost_usd=1.0,
+                cost_source=_COST_SOURCE_ESTIMATED,
+            ),
         )
         workflow._accumulate_issue_usage(
             usage_state,
-            _usage(input_tokens=5, cost_usd=None, cost_source="unknown-price"),
+            _usage(
+                input_tokens=5,
+                cost_usd=None,
+                cost_source=_COST_SOURCE_UNKNOWN,
+            ),
         )
         workflow._accumulate_issue_usage(
-            usage_state, _usage(output_tokens=7, cost_usd=2.0, cost_source="estimated"),
+            usage_state,
+            _usage(
+                output_tokens=7,
+                cost_usd=_MULTI_RUN_COST,
+                cost_source=_COST_SOURCE_ESTIMATED,
+            ),
         )
-        self.assertEqual(usage_state.get("issue_agent_runs"), 3)
-        self.assertEqual(usage_state.get("issue_total_tokens"), 22)
+        self.assertEqual(usage_state.get(_RUNS_KEY), 3)
+        self.assertEqual(usage_state.get(_TOKENS_KEY), _MULTI_RUN_TOKENS)
         # None-cost run contributes nothing to the dollar total.
-        self.assertEqual(usage_state.get("issue_total_cost_usd"), 3.0)
+        self.assertEqual(usage_state.get(_COST_KEY), _MULTI_RUN_TOTAL_COST)
         # Distinct sources, sorted, for the terminal verdict's (est.)/unknown.
         self.assertEqual(
-            usage_state.get("issue_cost_sources"), ["estimated", "unknown-price"],
+            usage_state.get(_COST_SOURCES_KEY),
+            [_COST_SOURCE_ESTIMATED, _COST_SOURCE_UNKNOWN],
         )
 
     def test_none_usage_is_noop(self) -> None:
@@ -120,10 +166,10 @@ class AccumulateIssueUsageHelperTest(unittest.TestCase):
         workflow._accumulate_issue_usage(empty, None)
         self.assertEqual(empty.data, {})
         # And it leaves existing counters untouched.
-        seeded = PinnedState(data={"issue_agent_runs": 2, "issue_total_tokens": 9})
+        seeded = PinnedState(data={_RUNS_KEY: 2, _TOKENS_KEY: 9})
         workflow._accumulate_issue_usage(seeded, None)
-        self.assertEqual(seeded.get("issue_agent_runs"), 2)
-        self.assertEqual(seeded.get("issue_total_tokens"), 9)
+        self.assertEqual(seeded.get(_RUNS_KEY), 2)
+        self.assertEqual(seeded.get(_TOKENS_KEY), 9)
 
 
 class FormatIssueUsageVerdictTest(unittest.TestCase):
@@ -137,35 +183,41 @@ class FormatIssueUsageVerdictTest(unittest.TestCase):
         self.assertIsNone(workflow._format_issue_usage_verdict(PinnedState()))
         self.assertIsNone(
             workflow._format_issue_usage_verdict(
-                PinnedState(data={"issue_agent_runs": 0}),
+                PinnedState(data={_RUNS_KEY: 0}),
             )
         )
 
     def test_verdict_slots_by_cost_source(self) -> None:
         cases = [
             # (sources, cost_usd) -> expected trailing cost slot
-            (["reported"], 0.87, "$0.87"),
-            (["estimated"], 0.87, "$0.87 (est.)"),
-            (["estimated", "reported"], 1.5, "$1.50 (est.)"),
+            ([_COST_SOURCE_REPORTED], 0.87, "$0.87"),
+            ([_COST_SOURCE_ESTIMATED], 0.87, "$0.87 (est.)"),
+            (
+                [_COST_SOURCE_ESTIMATED, _COST_SOURCE_REPORTED],
+                _CLAUDE_RUN_COST,
+                "$1.50 (est.)",
+            ),
             # An unpriced run collapses the whole figure to `unknown`, and
             # that dominates a co-present estimate (an unknown total is not
             # an estimate).
-            (["unknown-price"], None, "unknown"),
-            (["estimated", "unknown-price"], 0.87, "unknown"),
+            ([_COST_SOURCE_UNKNOWN], None, "unknown"),
+            ([_COST_SOURCE_ESTIMATED, _COST_SOURCE_UNKNOWN], 0.87, "unknown"),
             # A `no-usage` run priced nothing but blocks neither slot.
             (["no-usage"], None, "$0.00"),
         ]
         for sources, cost, expected_cost in cases:
             with self.subTest(sources=sources):
-                data = {
-                    "issue_agent_runs": 3,
-                    "issue_total_tokens": 45200,
-                    "issue_cost_sources": sources,
+                verdict_data = {
+                    _RUNS_KEY: 3,
+                    _TOKENS_KEY: 45200,
+                    _COST_SOURCES_KEY: sources,
                 }
                 if cost is not None:
-                    data["issue_total_cost_usd"] = cost
+                    verdict_data[_COST_KEY] = cost
                 self.assertEqual(
-                    workflow._format_issue_usage_verdict(PinnedState(data=data)),
+                    workflow._format_issue_usage_verdict(
+                        PinnedState(data=verdict_data),
+                    ),
                     f":receipt: this issue: 3 agent runs · "
                     f"45,200 tokens · {expected_cost}",
                 )
@@ -173,10 +225,10 @@ class FormatIssueUsageVerdictTest(unittest.TestCase):
     def test_tokens_are_thousands_separated(self) -> None:
         line = workflow._format_issue_usage_verdict(
             PinnedState(data={
-                "issue_agent_runs": 1,
-                "issue_total_tokens": 1234567,
-                "issue_total_cost_usd": 12.3,
-                "issue_cost_sources": ["reported"],
+                _RUNS_KEY: 1,
+                _TOKENS_KEY: 1234567,
+                _COST_KEY: 12.3,
+                _COST_SOURCES_KEY: [_COST_SOURCE_REPORTED],
             })
         )
         self.assertEqual(
@@ -192,10 +244,10 @@ class DeveloperRunUsageAccumulationTest(unittest.TestCase, _PatchedWorkflowMixin
 
     def test_fresh_spawn_persists_one_run(self) -> None:
         gh = FakeGitHubClient()
-        issue = make_issue(30, label="implementing")
+        issue = make_issue(_DEVELOPER_ISSUE_NUMBER, label="implementing")
         gh.add_issue(issue)
 
-        with patch.object(config, "DEV_AGENT", "claude"):
+        with patch.object(config, "DEV_AGENT", _BACKEND_CLAUDE):
             self._run(
                 lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
                 run_agent=_agent(session_id="sess-fresh", last_message="done"),
@@ -203,20 +255,23 @@ class DeveloperRunUsageAccumulationTest(unittest.TestCase, _PatchedWorkflowMixin
                 push_branch=True,
             )
 
-        state = gh.pinned_data(30)
-        self.assertEqual(state["issue_agent_runs"], 1)
+        state = gh.pinned_data(_DEVELOPER_ISSUE_NUMBER)
+        self.assertEqual(state[_RUNS_KEY], 1)
         # Empty stdout parses to a `no-usage` metric: a counted run with zero
         # tokens and no dollar cost.
-        self.assertEqual(state["issue_total_tokens"], 0)
-        self.assertNotIn("issue_total_cost_usd", state)
-        self.assertEqual(state["issue_cost_sources"], ["no-usage"])
+        self.assertEqual(state[_TOKENS_KEY], 0)
+        self.assertNotIn(_COST_KEY, state)
+        self.assertEqual(state[_COST_SOURCES_KEY], ["no-usage"])
 
     def test_interrupted_spawn_keeps_counters_clear(self) -> None:
         gh = FakeGitHubClient()
-        issue = make_issue(31, label="implementing")
+        issue = make_issue(
+            _INTERRUPTED_DEVELOPER_ISSUE_NUMBER,
+            label="implementing",
+        )
         gh.add_issue(issue)
 
-        with patch.object(config, "DEV_AGENT", "claude"):
+        with patch.object(config, "DEV_AGENT", _BACKEND_CLAUDE):
             self._run(
                 lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
                 run_agent=_agent(
@@ -227,9 +282,9 @@ class DeveloperRunUsageAccumulationTest(unittest.TestCase, _PatchedWorkflowMixin
 
         # The shutdown-sweep contract returns before `write_pinned_state`, so
         # the in-memory fold never reaches GitHub.
-        state = gh.pinned_data(31)
-        self.assertNotIn("issue_agent_runs", state)
-        self.assertNotIn("issue_total_tokens", state)
+        state = gh.pinned_data(_INTERRUPTED_DEVELOPER_ISSUE_NUMBER)
+        self.assertNotIn(_RUNS_KEY, state)
+        self.assertNotIn(_TOKENS_KEY, state)
 
 
 class ResumeRunUsageAccumulationTest(unittest.TestCase):
@@ -239,7 +294,9 @@ class ResumeRunUsageAccumulationTest(unittest.TestCase):
     def test_plain_resume_counts_one_exit(self) -> None:
         gh, issue = _resume_seed()
         gh.seed_state(
-            940, dev_agent="claude", dev_session_id="live-sess",
+            _RESUME_ISSUE_NUMBER,
+            dev_agent=_BACKEND_CLAUDE,
+            dev_session_id="live-sess",
             silent_park_count=0,
         )
         state = gh.read_pinned_state(issue)
@@ -248,16 +305,21 @@ class ResumeRunUsageAccumulationTest(unittest.TestCase):
             workflow, "_ensure_worktree", _fake_worktree,
         ), patch.object(
             workflow, "run_agent",
-            lambda *a, **k: _agent(session_id="live-sess", last_message="ok"),
+            lambda *agent_args, **agent_kwargs: _agent(
+                session_id="live-sess",
+                last_message="ok",
+            ),
         ):
             workflow._resume_dev_with_text(gh, _TEST_SPEC, issue, state, "go")
 
-        self.assertEqual(state.get("issue_agent_runs"), 1)
+        self.assertEqual(state.get(_RUNS_KEY), 1)
 
     def test_poisoned_retry_counts_both_exits(self) -> None:
         gh, issue = _resume_seed()
         gh.seed_state(
-            940, dev_agent="claude", dev_session_id="poisoned-sess",
+            _RESUME_ISSUE_NUMBER,
+            dev_agent=_BACKEND_CLAUDE,
+            dev_session_id="poisoned-sess",
             silent_park_count=0,
         )
         state = gh.read_pinned_state(issue)
@@ -271,7 +333,7 @@ class ResumeRunUsageAccumulationTest(unittest.TestCase):
 
         self.assertEqual(run_recorder.calls, ["poisoned-sess", None])
         # Both the poisoned resume and the fresh retry burned a real exit.
-        self.assertEqual(state.get("issue_agent_runs"), 2)
+        self.assertEqual(state.get(_RUNS_KEY), 2)
 
 
 class ReviewerRunUsageAccumulationTest(unittest.TestCase, _PatchedWorkflowMixin):
@@ -280,13 +342,13 @@ class ReviewerRunUsageAccumulationTest(unittest.TestCase, _PatchedWorkflowMixin)
 
     def test_reviewer_run_persists_one_run(self) -> None:
         gh = FakeGitHubClient()
-        issue = make_issue(32, label="validating")
+        issue = make_issue(_REVIEWER_ISSUE_NUMBER, label="validating")
         gh.add_issue(issue)
         gh.seed_state(
-            32,
-            pr_number=32,
+            _REVIEWER_ISSUE_NUMBER,
+            pr_number=_REVIEWER_ISSUE_NUMBER,
             branch="orchestrator/geserdugarov__agent-orchestrator/issue-32",
-            dev_agent="claude",
+            dev_agent=_BACKEND_CLAUDE,
             dev_session_id="dev-sess",
             review_round=0,
         )
@@ -300,20 +362,23 @@ class ReviewerRunUsageAccumulationTest(unittest.TestCase, _PatchedWorkflowMixin)
                 ),
             )
 
-        state = gh.pinned_data(32)
-        self.assertEqual(state["issue_agent_runs"], 1)
-        self.assertEqual(state["issue_total_tokens"], 0)
-        self.assertEqual(state["issue_cost_sources"], ["no-usage"])
+        state = gh.pinned_data(_REVIEWER_ISSUE_NUMBER)
+        self.assertEqual(state[_RUNS_KEY], 1)
+        self.assertEqual(state[_TOKENS_KEY], 0)
+        self.assertEqual(state[_COST_SOURCES_KEY], ["no-usage"])
 
     def test_interrupted_review_keeps_counters_clear(self) -> None:
         gh = FakeGitHubClient()
-        issue = make_issue(33, label="validating")
+        issue = make_issue(
+            _INTERRUPTED_REVIEWER_ISSUE_NUMBER,
+            label="validating",
+        )
         gh.add_issue(issue)
         gh.seed_state(
-            33,
-            pr_number=33,
+            _INTERRUPTED_REVIEWER_ISSUE_NUMBER,
+            pr_number=_INTERRUPTED_REVIEWER_ISSUE_NUMBER,
             branch="orchestrator/geserdugarov__agent-orchestrator/issue-33",
-            dev_agent="claude",
+            dev_agent=_BACKEND_CLAUDE,
             dev_session_id="dev-sess",
             review_round=0,
             # Seed the drift baseline so `_detect_user_content_change` does not
@@ -333,9 +398,9 @@ class ReviewerRunUsageAccumulationTest(unittest.TestCase, _PatchedWorkflowMixin)
 
         # A shutdown-killed reviewer returns before `write_pinned_state`, so
         # neither the folded counters nor a `reviewer_failed` park reach GitHub.
-        state = gh.pinned_data(33)
-        self.assertNotIn("issue_agent_runs", state)
-        self.assertNotIn("issue_total_tokens", state)
+        state = gh.pinned_data(_INTERRUPTED_REVIEWER_ISSUE_NUMBER)
+        self.assertNotIn(_RUNS_KEY, state)
+        self.assertNotIn(_TOKENS_KEY, state)
         self.assertNotEqual(state.get("park_reason"), "reviewer_failed")
         self.assertFalse(state.get("awaiting_human"))
 

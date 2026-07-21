@@ -143,9 +143,9 @@ def _temp_git_repo_with_local_config(pairs):
         subprocess.run(
             ["git", "init", "-q", td], check=True, capture_output=True,
         )
-        for key, value in pairs:
+        for key, config_value in pairs:
             subprocess.run(
-                ["git", "config", "--local", key, value],
+                ["git", "config", "--local", key, config_value],
                 cwd=td, check=True, capture_output=True,
             )
         yield Path(td)
@@ -186,12 +186,12 @@ def _as_mock(value_or_seq):
     if callable(value_or_seq):
         return value_or_seq
     if isinstance(value_or_seq, (list, tuple)):
-        m = MagicMock()
-        m.side_effect = list(value_or_seq)
-        return m
-    m = MagicMock()
-    m.return_value = value_or_seq
-    return m
+        mock = MagicMock()
+        mock.side_effect = list(value_or_seq)
+        return mock
+    mock = MagicMock()
+    mock.return_value = value_or_seq
+    return mock
 
 
 class _PatchedWorkflowMixin:
@@ -443,6 +443,12 @@ class _TokenResolver:
         return f"ghp-token-for-{slug.replace('/', '-')}"
 
 
+_CONFLICT_ISSUE_NUMBER = 200
+_CONFLICT_BRANCH = _issue_branch(_CONFLICT_ISSUE_NUMBER)
+_CONFLICT_PR_NUMBER = 800
+_CONFLICT_PR_HEAD_SHA = "cafe1234"
+
+
 class _ResolvingConflictMixin(_PatchedWorkflowMixin):
     """Shared seed / merge-run / baseline-hash helpers for the
     `_handle_resolving_conflict` scenario tests split across the focused
@@ -452,10 +458,10 @@ class _ResolvingConflictMixin(_PatchedWorkflowMixin):
     happens.
     """
 
-    ISSUE_NUMBER = 200
-    BRANCH = _issue_branch(ISSUE_NUMBER)
-    PR_NUMBER = 800
-    PR_HEAD_SHA = "cafe1234"
+    issue_number = _CONFLICT_ISSUE_NUMBER
+    issue_branch = _CONFLICT_BRANCH
+    pr_number = _CONFLICT_PR_NUMBER
+    pr_head_sha = _CONFLICT_PR_HEAD_SHA
 
     def _seed(
         self,
@@ -471,26 +477,26 @@ class _ResolvingConflictMixin(_PatchedWorkflowMixin):
     ):
         gh = FakeGitHubClient()
         issue = make_issue(
-            self.ISSUE_NUMBER,
+            self.issue_number,
             label=LABEL_RESOLVING_CONFLICT,
         )
         gh.add_issue(issue)
         pr = FakePR(
-            number=self.PR_NUMBER, head_branch=self.BRANCH,
-            head=FakePRRef(sha=self.PR_HEAD_SHA),
+            number=self.pr_number, head_branch=self.issue_branch,
+            head=FakePRRef(sha=self.pr_head_sha),
             mergeable=False, check_state="success",
             merged=pr_merged, state=pr_state,
         )
         gh.add_pr(pr)
         state = dict(
-            pr_number=self.PR_NUMBER, branch=self.BRANCH,
+            pr_number=self.pr_number, branch=self.issue_branch,
             dev_agent=BACKEND_CLAUDE, dev_session_id="dev-sess",
             review_round=2,
             conflict_round=0,
         )
         if extra_state:
             state.update(extra_state)
-        gh.seed_state(self.ISSUE_NUMBER, **state)
+        gh.seed_state(self.issue_number, **state)
         return gh, issue, pr
 
     def _run_with_merge(
@@ -540,9 +546,9 @@ class _ResolvingConflictMixin(_PatchedWorkflowMixin):
         # Re-seed pinned state with a matching `user_content_hash` (plus any
         # extra fields) so the drift detector's first-encounter persistence
         # doesn't itself write -- these interrupted tests assert ZERO writes.
-        data = gh.pinned_data(self.ISSUE_NUMBER)
-        data.update(extra)
-        data["user_content_hash"] = workflow._compute_user_content_hash(
+        state_data = gh.pinned_data(self.issue_number)
+        state_data.update(extra)
+        state_data["user_content_hash"] = workflow._compute_user_content_hash(
             issue, set(),
         )
-        gh.seed_state(self.ISSUE_NUMBER, **data)
+        gh.seed_state(self.issue_number, **state_data)

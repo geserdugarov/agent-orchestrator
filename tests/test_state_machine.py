@@ -23,16 +23,21 @@ from orchestrator.state_machine import (
 from tests.fakes import FakeGitHubClient, make_issue
 
 
+_VALIDATING_LABEL = "validating"
+_GUARD_ENFORCE = "enforce"
+_GUARD_CONFIG_NAME = "WORKFLOW_TRANSITION_GUARD"
+
+
 def _guarded_issue():
     gh = FakeGitHubClient()
-    issue = make_issue(1, label="validating")
+    issue = make_issue(1, label=_VALIDATING_LABEL)
     gh.add_issue(issue)
     return gh, issue
 
 
-def _coerce_error(value: str) -> ValueError:
+def _coerce_error(label_value: str) -> ValueError:
     try:
-        coerce_workflow_label(value)
+        coerce_workflow_label(label_value)
     except ValueError as error:
         return error
     raise AssertionError("coerce_workflow_label did not reject the value")
@@ -44,7 +49,7 @@ class WorkflowLabelEnumTest(unittest.TestCase):
     membership keeps working unchanged."""
 
     def test_member_equals_its_wire_string(self) -> None:
-        self.assertEqual(WorkflowLabel.VALIDATING, "validating")
+        self.assertEqual(WorkflowLabel.VALIDATING, _VALIDATING_LABEL)
         self.assertEqual(WorkflowLabel.IN_REVIEW, "in_review")
         self.assertTrue(WorkflowLabel.DONE == "done")
 
@@ -57,7 +62,7 @@ class WorkflowLabelEnumTest(unittest.TestCase):
         # string-seeded set -- both must hold (hash/eq match str).
         self.assertIn("blocked", workflow._FAMILY_AWARE_LABELS)
         self.assertIn(WorkflowLabel.BLOCKED, workflow._FAMILY_AWARE_LABELS)
-        self.assertIn("validating", base_sync._PR_REFRESH_DETOUR_LABELS)
+        self.assertIn(_VALIDATING_LABEL, base_sync._PR_REFRESH_DETOUR_LABELS)
         self.assertIn(WorkflowLabel.FIXING, base_sync._PR_REFRESH_DETOUR_LABELS)
 
     def test_workflow_labels_frozenset_is_the_enum(self) -> None:
@@ -95,7 +100,10 @@ class WorkflowLabelEnumTest(unittest.TestCase):
 
 class CoerceWorkflowLabelTest(unittest.TestCase):
     def test_valid_string_returns_member(self) -> None:
-        self.assertIs(coerce_workflow_label("validating"), WorkflowLabel.VALIDATING)
+        self.assertIs(
+            coerce_workflow_label(_VALIDATING_LABEL),
+            WorkflowLabel.VALIDATING,
+        )
 
     def test_member_is_idempotent(self) -> None:
         self.assertIs(
@@ -110,7 +118,8 @@ class CoerceWorkflowLabelTest(unittest.TestCase):
     def test_accepts_value_keyword(self) -> None:
         # `value` is the public keyword; callers may pass the label by name.
         self.assertIs(
-            coerce_workflow_label(value="validating"), WorkflowLabel.VALIDATING
+            coerce_workflow_label(value=_VALIDATING_LABEL),
+            WorkflowLabel.VALIDATING,
         )
 
 
@@ -139,11 +148,11 @@ class LabelWriteTypoGuardTest(unittest.TestCase):
         gh = FakeGitHubClient()
         issue = make_issue(1, label="fixing")
         gh.add_issue(issue)
-        result = gh.workflow_label(issue)
-        self.assertIsInstance(result, WorkflowLabel)
-        self.assertIs(result, WorkflowLabel.FIXING)
+        workflow_label = gh.workflow_label(issue)
+        self.assertIsInstance(workflow_label, WorkflowLabel)
+        self.assertIs(workflow_label, WorkflowLabel.FIXING)
 
-    def test_create_child_issue_rejects_non_workflow_label(self) -> None:
+    def test_create_child_rejects_control_label(self) -> None:
         # A child is born with a workflow label only: a misspelling and any
         # control label (never seeded at creation) both raise here.
         gh = FakeGitHubClient()
@@ -389,17 +398,17 @@ class GuardModeTest(unittest.TestCase):
     def test_enforce_raises_on_illegal(self) -> None:
         with self.assertRaises(IllegalTransition):
             guard_transition(
-                WorkflowLabel.VALIDATING, WorkflowLabel.IN_REVIEW, "enforce",
+                WorkflowLabel.VALIDATING, WorkflowLabel.IN_REVIEW, _GUARD_ENFORCE,
             )
 
     def test_enforce_allows_legal(self) -> None:
         guard_transition(
-            WorkflowLabel.VALIDATING, WorkflowLabel.DOCUMENTING, "enforce",
+            WorkflowLabel.VALIDATING, WorkflowLabel.DOCUMENTING, _GUARD_ENFORCE,
         )  # no raise
 
     def test_enforce_allows_same_label(self) -> None:
         guard_transition(
-            WorkflowLabel.DONE, WorkflowLabel.DONE, "enforce",
+            WorkflowLabel.DONE, WorkflowLabel.DONE, _GUARD_ENFORCE,
         )  # no raise
 
 
@@ -409,7 +418,7 @@ class SetWorkflowLabelGuardWiringTest(unittest.TestCase):
 
     def test_enforce_blocks_illegal_relabel(self) -> None:
         gh, issue = _guarded_issue()
-        with patch.object(config, "WORKFLOW_TRANSITION_GUARD", "enforce"):
+        with patch.object(config, _GUARD_CONFIG_NAME, _GUARD_ENFORCE):
             with self.assertRaises(IllegalTransition):
                 gh.set_workflow_label(issue, WorkflowLabel.IN_REVIEW)
         # Label unchanged after the rejected write.
@@ -417,20 +426,20 @@ class SetWorkflowLabelGuardWiringTest(unittest.TestCase):
 
     def test_warn_allows_illegal_relabel(self) -> None:
         gh, issue = _guarded_issue()
-        with patch.object(config, "WORKFLOW_TRANSITION_GUARD", "warn"):
+        with patch.object(config, _GUARD_CONFIG_NAME, "warn"):
             with self.assertLogs("orchestrator.state_machine", level="WARNING"):
                 gh.set_workflow_label(issue, WorkflowLabel.IN_REVIEW)
         self.assertEqual(gh.workflow_label(issue), WorkflowLabel.IN_REVIEW)
 
     def test_enforce_allows_legal_relabel(self) -> None:
         gh, issue = _guarded_issue()
-        with patch.object(config, "WORKFLOW_TRANSITION_GUARD", "enforce"):
+        with patch.object(config, _GUARD_CONFIG_NAME, _GUARD_ENFORCE):
             gh.set_workflow_label(issue, WorkflowLabel.DOCUMENTING)
         self.assertEqual(gh.workflow_label(issue), WorkflowLabel.DOCUMENTING)
 
     def test_enforce_allows_validation_fix_loop(self) -> None:
         gh, issue = _guarded_issue()
-        with patch.object(config, "WORKFLOW_TRANSITION_GUARD", "enforce"):
+        with patch.object(config, _GUARD_CONFIG_NAME, _GUARD_ENFORCE):
             gh.set_workflow_label(issue, WorkflowLabel.FIXING)
         self.assertEqual(gh.workflow_label(issue), WorkflowLabel.FIXING)
 

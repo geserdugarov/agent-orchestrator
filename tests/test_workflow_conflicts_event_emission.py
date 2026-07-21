@@ -39,7 +39,7 @@ class ResolvingConflictEventEmissionTest(
         self.assertEqual(len(attempts), 1)
         event = attempts[0]
         self.assertEqual(event["stage"], "resolving_conflict")
-        self.assertEqual(event["pr_number"], self.PR_NUMBER)
+        self.assertEqual(event["pr_number"], self.pr_number)
         self.assertEqual(event["method"], "base_rebase")
         self.assertEqual(event["result"], "success")
         self.assertEqual(event[CONFLICT_ROUND], 0)
@@ -105,7 +105,7 @@ class ResolvingConflictEventEmissionTest(
         merged = _events_of(gh, EVENT_PR_MERGED)
         self.assertEqual(len(merged), 1)
         self.assertEqual(merged[0]["stage"], "resolving_conflict")
-        self.assertEqual(merged[0]["pr_number"], self.PR_NUMBER)
+        self.assertEqual(merged[0]["pr_number"], self.pr_number)
         # No base rebase attempted on the terminal path.
         self.assertEqual(_events_of(gh, "merge_attempt"), [])
 
@@ -115,7 +115,7 @@ class ResolvingConflictEventEmissionTest(
         closed = _events_of(gh, EVENT_PR_CLOSED_WITHOUT_MERGE)
         self.assertEqual(len(closed), 1)
         self.assertEqual(closed[0]["stage"], "resolving_conflict")
-        self.assertEqual(closed[0]["pr_number"], self.PR_NUMBER)
+        self.assertEqual(closed[0]["pr_number"], self.pr_number)
 
 
 if __name__ == "__main__":

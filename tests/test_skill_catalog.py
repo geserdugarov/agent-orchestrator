@@ -12,12 +12,29 @@ from unittest.mock import MagicMock, patch
 from orchestrator import analytics, config, skill_catalog
 
 
+_TEST_REPO_SLUG = "geserdugarov/agent-orchestrator"
+_TEST_BASE_BRANCH = "main"
+_TEST_REMOTE_NAME = "origin"
+_DEVELOP_SKILL = "develop"
+_REVIEW_SKILL = "review"
+_IMAGEGEN_SKILL = "imagegen"
+_AGENT_SKILLS_ROOT = ".agents/skills"
+_SKILLS_DIR = "skills"
+_AGENT_DEVELOP_SKILL_PATH = ".agents/skills/develop/SKILL.md"
+_AGENT_REVIEW_SKILL_PATH = ".agents/skills/review/SKILL.md"
+_CLAUDE_REVIEW_SKILL_PATH = ".claude/skills/review/SKILL.md"
+_LIST_SKILL_TREE_METHOD = "_list_skill_tree"
+_RECORD_CATALOG_METHOD = "record_repo_skill_catalog"
+_CODEX_HOME_ENV = "CODEX_HOME"
+_BAD_REF_EXIT_CODE = 128
+
+
 def _spec(
     *,
-    slug: str = "geserdugarov/agent-orchestrator",
+    slug: str = _TEST_REPO_SLUG,
     target_root: str = "/tmp/orchestrator-skill-catalog-target",
-    base_branch: str = "main",
-    remote_name: str = "origin",
+    base_branch: str = _TEST_BASE_BRANCH,
+    remote_name: str = _TEST_REMOTE_NAME,
 ) -> config.RepoSpec:
     return config.RepoSpec(
         slug=slug,
@@ -53,16 +70,16 @@ class ExtractSkillCatalogTest(unittest.TestCase):
         # `.agents/skills/<name>/SKILL.md` definitions are extracted; the
         # name is the single segment between the root and the SKILL.md file.
         paths = [
-            ".agents/skills/develop/SKILL.md",
-            ".agents/skills/review/SKILL.md",
+            _AGENT_DEVELOP_SKILL_PATH,
+            _AGENT_REVIEW_SKILL_PATH,
         ]
         skills, skill_paths = skill_catalog._extract_skill_catalog(paths)
-        self.assertEqual(skills, ["develop", "review"])
+        self.assertEqual(skills, [_DEVELOP_SKILL, _REVIEW_SKILL])
         self.assertEqual(
             skill_paths,
             {
-                "develop": [".agents/skills/develop/SKILL.md"],
-                "review": [".agents/skills/review/SKILL.md"],
+                _DEVELOP_SKILL: [_AGENT_DEVELOP_SKILL_PATH],
+                _REVIEW_SKILL: [_AGENT_REVIEW_SKILL_PATH],
             },
         )
 
@@ -87,21 +104,21 @@ class ExtractSkillCatalogTest(unittest.TestCase):
         # A skill defined under both roots appears once in the names list,
         # but every source path that produced it is preserved (sorted).
         paths = [
-            ".claude/skills/review/SKILL.md",
-            ".agents/skills/review/SKILL.md",
-            ".agents/skills/develop/SKILL.md",
+            _CLAUDE_REVIEW_SKILL_PATH,
+            _AGENT_REVIEW_SKILL_PATH,
+            _AGENT_DEVELOP_SKILL_PATH,
         ]
         skills, skill_paths = skill_catalog._extract_skill_catalog(paths)
-        self.assertEqual(skills, ["develop", "review"])
+        self.assertEqual(skills, [_DEVELOP_SKILL, _REVIEW_SKILL])
         self.assertEqual(
-            skill_paths["review"],
+            skill_paths[_REVIEW_SKILL],
             [
-                ".agents/skills/review/SKILL.md",
-                ".claude/skills/review/SKILL.md",
+                _AGENT_REVIEW_SKILL_PATH,
+                _CLAUDE_REVIEW_SKILL_PATH,
             ],
         )
         self.assertEqual(
-            skill_paths["develop"], [".agents/skills/develop/SKILL.md"],
+            skill_paths[_DEVELOP_SKILL], [_AGENT_DEVELOP_SKILL_PATH],
         )
 
     def test_nested_and_unrelated_paths_ignored(self) -> None:
@@ -111,7 +128,7 @@ class ExtractSkillCatalogTest(unittest.TestCase):
         # all rejected. Blank lines are skipped.
         paths = [
             ".claude/skills/.system/imagegen/SKILL.md",
-            ".agents/skills/review/SKILL.md",
+            _AGENT_REVIEW_SKILL_PATH,
             ".agents/skills/review/README.md",
             ".agents/skills/SKILL.md",
             ".agents/skills/nested/sub/SKILL.md",
@@ -119,9 +136,9 @@ class ExtractSkillCatalogTest(unittest.TestCase):
             "",
         ]
         skills, skill_paths = skill_catalog._extract_skill_catalog(paths)
-        self.assertEqual(skills, ["review"])
+        self.assertEqual(skills, [_REVIEW_SKILL])
         self.assertEqual(
-            skill_paths, {"review": [".agents/skills/review/SKILL.md"]},
+            skill_paths, {_REVIEW_SKILL: [_AGENT_REVIEW_SKILL_PATH]},
         )
 
     def test_empty_input_yields_empty_catalog(self) -> None:
@@ -138,15 +155,15 @@ class RecordRepoSkillCatalogShapeTest(unittest.TestCase):
     def test_record_shape(self) -> None:
         captured = _capture_analytics_records(self)
         analytics.record_repo_skill_catalog(
-            repo="geserdugarov/agent-orchestrator",
-            base_branch="main",
-            remote_name="origin",
-            skills_available=["develop", "review"],
+            repo=_TEST_REPO_SLUG,
+            base_branch=_TEST_BASE_BRANCH,
+            remote_name=_TEST_REMOTE_NAME,
+            skills_available=[_DEVELOP_SKILL, _REVIEW_SKILL],
             skill_paths={
-                "develop": [".agents/skills/develop/SKILL.md"],
-                "review": [
-                    ".agents/skills/review/SKILL.md",
-                    ".claude/skills/review/SKILL.md",
+                _DEVELOP_SKILL: [_AGENT_DEVELOP_SKILL_PATH],
+                _REVIEW_SKILL: [
+                    _AGENT_REVIEW_SKILL_PATH,
+                    _CLAUDE_REVIEW_SKILL_PATH,
                 ],
             },
         )
@@ -156,15 +173,18 @@ class RecordRepoSkillCatalogShapeTest(unittest.TestCase):
         # Repo-level event: issue is the sentinel 0 so the record still
         # satisfies the ts/repo/issue/event envelope without a DDL change.
         self.assertEqual(record["issue"], 0)
-        self.assertEqual(record["repo"], "geserdugarov/agent-orchestrator")
-        self.assertEqual(record["base_branch"], "main")
-        self.assertEqual(record["remote_name"], "origin")
-        self.assertEqual(record["skills_available"], ["develop", "review"])
+        self.assertEqual(record["repo"], _TEST_REPO_SLUG)
+        self.assertEqual(record["base_branch"], _TEST_BASE_BRANCH)
+        self.assertEqual(record["remote_name"], _TEST_REMOTE_NAME)
         self.assertEqual(
-            record["skill_paths"]["review"],
+            record["skills_available"],
+            [_DEVELOP_SKILL, _REVIEW_SKILL],
+        )
+        self.assertEqual(
+            record["skill_paths"][_REVIEW_SKILL],
             [
-                ".agents/skills/review/SKILL.md",
-                ".claude/skills/review/SKILL.md",
+                _AGENT_REVIEW_SKILL_PATH,
+                _CLAUDE_REVIEW_SKILL_PATH,
             ],
         )
         self.assertIsInstance(record["ts"], str)
@@ -177,9 +197,9 @@ class RecordRepoSkillCatalogShapeTest(unittest.TestCase):
         # "scanned, found none" signal); `skill_paths` is dropped when None.
         captured = _capture_analytics_records(self)
         analytics.record_repo_skill_catalog(
-            repo="geserdugarov/agent-orchestrator",
-            base_branch="main",
-            remote_name="origin",
+            repo=_TEST_REPO_SLUG,
+            base_branch=_TEST_BASE_BRANCH,
+            remote_name=_TEST_REMOTE_NAME,
             skills_available=[],
             skill_paths=None,
         )
@@ -216,8 +236,8 @@ class ListSkillTreeTest(unittest.TestCase):
         self.assertEqual(
             lines,
             [
-                ".agents/skills/develop/SKILL.md",
-                ".claude/skills/review/SKILL.md",
+                _AGENT_DEVELOP_SKILL_PATH,
+                _CLAUDE_REVIEW_SKILL_PATH,
             ],
         )
         args, kwargs = git_mock.call_args
@@ -225,7 +245,7 @@ class ListSkillTreeTest(unittest.TestCase):
             args,
             (
                 "ls-tree", "-r", "--name-only", "upstream/release",
-                ".agents/skills", ".claude/skills",
+                _AGENT_SKILLS_ROOT, ".claude/skills",
             ),
         )
         self.assertEqual(kwargs["cwd"], spec.target_root)
@@ -235,7 +255,10 @@ class ListSkillTreeTest(unittest.TestCase):
             spec = _spec(target_root=td)
             with patch.object(
                 skill_catalog, "_git",
-                return_value=_completed(returncode=128, stderr="bad ref"),
+                return_value=_completed(
+                    returncode=_BAD_REF_EXIT_CODE,
+                    stderr="bad ref",
+                ),
             ):
                 self.assertIsNone(skill_catalog._list_skill_tree(spec))
 
@@ -250,27 +273,27 @@ class EmitRepoSkillCatalogTest(unittest.TestCase):
             slug="acme/widgets", remote_name="upstream", base_branch="trunk",
         )
         paths = [
-            ".claude/skills/review/SKILL.md",
-            ".agents/skills/review/SKILL.md",
-            ".agents/skills/develop/SKILL.md",
+            _CLAUDE_REVIEW_SKILL_PATH,
+            _AGENT_REVIEW_SKILL_PATH,
+            _AGENT_DEVELOP_SKILL_PATH,
         ]
         record_mock = MagicMock()
         with patch.object(
-            skill_catalog, "_list_skill_tree", return_value=paths,
+            skill_catalog, _LIST_SKILL_TREE_METHOD, return_value=paths,
         ), patch.object(
-            analytics, "record_repo_skill_catalog", record_mock,
+            analytics, _RECORD_CATALOG_METHOD, record_mock,
         ):
             skill_catalog._emit_repo_skill_catalog(spec)
         record_mock.assert_called_once_with(
             repo="acme/widgets",
             base_branch="trunk",
             remote_name="upstream",
-            skills_available=["develop", "review"],
+            skills_available=[_DEVELOP_SKILL, _REVIEW_SKILL],
             skill_paths={
-                "develop": [".agents/skills/develop/SKILL.md"],
-                "review": [
-                    ".agents/skills/review/SKILL.md",
-                    ".claude/skills/review/SKILL.md",
+                _DEVELOP_SKILL: [_AGENT_DEVELOP_SKILL_PATH],
+                _REVIEW_SKILL: [
+                    _AGENT_REVIEW_SKILL_PATH,
+                    _CLAUDE_REVIEW_SKILL_PATH,
                 ],
             },
         )
@@ -279,9 +302,9 @@ class EmitRepoSkillCatalogTest(unittest.TestCase):
         spec = _spec()
         record_mock = MagicMock()
         with patch.object(
-            skill_catalog, "_list_skill_tree", return_value=[],
+            skill_catalog, _LIST_SKILL_TREE_METHOD, return_value=[],
         ), patch.object(
-            analytics, "record_repo_skill_catalog", record_mock,
+            analytics, _RECORD_CATALOG_METHOD, record_mock,
         ):
             skill_catalog._emit_repo_skill_catalog(spec)
         _, kwargs = record_mock.call_args
@@ -292,9 +315,9 @@ class EmitRepoSkillCatalogTest(unittest.TestCase):
         spec = _spec()
         record_mock = MagicMock()
         with patch.object(
-            skill_catalog, "_list_skill_tree", return_value=None,
+            skill_catalog, _LIST_SKILL_TREE_METHOD, return_value=None,
         ), patch.object(
-            analytics, "record_repo_skill_catalog", record_mock,
+            analytics, _RECORD_CATALOG_METHOD, record_mock,
         ):
             skill_catalog._emit_repo_skill_catalog(spec)
         record_mock.assert_not_called()
@@ -303,10 +326,10 @@ class EmitRepoSkillCatalogTest(unittest.TestCase):
         spec = _spec()
         record_mock = MagicMock()
         with patch.object(
-            skill_catalog, "_list_skill_tree",
+            skill_catalog, _LIST_SKILL_TREE_METHOD,
             side_effect=RuntimeError("boom"),
         ), patch.object(
-            analytics, "record_repo_skill_catalog", record_mock,
+            analytics, _RECORD_CATALOG_METHOD, record_mock,
         ):
             # Must not raise -- catalog collection is fail-open.
             skill_catalog._emit_repo_skill_catalog(spec)
@@ -347,31 +370,37 @@ class DiscoverLocalSkillsTest(unittest.TestCase):
     def test_scans_both_repo_roots_and_dedups(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             cwd = Path(td)
-            _make_skill(cwd / ".agents/skills", "develop")
-            _make_skill(cwd / ".agents/skills", "review")
+            _make_skill(cwd / _AGENT_SKILLS_ROOT, _DEVELOP_SKILL)
+            _make_skill(cwd / _AGENT_SKILLS_ROOT, _REVIEW_SKILL)
             # A name defined in the second repo root appears once.
-            _make_skill(cwd / ".claude/skills", "develop")
+            _make_skill(cwd / ".claude/skills", _DEVELOP_SKILL)
             _make_skill(cwd / ".claude/skills", "extra")
-            with patch.dict(os.environ, {"CODEX_HOME": str(cwd / "no-home")}):
+            with patch.dict(
+                os.environ,
+                {_CODEX_HOME_ENV: str(cwd / "no-home")},
+            ):
                 names = skill_catalog.discover_local_skills(cwd)
         # Sorted within each root, roots in order (`.agents/skills` then
         # `.claude/skills`), deduped first-seen: `develop`/`review` from the
         # first root, then `extra` from the second (`develop` already seen).
-        self.assertEqual(names, ("develop", "review", "extra"))
+        self.assertEqual(names, (_DEVELOP_SKILL, _REVIEW_SKILL, "extra"))
 
     def test_includes_codex_home_global_skills(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             cwd = Path(td) / "wt"
             home = Path(td) / "codexhome"
-            _make_skill(cwd / ".agents/skills", "review")
-            _make_skill(home / "skills", "global-skill")
+            _make_skill(cwd / _AGENT_SKILLS_ROOT, _REVIEW_SKILL)
+            _make_skill(home / _SKILLS_DIR, "global-skill")
             # codex's built-ins live under the global root's `.system` container.
-            _make_skill(home / "skills" / ".system", "imagegen")
-            with patch.dict(os.environ, {"CODEX_HOME": str(home)}):
+            _make_skill(home / _SKILLS_DIR / ".system", _IMAGEGEN_SKILL)
+            with patch.dict(os.environ, {_CODEX_HOME_ENV: str(home)}):
                 names = skill_catalog.discover_local_skills(cwd)
         # Repo-local first (its scan runs before the global root), then the
         # global root's direct + `.system` skills sorted together.
-        self.assertEqual(names, ("review", "global-skill", "imagegen"))
+        self.assertEqual(
+            names,
+            (_REVIEW_SKILL, "global-skill", _IMAGEGEN_SKILL),
+        )
 
     def test_global_system_builtins_surface_by_name(self) -> None:
         # codex auto-loads its built-in skills from the global root's `.system`
@@ -380,43 +409,49 @@ class DiscoverLocalSkillsTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             cwd = Path(td) / "wt"
             home = Path(td) / "codexhome"
-            for name in ("imagegen", "openai-docs", "skill-installer"):
-                _make_skill(home / "skills" / ".system", name)
-            with patch.dict(os.environ, {"CODEX_HOME": str(home)}):
+            for name in (_IMAGEGEN_SKILL, "openai-docs", "skill-installer"):
+                _make_skill(home / _SKILLS_DIR / ".system", name)
+            with patch.dict(os.environ, {_CODEX_HOME_ENV: str(home)}):
                 names = skill_catalog.discover_local_skills(cwd)
-        self.assertEqual(names, ("imagegen", "openai-docs", "skill-installer"))
+        self.assertEqual(
+            names,
+            (_IMAGEGEN_SKILL, "openai-docs", "skill-installer"),
+        )
 
     def test_repo_skill_precedes_global_duplicate(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             cwd = Path(td) / "wt"
             home = Path(td) / "codexhome"
-            _make_skill(cwd / ".agents/skills", "review")
-            _make_skill(home / "skills", "review")
-            with patch.dict(os.environ, {"CODEX_HOME": str(home)}):
+            _make_skill(cwd / _AGENT_SKILLS_ROOT, _REVIEW_SKILL)
+            _make_skill(home / _SKILLS_DIR, _REVIEW_SKILL)
+            with patch.dict(os.environ, {_CODEX_HOME_ENV: str(home)}):
                 names = skill_catalog.discover_local_skills(cwd)
-        self.assertEqual(names, ("review",))
+        self.assertEqual(names, (_REVIEW_SKILL,))
 
     def test_only_direct_children_with_skill_md_count(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             cwd = Path(td)
-            root = cwd / ".agents/skills"
-            _make_skill(root, "develop")
+            root = cwd / _AGENT_SKILLS_ROOT
+            _make_skill(root, _DEVELOP_SKILL)
             # A dir without a SKILL.md is not a skill.
             (root / "empty").mkdir(parents=True, exist_ok=True)
             # A `.system` container under a *repo* root is not descended: only
             # the global codex root loads its `.system` built-ins, so a repo's
             # `.system/imagegen/SKILL.md` does not surface here.
-            deep = root / ".system" / "imagegen"
+            deep = root / ".system" / _IMAGEGEN_SKILL
             deep.mkdir(parents=True, exist_ok=True)
             (deep / "SKILL.md").write_text("x", encoding="utf-8")
-            with patch.dict(os.environ, {"CODEX_HOME": str(cwd / "no-home")}):
+            with patch.dict(
+                os.environ,
+                {_CODEX_HOME_ENV: str(cwd / "no-home")},
+            ):
                 names = skill_catalog.discover_local_skills(cwd)
-        self.assertEqual(names, ("develop",))
+        self.assertEqual(names, (_DEVELOP_SKILL,))
 
     def test_missing_roots_yield_empty_not_error(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             cwd = Path(td) / "does-not-exist"
-            missing_home = {"CODEX_HOME": str(Path(td) / "nope")}
+            missing_home = {_CODEX_HOME_ENV: str(Path(td) / "nope")}
             with patch.dict(os.environ, missing_home):
                 self.assertEqual(skill_catalog.discover_local_skills(cwd), ())
 

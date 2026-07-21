@@ -19,6 +19,10 @@ from orchestrator import dashboard, workflow, worktrees
 from orchestrator.analytics import read as analytics_read
 
 
+_FACADES = (workflow, worktrees, analytics_read, dashboard)
+_PURE_HUBS = (worktrees, analytics_read)
+
+
 def _intentional_reexports(node: ast.AST) -> tuple[str, ...]:
     if not isinstance(node, ast.ImportFrom) or node.module == "__future__":
         return ()
@@ -42,15 +46,12 @@ def _reexport_names(module) -> set[str]:
 
 
 class ReexportInventoryTest(unittest.TestCase):
-    FACADES = (workflow, worktrees, analytics_read, dashboard)
     # The pure hubs re-export everything they expose, so `__all__` must equal
     # the re-export set exactly. `workflow` and `dashboard` also define their
     # own API (the dispatcher / the page entrypoint), so the re-export set is
     # only required to be a subset of their inventory.
-    PURE_HUBS = (worktrees, analytics_read)
-
     def test_all_is_sorted_and_unique(self) -> None:
-        for module in self.FACADES:
+        for module in _FACADES:
             with self.subTest(module=module.__name__):
                 names = module.__all__
                 self.assertEqual(
@@ -63,7 +64,7 @@ class ReexportInventoryTest(unittest.TestCase):
                 )
 
     def test_every_listed_name_resolves(self) -> None:
-        for module in self.FACADES:
+        for module in _FACADES:
             for name in module.__all__:
                 with self.subTest(module=module.__name__, name=name):
                     self.assertTrue(
@@ -73,7 +74,7 @@ class ReexportInventoryTest(unittest.TestCase):
                     )
 
     def test_reexports_are_inventoried(self) -> None:
-        for module in self.FACADES:
+        for module in _FACADES:
             with self.subTest(module=module.__name__):
                 reexports = _reexport_names(module)
                 listed = set(module.__all__)
@@ -83,7 +84,7 @@ class ReexportInventoryTest(unittest.TestCase):
                     f"{module.__name__} re-exports {sorted(missing)} but they "
                     "are absent from __all__",
                 )
-                if module in self.PURE_HUBS:
+                if module in _PURE_HUBS:
                     # A pure hub exposes only what it re-exports, so extras in
                     # __all__ would be dead entries.
                     self.assertEqual(

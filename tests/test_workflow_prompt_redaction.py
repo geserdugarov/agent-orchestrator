@@ -17,17 +17,26 @@ from tests.fakes import make_issue
 from tests.workflow_helpers import _TEST_SPEC
 
 
+_DOCUMENTATION_ISSUE_NUMBER = 67100
+_REDACTION_MARKER = "***"
+_AGENT_SESSION_ID = "s"
+
+
 def _documentation_prompt() -> str:
     return workflow._build_documentation_prompt(
         _TEST_SPEC,
-        make_issue(67100, title="add foo flag", body="users want a foo flag"),
+        make_issue(
+            _DOCUMENTATION_ISSUE_NUMBER,
+            title="add foo flag",
+            body="users want a foo flag",
+        ),
         comments_text="",
         specs=[_TEST_SPEC],
     )
 
 
-def _patched_env(**values: str):
-    return patch.dict(os.environ, values, clear=False)
+def _patched_env(**env_values: str):
+    return patch.dict(os.environ, env_values, clear=False)
 
 
 class BuildDocumentationPromptTest(unittest.TestCase):
@@ -85,7 +94,7 @@ class BuildDocumentationPromptTest(unittest.TestCase):
 
     def test_includes_issue_title_and_number(self) -> None:
         prompt = _documentation_prompt()
-        self.assertIn("#67100", prompt)
+        self.assertIn(f"#{_DOCUMENTATION_ISSUE_NUMBER}", prompt)
         self.assertIn("add foo flag", prompt)
 
 
@@ -102,7 +111,7 @@ class RedactSecretsTest(unittest.TestCase):
                 "Traceback ...\n  401 sk-ant-supersecretvalue123 invalid"
             )
         self.assertNotIn("sk-ant-supersecretvalue123", out)
-        self.assertIn("***", out)
+        self.assertIn(_REDACTION_MARKER, out)
 
     def test_redacts_github_token_by_exact_name(self) -> None:
         # GITHUB_TOKEN itself doesn't end in any of the suffixes we strip,
@@ -127,7 +136,7 @@ class RedactSecretsTest(unittest.TestCase):
                 patch.object(config, "GITHUB_TOKEN", token):
             out = workflow._redact_secrets(f"cat ran: {token} got captured")
         self.assertNotIn(token, out)
-        self.assertIn("***", out)
+        self.assertIn(_REDACTION_MARKER, out)
 
     def test_redacts_arbitrary_provider_via_suffix(self) -> None:
         # The suffix list is what catches the long tail (HF_TOKEN,
@@ -177,13 +186,13 @@ class RedactionBoundaryTest(unittest.TestCase):
             stderr = ("X" * (workflow._STDERR_TAIL_BUDGET - 8)) + secret + " trailing"
             block = workflow._format_stderr_diagnostics(
                 AgentResult(
-                    session_id="s", last_message="", exit_code=1,
+                    session_id=_AGENT_SESSION_ID, last_message="", exit_code=1,
                     timed_out=False, stdout="", stderr=stderr,
                 ),
                 "Agent",
             )
         self.assertNotIn(secret, block)
-        self.assertIn("***", block)
+        self.assertIn(_REDACTION_MARKER, block)
         # The tail budget is still honored on the *redacted* string.
         self.assertIn("trailing", block)
 
@@ -191,7 +200,7 @@ class RedactionBoundaryTest(unittest.TestCase):
         with _patched_env(OPENAI_API_KEY="sk-proj-loglinevaluexyz"):
             tail = workflow._stderr_log_tail(
                 AgentResult(
-                    session_id="s", last_message="", exit_code=1,
+                    session_id=_AGENT_SESSION_ID, last_message="", exit_code=1,
                     timed_out=False, stdout="",
                     stderr="auth failed for sk-proj-loglinevaluexyz",
                 ),
@@ -209,21 +218,21 @@ class RedactionBoundaryTest(unittest.TestCase):
         with _patched_env(SSH_PRIVATE_KEY=secret):
             block = workflow._format_stderr_diagnostics(
                 AgentResult(
-                    session_id="s", last_message="", exit_code=1,
+                    session_id=_AGENT_SESSION_ID, last_message="", exit_code=1,
                     timed_out=False, stdout="",
                     stderr="boom: " + secret,
                 ),
                 "Agent",
             )
         self.assertNotIn("AAAABBBBCCCCDDDD", block)
-        self.assertIn("***", block)
+        self.assertIn(_REDACTION_MARKER, block)
 
     def test_log_tail_redacts_multiline_secret_at_eof(self) -> None:
         secret = "line1-of-secret-value\nline2-of-secret-value\n"
         with _patched_env(API_TOKEN=secret):
             tail = workflow._stderr_log_tail(
                 AgentResult(
-                    session_id="s", last_message="", exit_code=1,
+                    session_id=_AGENT_SESSION_ID, last_message="", exit_code=1,
                     timed_out=False, stdout="",
                     stderr="leaked: " + secret,
                 ),

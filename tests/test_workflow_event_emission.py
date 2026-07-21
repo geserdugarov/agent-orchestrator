@@ -40,10 +40,20 @@ from tests.workflow_helpers import (
 )
 
 
+_EVENT_KEY = "event"
+_STAGE_KEY = "stage"
+_AGENT_ROLE_KEY = "agent_role"
+_SESSION_ID_KEY = "session_id"
+_RETRY_COUNT_KEY = "retry_count"
+_REVIEW_PR_NUMBER = 42
+_RESUME_COMMENT_ID = 2000
+_LAST_ACTION_COMMENT_ID = 1500
+
+
 def _events(gh: FakeGitHubClient, event_name: str) -> list[dict]:
     return [
         event for event in gh.recorded_events
-        if event["event"] == event_name
+        if event[_EVENT_KEY] == event_name
     ]
 
 
@@ -61,8 +71,8 @@ class StageEventEmissionTest(unittest.TestCase, _PatchedWorkflowMixin):
         gh.set_workflow_label(issue, LABEL_IMPLEMENTING)
         self.assertEqual(len(gh.recorded_events), 1)
         event = gh.recorded_events[0]
-        self.assertEqual(event["event"], EVENT_STAGE_ENTER)
-        self.assertEqual(event["stage"], LABEL_IMPLEMENTING)
+        self.assertEqual(event[_EVENT_KEY], EVENT_STAGE_ENTER)
+        self.assertEqual(event[_STAGE_KEY], LABEL_IMPLEMENTING)
         self.assertEqual(event["issue"], 1)
         self.assertEqual(event["repo"], TEST_REPO_SLUG)
         self.assertIn("ts", event)
@@ -93,8 +103,8 @@ class StageEventEmissionTest(unittest.TestCase, _PatchedWorkflowMixin):
                 has_new_commits=False,
             )
         stages = [
-            event["stage"] for event in gh.recorded_events
-            if event["event"] == EVENT_STAGE_ENTER
+            event[_STAGE_KEY] for event in gh.recorded_events
+            if event[_EVENT_KEY] == EVENT_STAGE_ENTER
         ]
         self.assertIn(LABEL_DECOMPOSING, stages)
 
@@ -118,11 +128,11 @@ class StageEventEmissionTest(unittest.TestCase, _PatchedWorkflowMixin):
             self.assertEqual(len(lines), 3)
             records = [json.loads(line) for line in lines]
             self.assertEqual(
-                [record["stage"] for record in records],
+                [record[_STAGE_KEY] for record in records],
                 [LABEL_IMPLEMENTING, LABEL_VALIDATING, LABEL_DOCUMENTING],
             )
             for record in records:
-                self.assertEqual(record["event"], EVENT_STAGE_ENTER)
+                self.assertEqual(record[_EVENT_KEY], EVENT_STAGE_ENTER)
                 self.assertEqual(record["issue"], 7)
                 self.assertEqual(record["repo"], TEST_REPO_SLUG)
                 # ts must be a valid ISO-8601 UTC timestamp.
@@ -175,26 +185,26 @@ class AgentLifecycleEventEmissionTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertEqual(len(exits), 1)
         spawn = spawns[0]
         exit_event = exits[0]
-        self.assertEqual(spawn["stage"], LABEL_IMPLEMENTING)
-        self.assertEqual(spawn["agent_role"], ROLE_DEVELOPER)
+        self.assertEqual(spawn[_STAGE_KEY], LABEL_IMPLEMENTING)
+        self.assertEqual(spawn[_AGENT_ROLE_KEY], ROLE_DEVELOPER)
         self.assertEqual(spawn["agent"], config.DEV_AGENT)
-        self.assertNotIn("session_id", spawn)  # fresh spawn -- no resume id
-        self.assertEqual(exit_event["session_id"], "sess-dev")
+        self.assertNotIn(_SESSION_ID_KEY, spawn)  # fresh spawn -- no resume id
+        self.assertEqual(exit_event[_SESSION_ID_KEY], "sess-dev")
         self.assertEqual(exit_event["exit_code"], 0)
         self.assertFalse(exit_event["timed_out"])
         self.assertIn("duration_s", exit_event)
         self.assertGreaterEqual(exit_event["duration_s"], 0)
         # retry_count is incremented to 1 by `_check_and_increment_retry_budget`
         # BEFORE the spawn, so the recorded value is what the agent ran under.
-        self.assertEqual(spawn["retry_count"], 1)
-        self.assertEqual(exit_event["retry_count"], 1)
+        self.assertEqual(spawn[_RETRY_COUNT_KEY], 1)
+        self.assertEqual(exit_event[_RETRY_COUNT_KEY], 1)
 
     def test_reviewer_spawn_has_round_and_retry(self) -> None:
         gh = FakeGitHubClient()
         issue = make_issue(2, label=LABEL_VALIDATING)
         gh.add_issue(issue)
         pr = FakePR(
-            number=42,
+            number=_REVIEW_PR_NUMBER,
             head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-2",
             base_branch=TEST_BASE_BRANCH,
             mergeable=True,
@@ -204,7 +214,12 @@ class AgentLifecycleEventEmissionTest(unittest.TestCase, _PatchedWorkflowMixin):
         gh.add_pr(pr)
         # Seed both `review_round` and `retry_count` so both optional
         # context fields ride along on the reviewer's spawn/exit events.
-        gh.seed_state(2, pr_number=42, review_round=1, retry_count=2)
+        gh.seed_state(
+            2,
+            pr_number=_REVIEW_PR_NUMBER,
+            review_round=1,
+            retry_count=2,
+        )
         # Patch _latest_pr_comment_ids so it doesn't touch real GitHub.
         with patch.object(
             workflow, "_latest_pr_comment_ids", return_value=(None, None)
@@ -220,30 +235,36 @@ class AgentLifecycleEventEmissionTest(unittest.TestCase, _PatchedWorkflowMixin):
         spawns = _events(gh, EVENT_AGENT_SPAWN)
         exits = _events(gh, EVENT_AGENT_EXIT)
         reviewer_spawns = [
-            event for event in spawns if event["agent_role"] == ROLE_REVIEWER
+            event for event in spawns
+            if event[_AGENT_ROLE_KEY] == ROLE_REVIEWER
         ]
         reviewer_exits = [
-            event for event in exits if event["agent_role"] == ROLE_REVIEWER
+            event for event in exits
+            if event[_AGENT_ROLE_KEY] == ROLE_REVIEWER
         ]
         self.assertEqual(len(reviewer_spawns), 1)
         self.assertEqual(len(reviewer_exits), 1)
-        self.assertEqual(reviewer_spawns[0]["stage"], LABEL_VALIDATING)
+        self.assertEqual(reviewer_spawns[0][_STAGE_KEY], LABEL_VALIDATING)
         self.assertEqual(reviewer_spawns[0]["agent"], config.REVIEW_AGENT)
         self.assertEqual(reviewer_spawns[0]["review_round"], 1)
-        self.assertEqual(reviewer_spawns[0]["retry_count"], 2)
+        self.assertEqual(reviewer_spawns[0][_RETRY_COUNT_KEY], 2)
         self.assertEqual(reviewer_exits[0]["review_round"], 1)
-        self.assertEqual(reviewer_exits[0]["retry_count"], 2)
-        self.assertEqual(reviewer_exits[0]["session_id"], "sess-review")
+        self.assertEqual(reviewer_exits[0][_RETRY_COUNT_KEY], 2)
+        self.assertEqual(reviewer_exits[0][_SESSION_ID_KEY], "sess-review")
 
     def test_dev_resume_spawn_carries_session_id(self) -> None:
         # A resume hands the spawn event the existing session id; the exit
         # event records the (same) live id from the AgentResult.
         gh = FakeGitHubClient()
         issue = make_issue(3, label=LABEL_IMPLEMENTING)
-        issue.comments.append(FakeComment(id=2000, body="please retry"))
+        issue.comments.append(
+            FakeComment(id=_RESUME_COMMENT_ID, body="please retry"),
+        )
         gh.add_issue(issue)
         gh.seed_state(
-            3, awaiting_human=True, last_action_comment_id=1500,
+            3,
+            awaiting_human=True,
+            last_action_comment_id=_LAST_ACTION_COMMENT_ID,
             dev_agent="codex", dev_session_id="sess-resume",
         )
         self._run(
@@ -253,8 +274,8 @@ class AgentLifecycleEventEmissionTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
         spawns = _events(gh, EVENT_AGENT_SPAWN)
         self.assertEqual(len(spawns), 1)
-        self.assertEqual(spawns[0]["agent_role"], ROLE_DEVELOPER)
-        self.assertEqual(spawns[0]["session_id"], "sess-resume")
+        self.assertEqual(spawns[0][_AGENT_ROLE_KEY], ROLE_DEVELOPER)
+        self.assertEqual(spawns[0][_SESSION_ID_KEY], "sess-resume")
 
     def test_timeout_records_timed_out_flag_on_exit(self) -> None:
         gh = FakeGitHubClient()

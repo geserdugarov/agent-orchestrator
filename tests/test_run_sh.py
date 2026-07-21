@@ -15,10 +15,12 @@ import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
+_TEXT_ENCODING = "utf-8"
+_SIGINT_EXIT_CODE = 130
 
 
 def _write_executable(path: Path, text: str) -> None:
-    path.write_text(textwrap.dedent(text).lstrip(), encoding="utf-8")
+    path.write_text(textwrap.dedent(text).lstrip(), encoding=_TEXT_ENCODING)
     path.chmod(path.stat().st_mode | stat.S_IXUSR)
 
 
@@ -60,7 +62,9 @@ def _write_fake_git(fake_bin: Path) -> None:
 def _write_fake_python(root: Path, *exit_codes: int) -> None:
     # Exits with the Nth code on the Nth launch (last code repeats), so a test
     # can drive the restart loop and still terminate deterministically.
-    codes = " ".join(str(code) for code in (exit_codes or (130,)))
+    codes = " ".join(
+        str(code) for code in (exit_codes or (_SIGINT_EXIT_CODE,))
+    )
     _write_executable(
         root / ".venv" / "bin" / "python",
         f"""
@@ -145,12 +149,12 @@ class _WrapperScenario:
 
 def _assert_launches(
     scenario: _WrapperScenario,
-    result: subprocess.CompletedProcess[str],
+    completed: subprocess.CompletedProcess[str],
     *,
     count: int,
 ) -> None:
-    assert result.returncode == 130
-    assert scenario.python_calls.read_text(encoding="utf-8") == (
+    assert completed.returncode == _SIGINT_EXIT_CODE
+    assert scenario.python_calls.read_text(encoding=_TEXT_ENCODING) == (
         "-m orchestrator.main\n" * count
     )
 
@@ -160,7 +164,7 @@ def _assert_self_update_attempt(
     *,
     expect_pull: bool,
 ) -> None:
-    git_log = scenario.git_calls.read_text(encoding="utf-8")
+    git_log = scenario.git_calls.read_text(encoding=_TEXT_ENCODING)
     if expect_pull:
         assert "pull --ff-only origin main" in git_log
     else:
@@ -169,14 +173,14 @@ def _assert_self_update_attempt(
 
 
 def _assert_warning(
-    result: subprocess.CompletedProcess[str],
+    completed: subprocess.CompletedProcess[str],
     warning: str | None,
 ) -> None:
     if warning is None:
-        assert "WARNING" not in result.stderr
+        assert "WARNING" not in completed.stderr
     else:
-        assert warning in result.stderr
-        assert "running existing code" in result.stderr
+        assert warning in completed.stderr
+        assert "running existing code" in completed.stderr
 
 
 @pytest.mark.parametrize(
@@ -197,28 +201,33 @@ def test_self_update_launches_without_crash_loop(
     expect_pull: bool,
     warn_substr: str | None,
 ) -> None:
-    scenario = _WrapperScenario.create(tmp_path, 130)
-    result = scenario.run(git_branch=git_branch, git_pull_rc=git_pull_rc)
+    scenario = _WrapperScenario.create(tmp_path, _SIGINT_EXIT_CODE)
+    completed = scenario.run(git_branch=git_branch, git_pull_rc=git_pull_rc)
 
-    _assert_launches(scenario, result, count=1)
+    _assert_launches(scenario, completed, count=1)
     _assert_self_update_attempt(scenario, expect_pull=expect_pull)
-    _assert_warning(result, warn_substr)
+    _assert_warning(completed, warn_substr)
 
 
 def test_self_restart_applies_clean_fast_forward(
     tmp_path: Path,
 ) -> None:
-    scenario = _WrapperScenario.create(tmp_path, 0, 130, record_sleep=True)
-    result = scenario.run()
+    scenario = _WrapperScenario.create(
+        tmp_path,
+        0,
+        _SIGINT_EXIT_CODE,
+        record_sleep=True,
+    )
+    completed = scenario.run()
 
-    _assert_launches(scenario, result, count=2)
+    _assert_launches(scenario, completed, count=2)
     # A fast-forward runs before each launch: once at startup, once on restart.
-    assert scenario.git_calls.read_text(encoding="utf-8").splitlines() == [
+    assert scenario.git_calls.read_text(encoding=_TEXT_ENCODING).splitlines() == [
         "branch --show-current",
         "pull --ff-only origin main",
         "branch --show-current",
         "pull --ff-only origin main",
     ]
-    assert scenario.sleep_calls.read_text(encoding="utf-8") == "1\n"
-    assert "orchestrator exited with code 0; restarting in 1s" in result.stdout
-    assert "WARNING" not in result.stderr
+    assert scenario.sleep_calls.read_text(encoding=_TEXT_ENCODING) == "1\n"
+    assert "orchestrator exited with code 0; restarting in 1s" in completed.stdout
+    assert "WARNING" not in completed.stderr

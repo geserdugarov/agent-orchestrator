@@ -28,6 +28,14 @@ from tests.fakes import FakeGitHubClient, FakeLabel, make_issue
 from tests.workflow_helpers import _TEST_SPEC
 
 
+_IMPLEMENTING_LABEL = "implementing"
+_PAUSED_IN_FLIGHT_ISSUE = 752
+_PAUSED_UNLABELED_ISSUE = 751
+_RESUMED_ISSUE = 753
+_COMMUNITY_ISSUE = 760
+_HARD_SKIP_ISSUE = 761
+
+
 class PausedLabelSkipsProcessingTest(unittest.TestCase):
     """`paused` freezes an already in-flight issue without discarding its
     state: applied to an `implementing` (or any) issue it stops the
@@ -36,7 +44,7 @@ class PausedLabelSkipsProcessingTest(unittest.TestCase):
 
     def test_in_flight_paused_issue_skips_dispatch(self) -> None:
         gh = FakeGitHubClient()
-        issue = make_issue(752, label="implementing")
+        issue = make_issue(_PAUSED_IN_FLIGHT_ISSUE, label=_IMPLEMENTING_LABEL)
         issue.labels.append(FakeLabel(PAUSED_LABEL))
         gh.add_issue(issue)
 
@@ -50,7 +58,7 @@ class PausedLabelSkipsProcessingTest(unittest.TestCase):
 
     def test_unlabeled_issue_with_paused_skips_pickup(self) -> None:
         gh = FakeGitHubClient()
-        issue = make_issue(751)
+        issue = make_issue(_PAUSED_UNLABELED_ISSUE)
         issue.labels.append(FakeLabel(PAUSED_LABEL))
         gh.add_issue(issue)
 
@@ -63,7 +71,7 @@ class PausedLabelSkipsProcessingTest(unittest.TestCase):
 
     def test_removing_paused_allows_dispatch(self) -> None:
         gh = FakeGitHubClient()
-        issue = make_issue(753, label="implementing")
+        issue = make_issue(_RESUMED_ISSUE, label=_IMPLEMENTING_LABEL)
         gh.add_issue(issue)
 
         implementing_mock = MagicMock()
@@ -81,14 +89,14 @@ class HardSkipControlLabelTest(unittest.TestCase):
     def test_returns_none_without_a_hard_skip_label(self) -> None:
         # `community_contribution` is a control label that is not a hard skip:
         # it coexists with the workflow without parking the issue.
-        issue = make_issue(760, label="implementing")
+        issue = make_issue(_COMMUNITY_ISSUE, label=_IMPLEMENTING_LABEL)
         issue.labels.append(FakeLabel("community_contribution"))
         self.assertIsNone(hard_skip_control_label(issue))
 
     def test_reports_the_present_hard_skip_label(self) -> None:
         for label in (BACKLOG_LABEL, PAUSED_LABEL):
             with self.subTest(label=label):
-                issue = make_issue(761, label="implementing")
+                issue = make_issue(_HARD_SKIP_ISSUE, label=_IMPLEMENTING_LABEL)
                 issue.labels.append(FakeLabel(label))
                 self.assertEqual(hard_skip_control_label(issue), label)
 

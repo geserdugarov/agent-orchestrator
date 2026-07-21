@@ -31,6 +31,13 @@ REFRESH_BASE = "_refresh_base_and_worktrees"
 
 _WORKER_ISSUE_NUMBERS = (1, 2, 3)
 _ORIGINAL_WORKFLOW_LABEL = FakeGitHubClient.workflow_label
+_DEFAULT_PROBE_DELAY_SECONDS = 0.01
+_SYNC_TIMEOUT_SECONDS = 5.0
+_FAMILY_OVERLAP_DELAY_SECONDS = 0.05
+_FAMILY_POLL_DELAY_SECONDS = 0.01
+_SERIAL_PROBE_DELAY_SECONDS = 0.02
+_FANOUT_ISSUE_NUMBER = 99
+_FAMILY_CHILD_ISSUE_NUMBER = 20
 
 
 def _spec(parallel_limit: int) -> config.RepoSpec:
@@ -53,7 +60,11 @@ def _seed_issues(
 
 
 class _ConcurrencyProbe:
-    def __init__(self, *, delay: float = 0.01) -> None:
+    def __init__(
+        self,
+        *,
+        delay: float = _DEFAULT_PROBE_DELAY_SECONDS,
+    ) -> None:
         self.in_flight = 0
         self.max_in_flight = 0
         self.order: list[int] = []
@@ -86,13 +97,13 @@ class _BlockingConcurrencyProbe:
             self.in_flight += 1
             self.max_in_flight = max(self.max_in_flight, self.in_flight)
         self.admitted.release()
-        self.release.wait(timeout=5.0)
+        self.release.wait(timeout=_SYNC_TIMEOUT_SECONDS)
         with self._lock:
             self.in_flight -= 1
 
     def release_after(self, count: int) -> None:
         self.admissions_complete = all(
-            self.admitted.acquire(timeout=5.0)
+            self.admitted.acquire(timeout=_SYNC_TIMEOUT_SECONDS)
             for _ in range(count)
         )
         time.sleep(0.1)
@@ -100,13 +111,16 @@ class _BlockingConcurrencyProbe:
 
     def cleanup(self, thread: threading.Thread) -> None:
         self.release.set()
-        thread.join(timeout=5.0)
+        thread.join(timeout=_SYNC_TIMEOUT_SECONDS)
 
 
 class _BarrierProcessRecorder:
     def __init__(self, parties: int, *, record_thread: bool = False) -> None:
         self.records: list[int | tuple[int, int]] = []
-        self._barrier = threading.Barrier(parties, timeout=5.0)
+        self._barrier = threading.Barrier(
+            parties,
+            timeout=_SYNC_TIMEOUT_SECONDS,
+        )
         self._record_thread = record_thread
         self._lock = threading.Lock()
 
@@ -171,7 +185,7 @@ class _FamilyOverlapProbe:
             )
             self.family_count += 1
             self.overlap_seen |= self._fanout_in_flight > 0
-        time.sleep(0.05)
+        time.sleep(_FAMILY_OVERLAP_DELAY_SECONDS)
         with self._lock:
             self._family_in_flight -= 1
 
@@ -180,7 +194,7 @@ class _FamilyOverlapProbe:
             self._fanout_in_flight += 1
             self.fanout_count += 1
             self.overlap_seen |= self._family_in_flight > 0
-        time.sleep(0.05)
+        time.sleep(_FAMILY_OVERLAP_DELAY_SECONDS)
         with self._lock:
             self._fanout_in_flight -= 1
 
@@ -199,8 +213,8 @@ class _FamilySlotProbe:
             self.observed_order.append(issue.number)
         if issue.number == 1:
             self._slow_family_holding.set()
-            self._slow_family_release.wait(timeout=5.0)
-        elif issue.number == 99:
+            self._slow_family_release.wait(timeout=_SYNC_TIMEOUT_SECONDS)
+        elif issue.number == _FANOUT_ISSUE_NUMBER:
             self._fanout_done.set()
 
     def release_after_fanout(self) -> None:
@@ -213,12 +227,12 @@ class _FamilySlotProbe:
 
     def cleanup(self, thread: threading.Thread) -> None:
         self._slow_family_release.set()
-        thread.join(timeout=5.0)
+        thread.join(timeout=_SYNC_TIMEOUT_SECONDS)
 
     def _wait_for_overlap(self) -> None:
-        if not self._slow_family_holding.wait(timeout=5.0):
+        if not self._slow_family_holding.wait(timeout=_SYNC_TIMEOUT_SECONDS):
             raise AssertionError("slow family handler never started")
-        if not self._fanout_done.wait(timeout=5.0):
+        if not self._fanout_done.wait(timeout=_SYNC_TIMEOUT_SECONDS):
             raise AssertionError("fanout did not overlap the family handler")
 
 
@@ -234,27 +248,27 @@ class _SlowFamilyProbe:
     def process(self, _gh, _spec, issue) -> None:
         if issue.number == 1:
             self._family_holding.set()
-            self._family_release.wait(timeout=5.0)
+            self._family_release.wait(timeout=_SYNC_TIMEOUT_SECONDS)
             return
         with self._lock:
             self.fanout_done.append(issue.number)
 
     def release_after_fanout(self) -> None:
-        if not self._family_holding.wait(timeout=5.0):
+        if not self._family_holding.wait(timeout=_SYNC_TIMEOUT_SECONDS):
             self._family_release.set()
             return
-        deadline = time.monotonic() + 5.0
+        deadline = time.monotonic() + _SYNC_TIMEOUT_SECONDS
         while time.monotonic() < deadline:
             with self._lock:
                 if len(self.fanout_done) == self._expected_fanout:
                     self.released_after_fanout = True
                     break
-            time.sleep(0.01)
+            time.sleep(_FAMILY_POLL_DELAY_SECONDS)
         self._family_release.set()
 
     def cleanup(self, thread: threading.Thread) -> None:
         self._family_release.set()
-        thread.join(timeout=5.0)
+        thread.join(timeout=_SYNC_TIMEOUT_SECONDS)
 
 
 def _flaky_workflow_label(_client, issue):
@@ -517,9 +531,11 @@ class TickFamilySchedulingTest(unittest.TestCase):
         gh.add_issue(make_issue(5, label=None))
         # A non-family-aware label that MUST fan out to a worker thread
         # AND must be allowed to overlap with the family-aware bucket.
-        gh.add_issue(make_issue(99, label=LABEL_IMPLEMENTING))
+        gh.add_issue(
+            make_issue(_FANOUT_ISSUE_NUMBER, label=LABEL_IMPLEMENTING),
+        )
 
-        probe = _FamilyOverlapProbe(fanout_issue=99)
+        probe = _FamilyOverlapProbe(fanout_issue=_FANOUT_ISSUE_NUMBER)
 
         # parallel_limit=5 and no `global_semaphore` means every submission
         # gets its own worker thread; the family lock is the ONLY thing
@@ -628,7 +644,9 @@ class TickFamilySchedulingTest(unittest.TestCase):
         gh.add_issue(make_issue(2, label=LABEL_BLOCKED))
         # One fanout issue that MUST advance while the slow family
         # handler is still inside `_process_issue`.
-        gh.add_issue(make_issue(99, label=LABEL_IMPLEMENTING))
+        gh.add_issue(
+            make_issue(_FANOUT_ISSUE_NUMBER, label=LABEL_IMPLEMENTING),
+        )
         probe = _FamilySlotProbe()
         with _running_thread(
             probe.release_after_fanout,
@@ -650,7 +668,10 @@ class TickFamilySchedulingTest(unittest.TestCase):
             raise probe.releaser_errors[0]
 
         # All three issues handled.
-        self.assertEqual(sorted(probe.observed_order), [1, 2, 99])
+        self.assertEqual(
+            sorted(probe.observed_order),
+            [1, 2, _FANOUT_ISSUE_NUMBER],
+        )
         # Family #2 ran AFTER family #1 (drain task is sequential).
         first_family_index = probe.observed_order.index(1)
         second_family_index = probe.observed_order.index(2)
@@ -662,7 +683,7 @@ class TickFamilySchedulingTest(unittest.TestCase):
         # And the fanout entered `_process_issue` BEFORE family #1
         # exited (the releaser only released after `fanout_done` was
         # set, which the fanout handler sets on entry).
-        fanout_index = probe.observed_order.index(99)
+        fanout_index = probe.observed_order.index(_FANOUT_ISSUE_NUMBER)
         self.assertLess(
             fanout_index,
             second_family_index,
@@ -723,11 +744,11 @@ class TickFamilySchedulingTest(unittest.TestCase):
         # state, so its `_handle_blocked` would normally park
         # `blocked_no_children` and clobber the parent's seed.
         gh.add_issue(make_issue(10, label=LABEL_DECOMPOSING))
-        gh.add_issue(make_issue(20, label=LABEL_BLOCKED))
+        gh.add_issue(make_issue(_FAMILY_CHILD_ISSUE_NUMBER, label=LABEL_BLOCKED))
         gh.seed_state(
             10,
             expected_children_count=1,
-            children=[20],
+            children=[_FAMILY_CHILD_ISSUE_NUMBER],
             umbrella=None,
         )
 
@@ -744,7 +765,7 @@ class TickFamilySchedulingTest(unittest.TestCase):
         # in some order; either order produces this final state because
         # the parent's repair either runs first (child sees parent_number
         # set and returns early) or last (parent's write is final).
-        child_state = gh.pinned_data(20)
+        child_state = gh.pinned_data(_FAMILY_CHILD_ISSUE_NUMBER)
         self.assertEqual(child_state.get(KEY_PARENT_NUMBER), 10)
         self.assertFalse(child_state.get(KEY_AWAITING_HUMAN))
         self.assertIsNone(child_state.get(KEY_PARK_REASON))
@@ -799,7 +820,7 @@ class TickGlobalSchedulingTest(unittest.TestCase):
         # `_process_issue`.
         gh = FakeGitHubClient()
         _seed_issues(gh, (1, 2, 3))
-        probe = _ConcurrencyProbe(delay=0.02)
+        probe = _ConcurrencyProbe(delay=_SERIAL_PROBE_DELAY_SECONDS)
 
         with patch.object(workflow, REFRESH_BASE), \
              patch.object(workflow, PROCESS_ISSUE, side_effect=probe):

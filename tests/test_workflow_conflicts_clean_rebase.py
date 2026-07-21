@@ -140,7 +140,7 @@ class ResolvingConflictCleanRebaseTest(unittest.TestCase, _ResolvingConflictMixi
         mocks["_push_branch"].assert_called_once_with(
             _TEST_SPEC,
             _FAKE_WT,
-            self.BRANCH,
+            self.issue_branch,
             force_with_lease="beforehead",
         )
         self.assertIn((CONFLICT_ISSUE, "validating"), gh.label_history)

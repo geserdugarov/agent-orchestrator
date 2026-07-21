@@ -13,10 +13,7 @@ os.environ.setdefault("ORCHESTRATOR_SKIP_DOTENV", "1")
 
 # Agent specs and comment-trust authors are import-time config values. Tests
 # patch the parsed config objects inline when they need non-default behavior.
-for _name in (
-    "DEV_AGENT",
-    "REVIEW_AGENT",
-    "DECOMPOSE_AGENT",
-    "ALLOWED_ISSUE_AUTHORS",
-):
-    os.environ.pop(_name, None)
+os.environ.pop("DEV_AGENT", None)
+os.environ.pop("REVIEW_AGENT", None)
+os.environ.pop("DECOMPOSE_AGENT", None)
+os.environ.pop("ALLOWED_ISSUE_AUTHORS", None)

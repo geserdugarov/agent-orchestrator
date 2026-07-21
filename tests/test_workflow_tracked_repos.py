@@ -17,6 +17,14 @@ from unittest.mock import patch
 from orchestrator import config, workflow, workflow_messages
 
 
+_LANCE_SLUG = "owner/lance"
+_LANCE_ROOT = "/srv/lance"
+_RAY_SLUG = "owner/ray"
+_RAY_ROOT = "/srv/ray"
+_TOTAL_SIBLING_REPOS = 22
+_VISIBLE_SIBLING_REPOS = 20
+
+
 def _spec(
     slug: str, root: str, base: str = "main", remote: str = "origin"
 ) -> config.RepoSpec:
@@ -54,8 +62,8 @@ class BuildTrackedReposContextGateTest(unittest.TestCase):
         self.assertEqual(_build_context(cur, []), "")
 
     def test_kill_switch_off_returns_empty(self) -> None:
-        cur = _spec("owner/lance", "/srv/lance")
-        other = _spec("owner/ray", "/srv/ray")
+        cur = _spec(_LANCE_SLUG, _LANCE_ROOT)
+        other = _spec(_RAY_SLUG, _RAY_ROOT)
         self.assertEqual(_build_context(cur, [cur, other], expose=False), "")
 
 
@@ -63,13 +71,13 @@ class BuildTrackedReposContextContentTest(unittest.TestCase):
     """The enabled context renders only bounded, read-only repo metadata."""
 
     def test_lists_repo_slug_root_and_base(self) -> None:
-        cur = _spec("owner/lance", "/srv/lance")
-        ray = _spec("owner/ray", "/srv/repos/ray", base="main")
+        cur = _spec(_LANCE_SLUG, _LANCE_ROOT)
+        ray = _spec(_RAY_SLUG, "/srv/repos/ray", base="main")
         arrow = _spec("owner/arrow", "/srv/repos/arrow", base="master")
         out = _build_context(cur, [cur, ray, arrow])
 
         # Each other repo contributes its slug, durable target_root, and base.
-        self.assertIn("owner/ray", out)
+        self.assertIn(_RAY_SLUG, out)
         self.assertIn("/srv/repos/ray", out)
         self.assertIn("`main`", out)
         self.assertIn("owner/arrow", out)
@@ -79,8 +87,8 @@ class BuildTrackedReposContextContentTest(unittest.TestCase):
     def test_excludes_current_repo_from_listing(self) -> None:
         # The current repo's path must never appear; its slug appears only in
         # the "your task is on X" marker, not as a listed reference checkout.
-        cur = _spec("owner/lance", "/srv/CURRENT-ROOT-MARKER")
-        other = _spec("owner/ray", "/srv/ray")
+        cur = _spec(_LANCE_SLUG, "/srv/CURRENT-ROOT-MARKER")
+        other = _spec(_RAY_SLUG, _RAY_ROOT)
         out = _build_context(cur, [cur, other])
 
         self.assertIn("`owner/lance`", out)  # task marker
@@ -89,13 +97,16 @@ class BuildTrackedReposContextContentTest(unittest.TestCase):
         self.assertNotIn("- owner/lance —", out)
 
     def test_caps_listing_with_and_n_more(self) -> None:
-        cur = _spec("owner/lance", "/srv/lance")
-        others = [_spec(f"sib/{i}", f"/srv/{i}") for i in range(22)]
+        cur = _spec(_LANCE_SLUG, _LANCE_ROOT)
+        others = [
+            _spec(f"sib/{index}", f"/srv/{index}")
+            for index in range(_TOTAL_SIBLING_REPOS)
+        ]
         out = _build_context(cur, [cur, *others])
 
         # First 20 listed inline, the remaining 2 collapsed into one line.
-        for i in range(20):
-            self.assertIn(f"sib/{i}", out)
+        for index in range(_VISIBLE_SIBLING_REPOS):
+            self.assertIn(f"sib/{index}", out)
         self.assertNotIn("sib/20", out)
         self.assertNotIn("sib/21", out)
         self.assertIn("and 2 more", out)
@@ -104,9 +115,9 @@ class BuildTrackedReposContextContentTest(unittest.TestCase):
         # Load-bearing for the security analysis: the block carries only
         # operator-configured, non-secret data. No remote name / URL, no
         # token-shaped field is rendered.
-        cur = _spec("owner/lance", "/srv/lance")
+        cur = _spec(_LANCE_SLUG, _LANCE_ROOT)
         other = _spec(
-            "owner/ray", "/srv/ray", remote="SECRET-REMOTE-NAME"
+            _RAY_SLUG, _RAY_ROOT, remote="SECRET-REMOTE-NAME"
         )
         out = _build_context(cur, [cur, other])
 
@@ -119,8 +130,8 @@ class BuildTrackedReposContextContentTest(unittest.TestCase):
         # The framing states only that the *sibling* checkouts are read-only;
         # it must NOT imply a write grant inside the current worktree (that is
         # owned by the surrounding stage prompt).
-        cur = _spec("owner/lance", "/srv/lance")
-        other = _spec("owner/ray", "/srv/ray")
+        cur = _spec(_LANCE_SLUG, _LANCE_ROOT)
+        other = _spec(_RAY_SLUG, _RAY_ROOT)
         out = _build_context(cur, [cur, other])
 
         self.assertIn("read-only", out)
