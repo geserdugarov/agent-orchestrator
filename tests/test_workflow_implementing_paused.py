@@ -23,17 +23,25 @@ from tests.fakes import (
     make_issue,
 )
 from tests.workflow_helpers import (
+    LABEL_IMPLEMENTING,
     _FAKE_WT,
     _PatchedWorkflowMixin,
     _TEST_SPEC,
     _agent,
 )
 
+GET_ISSUE = "get_issue"
+POISONED_RESUME_ISSUE = 720
+RECOVERY_ISSUE = 710
+RETRY_ISSUE = 740
+HUMAN_REPLY_ID = 1100
+ACTION_COMMENT_ID = 900
+
 
 def _paused_view(number: int) -> object:
     """An `implementing` issue that also carries `paused` -- the state a fresh
     `gh.get_issue` returns after an operator pauses mid-run."""
-    view = make_issue(number, label="implementing")
+    view = make_issue(number, label=LABEL_IMPLEMENTING)
     view.labels.append(FakeLabel(PAUSED_LABEL))
     return view
 
@@ -48,7 +56,7 @@ class ImplementingLivePauseFreshSpawnTest(unittest.TestCase, _PatchedWorkflowMix
         # would see no hold and open the PR -- asserting no PR proves the guard
         # reads `gh.get_issue`.
         gh = FakeGitHubClient()
-        issue = make_issue(1, label="implementing")
+        issue = make_issue(1, label=LABEL_IMPLEMENTING)
         gh.add_issue(issue)
         gh.seed_state(
             1, user_content_hash=workflow._compute_user_content_hash(issue, set()),
@@ -56,7 +64,7 @@ class ImplementingLivePauseFreshSpawnTest(unittest.TestCase, _PatchedWorkflowMix
         before_writes = gh.write_state_calls
 
         get_issue_mock = MagicMock(return_value=_paused_view(1))
-        with patch.object(gh, "get_issue", get_issue_mock):
+        with patch.object(gh, GET_ISSUE, get_issue_mock):
             self._run_implementing(
                 gh, issue,
                 run_agent=_agent(session_id="sess-1", last_message="implemented"),
@@ -98,27 +106,27 @@ class ImplementingLivePauseResumeTest(unittest.TestCase, _PatchedWorkflowMixin):
         # hold and publish, so `get_issue` being called exactly once (and no PR)
         # proves the observation is propagated, closing that race.
         gh = FakeGitHubClient()
-        issue = make_issue(720, label="implementing")
+        issue = make_issue(POISONED_RESUME_ISSUE, label=LABEL_IMPLEMENTING)
         issue.comments.append(
-            FakeComment(id=1100, body="try again please", user=FakeUser("alice"))
+            FakeComment(id=HUMAN_REPLY_ID, body="try again please", user=FakeUser("alice"))
         )
         gh.add_issue(issue)
         gh.seed_state(
-            720,
+            POISONED_RESUME_ISSUE,
             awaiting_human=True,
-            last_action_comment_id=900,
+            last_action_comment_id=ACTION_COMMENT_ID,
             dev_agent="claude",
             dev_session_id="sess-old",
-            branch="orchestrator/geserdugarov__agent-orchestrator/issue-720",
+            branch=f"orchestrator/geserdugarov__agent-orchestrator/issue-{POISONED_RESUME_ISSUE}",
             user_content_hash=workflow._compute_user_content_hash(issue, set()),
         )
         before_writes = gh.write_state_calls
 
-        unpaused_view = make_issue(720, label="implementing")
+        unpaused_view = make_issue(POISONED_RESUME_ISSUE, label=LABEL_IMPLEMENTING)
         get_issue_mock = MagicMock(
-            side_effect=[_paused_view(720), unpaused_view, unpaused_view],
+            side_effect=[_paused_view(POISONED_RESUME_ISSUE), unpaused_view, unpaused_view],
         )
-        with patch.object(gh, "get_issue", get_issue_mock):
+        with patch.object(gh, GET_ISSUE, get_issue_mock):
             mocks = self._run_implementing(
                 gh, issue,
                 run_agent=_agent(
@@ -138,10 +146,10 @@ class ImplementingLivePauseResumeTest(unittest.TestCase, _PatchedWorkflowMixin):
         # No pinned-state advancement: the session id, park flag, and action
         # watermark all stay exactly as the prior tick left them.
         self.assertEqual(gh.write_state_calls, before_writes)
-        pinned_state = gh.pinned_data(720)
+        pinned_state = gh.pinned_data(POISONED_RESUME_ISSUE)
         self.assertEqual(pinned_state.get("dev_session_id"), "sess-old")
         self.assertTrue(pinned_state.get("awaiting_human"))
-        self.assertEqual(pinned_state.get("last_action_comment_id"), 900)
+        self.assertEqual(pinned_state.get("last_action_comment_id"), ACTION_COMMENT_ID)
 
 
 class ImplementingLivePauseRecoveryTest(unittest.TestCase, _PatchedWorkflowMixin):
@@ -150,17 +158,18 @@ class ImplementingLivePauseRecoveryTest(unittest.TestCase, _PatchedWorkflowMixin
         # after the operator removes `paused`, publishes the stranded commit
         # through the recovered-worktree path and relabels to `validating`.
         gh = FakeGitHubClient()
-        issue = make_issue(710, label="implementing")
+        issue = make_issue(RECOVERY_ISSUE, label=LABEL_IMPLEMENTING)
         gh.add_issue(issue)
         gh.seed_state(
-            710, user_content_hash=workflow._compute_user_content_hash(issue, set()),
+            RECOVERY_ISSUE,
+            user_content_hash=workflow._compute_user_content_hash(issue, set()),
         )
 
         # Tick 1: fresh spawn commits, but the guard reads the paused view and
         # stops before PR open / relabel, leaving the commit on the branch and
         # pinned state untouched.
         before_writes = gh.write_state_calls
-        with patch.object(gh, "get_issue", return_value=_paused_view(710)):
+        with patch.object(gh, GET_ISSUE, return_value=_paused_view(RECOVERY_ISSUE)):
             self._run_implementing(
                 gh, issue,
                 run_agent=_agent(session_id="sess-1", last_message="implemented"),
@@ -185,7 +194,7 @@ class ImplementingLivePauseRecoveryTest(unittest.TestCase, _PatchedWorkflowMixin
 
         mocks["run_agent"].assert_not_called()
         self.assertEqual(len(gh.opened_prs), 1)
-        self.assertIn((710, "validating"), gh.label_history)
+        self.assertIn((RECOVERY_ISSUE, "validating"), gh.label_history)
 
 
 class ImplementingLivePauseRetryWindowTest(
@@ -200,10 +209,10 @@ class ImplementingLivePauseRetryWindowTest(
         # session id, clearing `awaiting_human`, or reporting a publishable
         # result.
         gh = FakeGitHubClient()
-        issue = make_issue(740, label="implementing")
+        issue = make_issue(RETRY_ISSUE, label=LABEL_IMPLEMENTING)
         gh.add_issue(issue)
         gh.seed_state(
-            740,
+            RETRY_ISSUE,
             dev_agent="claude",
             dev_session_id="poisoned-sess",
             awaiting_human=True,
@@ -222,10 +231,10 @@ class ImplementingLivePauseRetryWindowTest(
 
         # First fetch (before the retry) is clean so the first-run guard passes;
         # the second fetch (after the retry) sees the label.
-        unpaused = make_issue(740, label="implementing")
-        get_issue_mock = MagicMock(side_effect=[unpaused, _paused_view(740)])
+        unpaused = make_issue(RETRY_ISSUE, label=LABEL_IMPLEMENTING)
+        get_issue_mock = MagicMock(side_effect=[unpaused, _paused_view(RETRY_ISSUE)])
         with (
-            patch.object(gh, "get_issue", get_issue_mock),
+            patch.object(gh, GET_ISSUE, get_issue_mock),
             patch.object(workflow, "_ensure_worktree", return_value=_FAKE_WT),
             patch.object(workflow, "run_agent", run_agent),
         ):

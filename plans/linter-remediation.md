@@ -44,7 +44,7 @@ Do not mark a stage complete until its completion gate is satisfied.
 | 3 | Remaining production complexity | 5/6 | [ ] |
 | 4 | Remaining production style and structure | 5/5 | [x] |
 | 5 | Test structure and complexity | 7/7 | [x] |
-| 6 | Test literals and naming | 4/7 | [ ] |
+| 6 | Test literals and naming | 5/7 | [ ] |
 | 7 | Long-tail cleanup and final verification | 0/5 | [ ] |
 
 ## Finding-count progress
@@ -393,7 +393,7 @@ Apply these rules consistently:
 
 ### Package 6.5 — Implementing and fixing test literals
 
-- [ ] Resolve the same rule groups in implementing and fixing tests.
+- [x] Resolve the same rule groups in implementing and fixing tests.
 
 ### Package 6.6 — Validating, in-review, and conflict test literals
 
@@ -1224,6 +1224,24 @@ Add one row for every implementation session, including partial sessions.
 | 2026-07-21 | 6.2 | Complete | WPS 566->288; target 374->130; 275 focused; 2173p/3s | None | Start 6.3 |
 | 2026-07-21 | 6.3 | Complete | WPS 363->117; target 279->33; 167f; 2204p/3s | None | Start 6.4 |
 | 2026-07-21 | 6.4 | Complete | WPS 697->141; target 555->0; 225f; 2204p/3s | None | Start 6.5 |
+| 2026-07-21 | 6.5 | Complete | WPS 560->130; target 430->0; 234f; 2204p/3s | None | Start 6.6 |
+
+Package 6.5 is **complete**. The pass covered fresh, retry, timeout, paused, drift, full-agent-spec, PR-reuse, and
+terminal implementing scenarios plus fixing execution, paused behavior, and routing. Issue and PR identities,
+comment and watermark ids, agent specs and sessions, labels, pinned-state keys, git paths, feedback strings, and
+protocol values now use names tied to their test domain. True fixture constants moved to module scope, and ambiguous
+loop, event, handler, and pinned-data names were clarified without introducing shared abstractions across unrelated
+scenarios.
+
+The scoped `--select=WPS` count over the eleven modules fell from 560 to 130. The Package 6.5 rule set fell from 430
+to 0: `WPS110` (20), `WPS111` (9), `WPS114` (1), `WPS115` (16), `WPS226` (94), and `WPS432` (290) were cleared.
+The 127 reviewed structural findings assigned to Stage 5 remain unchanged: `WPS201` (2), `WPS202` (3), `WPS204`
+(44), `WPS210` (61), `WPS213` (15), and `WPS235` (2). The three remaining `WPS336` findings stay assigned to
+Stage 7; no new rule family or remainder was introduced.
+
+All 234 focused tests pass, as does repository-wide Ruff. The complete tracked suite passes with 2,204 tests and 3
+live-Postgres skips; both committed-range and working-tree diff checks are clean. The redundancy audit confirms that
+the same 234 behaviors remain collected and the cleanup added no test abstraction or duplicated setup.
 
 Package 6.4 is **complete**. The pass covered the decomposition handler families, question handling and routing,
 documenting handling, paused/trust filtering, and documenting routing. Issue, PR, comment, watermark, usage, git,

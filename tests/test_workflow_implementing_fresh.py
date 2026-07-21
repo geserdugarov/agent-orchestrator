@@ -16,12 +16,22 @@ from tests.fakes import (
     make_issue,
 )
 from tests.workflow_helpers import (
+    LABEL_IMPLEMENTING,
     _PatchedWorkflowMixin,
     _agent,
 )
 
+AWAITING_HUMAN = "awaiting_human"
+RUN_AGENT = "run_agent"
+LEGACY_SESSION = "sess-old"
+ACTION_COMMENT_ID = 900
+HUMAN_REPLY_ID = 1100
+INTERRUPTED_RESUME_ISSUE = 70
+INTERRUPTED_SPAWN_ISSUE = 71
+DIRTY_FILE_COUNT = 15
 
-def _seed_fresh_issue(label="implementing"):
+
+def _seed_fresh_issue(label=LABEL_IMPLEMENTING):
     gh = FakeGitHubClient()
     issue = make_issue(1, label=label)
     gh.add_issue(issue)
@@ -67,7 +77,7 @@ class HandleImplementingFreshRunTest(unittest.TestCase, _PatchedWorkflowMixin):
 
     def test_dirty_commits_park_without_push(self) -> None:
         gh, issue = _seed_fresh_issue()
-        dirty = [f"file_{i}.py" for i in range(15)]
+        dirty = [f"file_{file_index}.py" for file_index in range(DIRTY_FILE_COUNT)]
         mocks = self._run_implementing(
             gh, issue,
             run_agent=_agent(last_message="commit done but more work pending"),
@@ -78,7 +88,7 @@ class HandleImplementingFreshRunTest(unittest.TestCase, _PatchedWorkflowMixin):
 
         mocks["_push_branch"].assert_not_called()
         self.assertEqual(gh.opened_prs, [])
-        self.assertTrue(gh.pinned_data(1).get("awaiting_human"))
+        self.assertTrue(gh.pinned_data(1).get(AWAITING_HUMAN))
         last_comment = gh.posted_comments[-1][1]
         self.assertIn("file_0.py", last_comment)
         self.assertIn("file_9.py", last_comment)
@@ -95,7 +105,7 @@ class HandleImplementingFreshRunTest(unittest.TestCase, _PatchedWorkflowMixin):
 
         self.assertEqual(gh.opened_prs, [])
         state = gh.pinned_data(1)
-        self.assertTrue(state.get("awaiting_human"))
+        self.assertTrue(state.get(AWAITING_HUMAN))
         last_comment = gh.posted_comments[-1][1]
         self.assertIn("> What database should I use?", last_comment)
         self.assertIn("agent needs your input", last_comment)
@@ -118,7 +128,7 @@ class HandleImplementingFreshRunTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
 
         state = gh.pinned_data(1)
-        self.assertTrue(state.get("awaiting_human"))
+        self.assertTrue(state.get(AWAITING_HUMAN))
         self.assertEqual(state.get("park_reason"), "agent_silent")
         self.assertEqual(state.get("silent_park_count"), 1)
         last_comment = gh.posted_comments[-1][1]
@@ -169,7 +179,7 @@ class HandleImplementingFreshRunTest(unittest.TestCase, _PatchedWorkflowMixin):
 
         mocks["_push_branch"].assert_called_once()
         self.assertEqual(gh.opened_prs, [])
-        self.assertTrue(gh.pinned_data(1).get("awaiting_human"))
+        self.assertTrue(gh.pinned_data(1).get(AWAITING_HUMAN))
         last_comment = gh.posted_comments[-1][1]
         self.assertIn("git push failed", last_comment)
 
@@ -177,7 +187,7 @@ class HandleImplementingFreshRunTest(unittest.TestCase, _PatchedWorkflowMixin):
 class HandleImplementingAwaitingHumanTest(unittest.TestCase, _PatchedWorkflowMixin):
     def test_no_comments_return_without_state_write(self) -> None:
         gh = FakeGitHubClient()
-        issue = make_issue(2, label="implementing")
+        issue = make_issue(2, label=LABEL_IMPLEMENTING)
         gh.add_issue(issue)
         # Pre-seed `user_content_hash` so the durability-fix branch in
         # `_detect_user_content_change` doesn't trigger an extra
@@ -186,8 +196,8 @@ class HandleImplementingAwaitingHumanTest(unittest.TestCase, _PatchedWorkflowMix
         gh.seed_state(
             2,
             awaiting_human=True,
-            last_action_comment_id=900,
-            codex_session_id="sess-old",
+            last_action_comment_id=ACTION_COMMENT_ID,
+            codex_session_id=LEGACY_SESSION,
             user_content_hash=workflow._compute_user_content_hash(
                 issue, set()
             ),
@@ -199,30 +209,30 @@ class HandleImplementingAwaitingHumanTest(unittest.TestCase, _PatchedWorkflowMix
             run_agent=_agent(),
         )
 
-        mocks["run_agent"].assert_not_called()
+        mocks[RUN_AGENT].assert_not_called()
         self.assertEqual(gh.write_state_calls, before)
         # Pinned data unchanged.
-        self.assertTrue(gh.pinned_data(2).get("awaiting_human"))
-        self.assertEqual(gh.pinned_data(2).get("codex_session_id"), "sess-old")
+        self.assertTrue(gh.pinned_data(2).get(AWAITING_HUMAN))
+        self.assertEqual(gh.pinned_data(2).get("codex_session_id"), LEGACY_SESSION)
 
     def test_new_comments_resume_and_clear_park(self) -> None:
         gh = FakeGitHubClient()
-        issue = make_issue(2, label="implementing")
+        issue = make_issue(2, label=LABEL_IMPLEMENTING)
         issue.comments.append(
-            FakeComment(id=1100, body="please use sqlite", user=FakeUser("alice"))
+            FakeComment(id=HUMAN_REPLY_ID, body="please use sqlite", user=FakeUser("alice"))
         )
         gh.add_issue(issue)
         gh.seed_state(
             2,
             awaiting_human=True,
-            last_action_comment_id=900,
-            codex_session_id="sess-old",
+            last_action_comment_id=ACTION_COMMENT_ID,
+            codex_session_id=LEGACY_SESSION,
             branch="orchestrator/geserdugarov__agent-orchestrator/issue-2",
         )
 
         mocks = self._run_implementing(
             gh, issue,
-            run_agent=_agent(session_id="sess-old", last_message="ok"),
+            run_agent=_agent(session_id=LEGACY_SESSION, last_message="ok"),
             # awaiting_human path skips the recovered-worktree probe; only
             # the post-codex commit check runs.
             has_new_commits=[True],
@@ -230,12 +240,12 @@ class HandleImplementingAwaitingHumanTest(unittest.TestCase, _PatchedWorkflowMix
             push_branch=True,
         )
 
-        mocks["run_agent"].assert_called_once()
-        call = mocks["run_agent"].call_args
+        mocks[RUN_AGENT].assert_called_once()
+        call = mocks[RUN_AGENT].call_args
         # Legacy `codex_session_id` locks the resume to the codex backend
         # regardless of the current DEV_AGENT default.
         self.assertEqual(call.args[0], "codex")
-        self.assertEqual(call.kwargs.get("resume_session_id"), "sess-old")
+        self.assertEqual(call.kwargs.get("resume_session_id"), LEGACY_SESSION)
         followup_arg = call.args[1]
         self.assertIn("please use sqlite", followup_arg)
         # The bare human-reply followup must still carry the
@@ -245,7 +255,7 @@ class HandleImplementingAwaitingHumanTest(unittest.TestCase, _PatchedWorkflowMix
         self.assertIn("NEVER start a background job", followup_arg)
         # Ran through to PR open.
         self.assertEqual(len(gh.opened_prs), 1)
-        self.assertFalse(gh.pinned_data(2).get("awaiting_human"))
+        self.assertFalse(gh.pinned_data(2).get(AWAITING_HUMAN))
 
 
 class HandleImplementingInterruptedTest(unittest.TestCase, _PatchedWorkflowMixin):
@@ -259,35 +269,35 @@ class HandleImplementingInterruptedTest(unittest.TestCase, _PatchedWorkflowMixin
         self,
     ) -> None:
         gh = FakeGitHubClient()
-        issue = make_issue(70, label="implementing")
+        issue = make_issue(INTERRUPTED_RESUME_ISSUE, label=LABEL_IMPLEMENTING)
         issue.comments.append(
-            FakeComment(id=1100, body="please use sqlite", user=FakeUser("alice"))
+            FakeComment(id=HUMAN_REPLY_ID, body="please use sqlite", user=FakeUser("alice"))
         )
         gh.add_issue(issue)
         gh.seed_state(
-            70,
+            INTERRUPTED_RESUME_ISSUE,
             awaiting_human=True,
-            last_action_comment_id=900,
-            codex_session_id="sess-old",
-            branch="orchestrator/geserdugarov__agent-orchestrator/issue-70",
+            last_action_comment_id=ACTION_COMMENT_ID,
+            codex_session_id=LEGACY_SESSION,
+            branch=f"orchestrator/geserdugarov__agent-orchestrator/issue-{INTERRUPTED_RESUME_ISSUE}",
             user_content_hash=workflow._compute_user_content_hash(issue, set()),
         )
         before_writes = gh.write_state_calls
 
         mocks = self._run_implementing(
             gh, issue,
-            run_agent=_agent(session_id="sess-old", interrupted=True),
+            run_agent=_agent(session_id=LEGACY_SESSION, interrupted=True),
         )
 
         # The resume DID spawn -- the interruption is observed only after
         # the agent returns.
-        mocks["run_agent"].assert_called_once()
+        mocks[RUN_AGENT].assert_called_once()
         # No durable state churn: the in-memory `awaiting_human=False` /
         # watermark-bump / session writes are all discarded.
         self.assertEqual(gh.write_state_calls, before_writes)
-        state = gh.pinned_data(70)
-        self.assertTrue(state.get("awaiting_human"))
-        self.assertEqual(state.get("last_action_comment_id"), 900)
+        state = gh.pinned_data(INTERRUPTED_RESUME_ISSUE)
+        self.assertTrue(state.get(AWAITING_HUMAN))
+        self.assertEqual(state.get("last_action_comment_id"), ACTION_COMMENT_ID)
         # No PR, no label flip, no HITL question / timeout park comment.
         self.assertEqual(gh.opened_prs, [])
         self.assertEqual(gh.label_history, [])
@@ -300,12 +310,13 @@ class HandleImplementingInterruptedTest(unittest.TestCase, _PatchedWorkflowMixin
         self,
     ) -> None:
         gh = FakeGitHubClient()
-        issue = make_issue(71, label="implementing")
+        issue = make_issue(INTERRUPTED_SPAWN_ISSUE, label=LABEL_IMPLEMENTING)
         gh.add_issue(issue)
         # Seed the content hash so the first-encounter drift baseline write
         # doesn't fire -- this test asserts ZERO state writes.
         gh.seed_state(
-            71, user_content_hash=workflow._compute_user_content_hash(issue, set()),
+            INTERRUPTED_SPAWN_ISSUE,
+            user_content_hash=workflow._compute_user_content_hash(issue, set()),
         )
         before_writes = gh.write_state_calls
 
@@ -318,11 +329,11 @@ class HandleImplementingInterruptedTest(unittest.TestCase, _PatchedWorkflowMixin
             has_new_commits=[False],
         )
 
-        mocks["run_agent"].assert_called_once()
+        mocks[RUN_AGENT].assert_called_once()
         self.assertEqual(gh.write_state_calls, before_writes)
         self.assertEqual(gh.opened_prs, [])
         self.assertEqual(gh.label_history, [])
-        state = gh.pinned_data(71)
+        state = gh.pinned_data(INTERRUPTED_SPAWN_ISSUE)
         # The interrupted spawn's session id is NOT persisted -- the next
         # process re-spawns fresh rather than resuming a half-built session.
         self.assertNotIn("dev_session_id", state)
@@ -331,7 +342,7 @@ class HandleImplementingInterruptedTest(unittest.TestCase, _PatchedWorkflowMixin
 class HandleImplementingRecoveredWorktreeTest(unittest.TestCase, _PatchedWorkflowMixin):
     def test_recovered_tree_skips_agent_and_pushes(self) -> None:
         gh = FakeGitHubClient()
-        issue = make_issue(3, label="implementing")
+        issue = make_issue(3, label=LABEL_IMPLEMENTING)
         gh.add_issue(issue)
         gh.seed_state(3, codex_session_id="sess-prev")
 
@@ -343,7 +354,7 @@ class HandleImplementingRecoveredWorktreeTest(unittest.TestCase, _PatchedWorkflo
             push_branch=True,
         )
 
-        mocks["run_agent"].assert_not_called()
+        mocks[RUN_AGENT].assert_not_called()
         mocks["_push_branch"].assert_called_once()
         self.assertEqual(len(gh.opened_prs), 1)
         # Prior session id retained.
