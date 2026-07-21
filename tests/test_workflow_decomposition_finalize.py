@@ -19,6 +19,19 @@ from tests.workflow_helpers import (
     _agent,
 )
 
+LABEL_DONE = "done"
+BLOCKED_PARENT_NUMBER = 70
+BLOCKED_DONE_CHILD_NUMBER = 701
+BLOCKED_MERGED_CHILD_NUMBER = 702
+BLOCKED_MERGED_PR_NUMBER = 7020
+UMBRELLA_PARENT_NUMBER = 80
+UMBRELLA_DONE_CHILD_NUMBER = 801
+UMBRELLA_MERGED_CHILD_NUMBER = 802
+UMBRELLA_MERGED_PR_NUMBER = 8020
+UNMERGED_PARENT_NUMBER = 71
+UNMERGED_CHILD_NUMBER = 711
+UNMERGED_PR_NUMBER = 7110
+
 
 def _seed_child_with_merged_pr(
     gh: FakeGitHubClient,
@@ -54,9 +67,9 @@ class ChildMergedPrAutoFinalizeTest(
 
     def test_blocked_recovers_child_with_merged_pr(self) -> None:
         gh = FakeGitHubClient()
-        parent = make_issue(70, label="blocked")
+        parent = make_issue(BLOCKED_PARENT_NUMBER, label="blocked")
         gh.add_issue(parent)
-        done_child = make_issue(701, label="done")
+        done_child = make_issue(BLOCKED_DONE_CHILD_NUMBER, label=LABEL_DONE)
         done_child.closed = True
         gh.add_issue(done_child)
         # children[1]: a `validating` child whose PR was merged externally
@@ -64,49 +77,70 @@ class ChildMergedPrAutoFinalizeTest(
         # Used to park the parent on "manually closed"; must now be
         # finalized in-line and counted toward the all-done aggregation.
         _seed_child_with_merged_pr(
-            gh, number=702, label="validating", pr_number=7020,
+            gh,
+            number=BLOCKED_MERGED_CHILD_NUMBER,
+            label="validating",
+            pr_number=BLOCKED_MERGED_PR_NUMBER,
         )
-        gh.seed_state(70, children=[701, 702])
+        gh.seed_state(
+            BLOCKED_PARENT_NUMBER,
+            children=[BLOCKED_DONE_CHILD_NUMBER, BLOCKED_MERGED_CHILD_NUMBER],
+        )
 
         self._run(
             lambda: workflow._handle_blocked(gh, _TEST_SPEC, parent),
             run_agent=_agent(),
         )
 
-        self.assertIn((702, "done"), gh.label_history)
-        self.assertIn("merged_at", gh.pinned_data(702))
+        self.assertIn(
+            (BLOCKED_MERGED_CHILD_NUMBER, LABEL_DONE),
+            gh.label_history,
+        )
+        self.assertIn("merged_at", gh.pinned_data(BLOCKED_MERGED_CHILD_NUMBER))
         # Parent flipped to ready because every child is now `done`.
-        self.assertIn((70, "ready"), gh.label_history)
+        self.assertIn((BLOCKED_PARENT_NUMBER, "ready"), gh.label_history)
         # No manual-close park comment posted.
         self.assertFalse(any(
             "closed without reaching" in body
-            for n, body in gh.posted_comments if n == 70
+            for issue_number, body in gh.posted_comments
+            if issue_number == BLOCKED_PARENT_NUMBER
         ))
 
     def test_umbrella_recovers_child_with_merged_pr(self) -> None:
         gh = FakeGitHubClient()
-        parent = make_issue(80, label="umbrella")
+        parent = make_issue(UMBRELLA_PARENT_NUMBER, label="umbrella")
         gh.add_issue(parent)
-        done_child = make_issue(801, label="done")
+        done_child = make_issue(UMBRELLA_DONE_CHILD_NUMBER, label=LABEL_DONE)
         done_child.closed = True
         gh.add_issue(done_child)
         _seed_child_with_merged_pr(
-            gh, number=802, label="implementing", pr_number=8020,
+            gh,
+            number=UMBRELLA_MERGED_CHILD_NUMBER,
+            label="implementing",
+            pr_number=UMBRELLA_MERGED_PR_NUMBER,
         )
-        gh.seed_state(80, children=[801, 802], umbrella=True)
+        gh.seed_state(
+            UMBRELLA_PARENT_NUMBER,
+            children=[UMBRELLA_DONE_CHILD_NUMBER, UMBRELLA_MERGED_CHILD_NUMBER],
+            umbrella=True,
+        )
 
         self._run(
             lambda: workflow._handle_umbrella(gh, _TEST_SPEC, parent),
             run_agent=_agent(),
         )
 
-        self.assertIn((802, "done"), gh.label_history)
+        self.assertIn(
+            (UMBRELLA_MERGED_CHILD_NUMBER, LABEL_DONE),
+            gh.label_history,
+        )
         # Umbrella closes once both children are `done`.
-        self.assertIn((80, "done"), gh.label_history)
+        self.assertIn((UMBRELLA_PARENT_NUMBER, LABEL_DONE), gh.label_history)
         self.assertTrue(parent.closed)
         self.assertFalse(any(
             "closed without reaching" in body
-            for n, body in gh.posted_comments if n == 80
+            for issue_number, body in gh.posted_comments
+            if issue_number == UMBRELLA_PARENT_NUMBER
         ))
 
     def test_unmerged_child_pr_keeps_parent_parked(self) -> None:
@@ -114,26 +148,31 @@ class ChildMergedPrAutoFinalizeTest(
         # the finalize helper must NOT flip the child to `done`. The
         # original manually-closed park still fires.
         gh = FakeGitHubClient()
-        parent = make_issue(71, label="blocked")
+        parent = make_issue(UNMERGED_PARENT_NUMBER, label="blocked")
         gh.add_issue(parent)
-        closed_child = make_issue(711, label="validating")
+        closed_child = make_issue(UNMERGED_CHILD_NUMBER, label="validating")
         closed_child.closed = True
         gh.add_issue(closed_child)
         pr = FakePR(
-            number=7110,
+            number=UNMERGED_PR_NUMBER,
             head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-711",
             head=FakePRRef(sha="cafe1234"),
             merged=False,
             state="closed",
         )
         gh.add_pr(pr)
-        gh.seed_state(711, pr_number=7110)
-        gh.seed_state(71, children=[711])
+        gh.seed_state(UNMERGED_CHILD_NUMBER, pr_number=UNMERGED_PR_NUMBER)
+        gh.seed_state(UNMERGED_PARENT_NUMBER, children=[UNMERGED_CHILD_NUMBER])
 
         self._run(
             lambda: workflow._handle_blocked(gh, _TEST_SPEC, parent),
             run_agent=_agent(),
         )
 
-        self.assertNotIn((711, "done"), gh.label_history)
-        self.assertTrue(gh.pinned_data(71).get("awaiting_human"))
+        self.assertNotIn(
+            (UNMERGED_CHILD_NUMBER, LABEL_DONE),
+            gh.label_history,
+        )
+        self.assertTrue(
+            gh.pinned_data(UNMERGED_PARENT_NUMBER).get("awaiting_human")
+        )

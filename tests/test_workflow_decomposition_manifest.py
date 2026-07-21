@@ -9,6 +9,11 @@ from orchestrator import workflow
 from tests.fakes import make_issue
 from tests.workflow_helpers import _TEST_SPEC, _manifest
 
+KEY_DECISION = "decision"
+KEY_RATIONALE = "rationale"
+DECISION_SINGLE = "single"
+EXCESSIVE_CHILD_COUNT = 11
+
 
 class ParseManifestDecisionTest(unittest.TestCase):
     def test_single_decision(self) -> None:
@@ -18,7 +23,7 @@ class ParseManifestDecisionTest(unittest.TestCase):
         manifest, error = workflow._parse_manifest(msg)
         self.assertIsNone(error)
         self.assertIsNotNone(manifest)
-        self.assertEqual(manifest["decision"], "single")
+        self.assertEqual(manifest[KEY_DECISION], DECISION_SINGLE)
 
     def test_split_decision_two_children(self) -> None:
         payload = (
@@ -48,7 +53,7 @@ class ParseManifestDecisionTest(unittest.TestCase):
             _manifest('{"decision": "maybe"}')
         )
         self.assertIsNone(manifest)
-        self.assertIn("decision", error)
+        self.assertIn(KEY_DECISION, error)
 
     def test_split_with_empty_children_rejected(self) -> None:
         manifest, error = workflow._parse_manifest(
@@ -89,7 +94,8 @@ class ParseManifestChildValidationTest(unittest.TestCase):
 
     def test_too_many_children_rejected(self) -> None:
         children = ",".join(
-            f'{{"title": "T{i}", "body": "b{i}"}}' for i in range(11)
+            f'{{"title": "T{child_index}", "body": "b{child_index}"}}'
+            for child_index in range(EXCESSIVE_CHILD_COUNT)
         )
         manifest, error = workflow._parse_manifest(_manifest(
             f'{{"decision": "split", "children": [{children}]}}'
@@ -159,7 +165,7 @@ class ParseManifestEnvelopeTest(unittest.TestCase):
         msg = _manifest('{"decision": "single"}') + "\n\n   \n"
         manifest, error = workflow._parse_manifest(msg)
         self.assertIsNone(error)
-        self.assertEqual(manifest["decision"], "single")
+        self.assertEqual(manifest[KEY_DECISION], DECISION_SINGLE)
 
     def test_scalar_falsy_depends_on_rejected(self) -> None:
         # `child.get("depends_on") or []` previously collapsed every
@@ -237,9 +243,12 @@ class ParseManifestOptionsTest(unittest.TestCase):
             _TEST_SPEC, make_issue(1, title="example", body="some body"), "",
             [_TEST_SPEC],
         )
-        m = workflow._MANIFEST_RE.search(prompt)
-        self.assertIsNotNone(m, "prompt must contain a fenced example")
-        manifest, error = workflow._parse_manifest(m.group(0))
+        manifest_match = workflow._MANIFEST_RE.search(prompt)
+        self.assertIsNotNone(
+            manifest_match,
+            "prompt must contain a fenced example",
+        )
+        manifest, error = workflow._parse_manifest(manifest_match.group(0))
         self.assertIsNone(
             error, f"displayed example failed to parse: {error}"
         )
@@ -254,8 +263,8 @@ class BuildSingleDecisionCommentTest(unittest.TestCase):
 
     def test_renders_rationale_files_and_notes(self) -> None:
         comment = workflow._build_single_decision_comment({
-            "decision": "single",
-            "rationale": "one small change",
+            KEY_DECISION: DECISION_SINGLE,
+            KEY_RATIONALE: "one small change",
             "affected_files": ["orchestrator/config.py", "tests/fakes.py"],
             "notes": "Bump the default and cover it in fakes.",
         })
@@ -271,8 +280,8 @@ class BuildSingleDecisionCommentTest(unittest.TestCase):
 
     def test_omits_absent_optional_sections(self) -> None:
         comment = workflow._build_single_decision_comment({
-            "decision": "single",
-            "rationale": "trivial",
+            KEY_DECISION: DECISION_SINGLE,
+            KEY_RATIONALE: "trivial",
         })
         self.assertEqual(
             comment,
@@ -283,7 +292,7 @@ class BuildSingleDecisionCommentTest(unittest.TestCase):
         # `_parse_manifest` does not validate single-branch fields, so a
         # non-string / absent rationale must not crash rendering.
         comment = workflow._build_single_decision_comment(
-            {"decision": "single", "rationale": [1, 2, 3]}
+            {KEY_DECISION: DECISION_SINGLE, KEY_RATIONALE: [1, 2, 3]}
         )
         self.assertIn("(no rationale provided)", comment)
 
@@ -291,8 +300,8 @@ class BuildSingleDecisionCommentTest(unittest.TestCase):
         # Non-list files, non-string entries, and non-string notes are
         # sanitized away rather than rendered or raised on.
         comment = workflow._build_single_decision_comment({
-            "decision": "single",
-            "rationale": "ok",
+            KEY_DECISION: DECISION_SINGLE,
+            KEY_RATIONALE: "ok",
             "affected_files": ["good.py", "", 42, "  spaced.py  "],
             "notes": {"not": "a string"},
         })
@@ -304,8 +313,8 @@ class BuildSingleDecisionCommentTest(unittest.TestCase):
 
     def test_non_list_affected_files_omits_section(self) -> None:
         comment = workflow._build_single_decision_comment({
-            "decision": "single",
-            "rationale": "ok",
+            KEY_DECISION: DECISION_SINGLE,
+            KEY_RATIONALE: "ok",
             "affected_files": "orchestrator/config.py",
         })
         self.assertNotIn("**Affected files:**", comment)

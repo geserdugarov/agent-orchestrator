@@ -19,6 +19,25 @@ from tests.workflow_helpers import (
     _agent,
 )
 
+UMBRELLA = "umbrella"
+LABEL_DONE = "done"
+LABEL_IMPLEMENTING = "implementing"
+DISPATCH_ISSUE_NUMBER = 60
+ALL_DONE_PARENT_NUMBER = 61
+IN_PROGRESS_PARENT_NUMBER = 62
+USAGE_PARENT_NUMBER = 63
+USAGE_TOTAL_TOKENS = 12000
+USAGE_TOTAL_COST_USD = 0.42
+NO_USAGE_PARENT_NUMBER = 64
+REJECTED_CHILD_PARENT_NUMBER = 63
+MANUALLY_CLOSED_PARENT_NUMBER = 64
+MANUALLY_CLOSED_DONE_CHILD_NUMBER = 641
+MANUALLY_CLOSED_CHILD_NUMBER = 642
+DEPENDENCY_PARENT_NUMBER = 65
+HELD_DEPENDENCY_PARENT_NUMBER = 66
+NO_HELD_CHILDREN_PARENT_NUMBER = 67
+MISSING_CHILDREN_PARENT_NUMBER = 66
+
 
 def _seed_umbrella_with_children(
     *,
@@ -28,7 +47,7 @@ def _seed_umbrella_with_children(
     **extra_state,
 ) -> tuple[FakeGitHubClient, FakeIssue, list[FakeIssue]]:
     gh = FakeGitHubClient()
-    parent = make_issue(parent_number, label="umbrella")
+    parent = make_issue(parent_number, label=UMBRELLA)
     gh.add_issue(parent)
     children = [
         make_issue(parent_number * 10 + index + 1, label=label)
@@ -36,7 +55,7 @@ def _seed_umbrella_with_children(
     ]
     seed = {
         "children": [seeded_child.number for seeded_child in children],
-        "umbrella": True,
+        UMBRELLA: True,
     }
     for child in children:
         gh.add_issue(child)
@@ -63,31 +82,39 @@ class HandleUmbrellaResolutionTest(unittest.TestCase, _PatchedWorkflowMixin):
 
     def test_dispatcher_routes_umbrella_to_handler(self) -> None:
         gh = FakeGitHubClient()
-        issue = make_issue(60, label="umbrella")
+        issue = make_issue(DISPATCH_ISSUE_NUMBER, label=UMBRELLA)
         gh.add_issue(issue)
 
-        with patch.object(workflow, "_handle_umbrella") as handler:
+        with patch.object(workflow, "_handle_umbrella") as umbrella_handler:
             workflow._process_issue(gh, _TEST_SPEC, issue)
 
-        handler.assert_called_once_with(gh, _TEST_SPEC, issue)
+        umbrella_handler.assert_called_once_with(gh, _TEST_SPEC, issue)
 
     def test_all_children_done_closes_as_done(self) -> None:
         gh, parent, children = _seed_umbrella_with_children(
-            parent_number=61, child_labels=["done", "done"],
+            parent_number=ALL_DONE_PARENT_NUMBER,
+            child_labels=[LABEL_DONE, LABEL_DONE],
         )
 
         _run_umbrella(self, gh, parent)
 
         # Terminal `done` label and the issue is closed -- mirrors how
         # the merged path finalizes a regular issue.
-        self.assertIn((61, "done"), gh.label_history)
+        self.assertIn(
+            (ALL_DONE_PARENT_NUMBER, LABEL_DONE),
+            gh.label_history,
+        )
         self.assertTrue(parent.closed)
         # `umbrella_resolved_at` stamp recorded so a future audit can
         # tell automatic-resolution apart from a manual close.
-        self.assertIn("umbrella_resolved_at", gh.pinned_data(61))
+        self.assertIn(
+            "umbrella_resolved_at",
+            gh.pinned_data(ALL_DONE_PARENT_NUMBER),
+        )
         self.assertTrue(any(
             "all children resolved" in body and "closing umbrella" in body
-            for n, body in gh.posted_comments if n == 61
+            for issue_number, body in gh.posted_comments
+            if issue_number == ALL_DONE_PARENT_NUMBER
         ))
 
     def test_close_comment_appends_usage_verdict(self) -> None:
@@ -95,16 +122,20 @@ class HandleUmbrellaResolutionTest(unittest.TestCase, _PatchedWorkflowMixin):
         # comment carries the cumulative verdict appended to the existing
         # "all children resolved" line (one comment, not two).
         gh, parent, children = _seed_umbrella_with_children(
-            parent_number=63, child_labels=["done", "done"],
-            issue_agent_runs=2, issue_total_tokens=12000,
-            issue_total_cost_usd=0.42, issue_cost_sources=["estimated"],
+            parent_number=USAGE_PARENT_NUMBER,
+            child_labels=[LABEL_DONE, LABEL_DONE],
+            issue_agent_runs=2,
+            issue_total_tokens=USAGE_TOTAL_TOKENS,
+            issue_total_cost_usd=USAGE_TOTAL_COST_USD,
+            issue_cost_sources=["estimated"],
         )
 
         _run_umbrella(self, gh, parent)
 
         close_comments = [
-            body for n, body in gh.posted_comments
-            if n == 63 and "closing umbrella" in body
+            body
+            for issue_number, body in gh.posted_comments
+            if issue_number == USAGE_PARENT_NUMBER and "closing umbrella" in body
         ]
         self.assertEqual(len(close_comments), 1)
         body = close_comments[0]
@@ -118,29 +149,41 @@ class HandleUmbrellaResolutionTest(unittest.TestCase, _PatchedWorkflowMixin):
         # An umbrella that never accrued a counted run closes with the bare
         # resolution line -- no zero receipt appended.
         gh, parent, children = _seed_umbrella_with_children(
-            parent_number=64, child_labels=["done", "done"],
+            parent_number=NO_USAGE_PARENT_NUMBER,
+            child_labels=[LABEL_DONE, LABEL_DONE],
         )
 
         _run_umbrella(self, gh, parent)
 
         close_comments = [
-            body for n, body in gh.posted_comments
-            if n == 64 and "closing umbrella" in body
+            body
+            for issue_number, body in gh.posted_comments
+            if issue_number == NO_USAGE_PARENT_NUMBER
+            and "closing umbrella" in body
         ]
         self.assertEqual(len(close_comments), 1)
         self.assertNotIn(":receipt:", close_comments[0])
 
     def test_some_children_in_progress_no_op(self) -> None:
         gh, parent, children = _seed_umbrella_with_children(
-            parent_number=62, child_labels=["done", "implementing"],
+            parent_number=IN_PROGRESS_PARENT_NUMBER,
+            child_labels=[LABEL_DONE, LABEL_IMPLEMENTING],
         )
 
         _run_umbrella(self, gh, parent)
 
-        self.assertNotIn((62, "done"), gh.label_history)
+        self.assertNotIn(
+            (IN_PROGRESS_PARENT_NUMBER, LABEL_DONE),
+            gh.label_history,
+        )
         self.assertFalse(parent.closed)
         self.assertEqual(
-            [body for n, body in gh.posted_comments if n == 62], [],
+            [
+                body
+                for issue_number, body in gh.posted_comments
+                if issue_number == IN_PROGRESS_PARENT_NUMBER
+            ],
+            [],
         )
 
 class HandleUmbrellaChildStateTest(unittest.TestCase, _PatchedWorkflowMixin):
@@ -148,14 +191,18 @@ class HandleUmbrellaChildStateTest(unittest.TestCase, _PatchedWorkflowMixin):
 
     def test_rejected_child_parks_umbrella(self) -> None:
         gh, parent, children = _seed_umbrella_with_children(
-            parent_number=63, child_labels=["done", "rejected"],
+            parent_number=REJECTED_CHILD_PARENT_NUMBER,
+            child_labels=[LABEL_DONE, "rejected"],
         )
 
         _run_umbrella(self, gh, parent)
 
-        state = gh.pinned_data(63)
+        state = gh.pinned_data(REJECTED_CHILD_PARENT_NUMBER)
         self.assertTrue(state.get("awaiting_human"))
-        self.assertNotIn((63, "done"), gh.label_history)
+        self.assertNotIn(
+            (REJECTED_CHILD_PARENT_NUMBER, LABEL_DONE),
+            gh.label_history,
+        )
         self.assertFalse(parent.closed)
         last_comment = gh.posted_comments[-1][1]
         self.assertIn("rejected", last_comment)
@@ -163,33 +210,49 @@ class HandleUmbrellaChildStateTest(unittest.TestCase, _PatchedWorkflowMixin):
 
     def test_manually_closed_child_parks_umbrella(self) -> None:
         gh = FakeGitHubClient()
-        parent = make_issue(64, label="umbrella")
+        parent = make_issue(MANUALLY_CLOSED_PARENT_NUMBER, label=UMBRELLA)
         gh.add_issue(parent)
-        done_child = make_issue(641, label="done")
+        done_child = make_issue(
+            MANUALLY_CLOSED_DONE_CHILD_NUMBER,
+            label=LABEL_DONE,
+        )
         done_child.closed = True
         gh.add_issue(done_child)
-        closed_child = make_issue(642, label="implementing")
+        closed_child = make_issue(
+            MANUALLY_CLOSED_CHILD_NUMBER,
+            label=LABEL_IMPLEMENTING,
+        )
         closed_child.closed = True
         gh.add_issue(closed_child)
-        gh.seed_state(64, children=[641, 642], umbrella=True)
+        gh.seed_state(
+            MANUALLY_CLOSED_PARENT_NUMBER,
+            children=[
+                MANUALLY_CLOSED_DONE_CHILD_NUMBER,
+                MANUALLY_CLOSED_CHILD_NUMBER,
+            ],
+            umbrella=True,
+        )
 
         _run_umbrella(self, gh, parent)
 
-        state = gh.pinned_data(64)
+        state = gh.pinned_data(MANUALLY_CLOSED_PARENT_NUMBER)
         self.assertTrue(state.get("awaiting_human"))
-        self.assertNotIn((64, "done"), gh.label_history)
+        self.assertNotIn(
+            (MANUALLY_CLOSED_PARENT_NUMBER, LABEL_DONE),
+            gh.label_history,
+        )
         self.assertFalse(parent.closed)
         last_comment = gh.posted_comments[-1][1]
         self.assertIn("closed without reaching", last_comment)
-        self.assertIn("#642", last_comment)
+        self.assertIn(f"#{MANUALLY_CLOSED_CHILD_NUMBER}", last_comment)
 
     def test_unblocks_middle_child_when_dep_done(self) -> None:
         # A child stuck `blocked` on a dep that's now `done` should be
         # flipped to `ready` exactly as `_handle_blocked` does -- an
         # umbrella's children can still depend on each other.
         gh, parent, children = _seed_umbrella_with_children(
-            parent_number=65,
-            child_labels=["done", "blocked"],
+            parent_number=DEPENDENCY_PARENT_NUMBER,
+            child_labels=[LABEL_DONE, "blocked"],
             dep_graph={"1": [0]},
         )
 
@@ -200,7 +263,10 @@ class HandleUmbrellaChildStateTest(unittest.TestCase, _PatchedWorkflowMixin):
             if issue_n == children[1].number
         ]
         self.assertEqual(flipped, ["ready"])
-        self.assertNotIn((65, "done"), gh.label_history)
+        self.assertNotIn(
+            (DEPENDENCY_PARENT_NUMBER, LABEL_DONE),
+            gh.label_history,
+        )
         self.assertFalse(parent.closed)
 
     def test_held_children_log_pending_deps(self) -> None:
@@ -211,8 +277,8 @@ class HandleUmbrellaChildStateTest(unittest.TestCase, _PatchedWorkflowMixin):
         # closing. children[0] is in-flight (not done), so children[1]
         # (depends on [0]) stays held.
         gh, parent, children = _seed_umbrella_with_children(
-            parent_number=66,
-            child_labels=["implementing", "blocked"],
+            parent_number=HELD_DEPENDENCY_PARENT_NUMBER,
+            child_labels=[LABEL_IMPLEMENTING, "blocked"],
             dep_graph={"1": [0]},
         )
 
@@ -236,8 +302,8 @@ class HandleUmbrellaChildStateTest(unittest.TestCase, _PatchedWorkflowMixin):
         # `blocked` on a sibling), nothing is held and the visibility log
         # stays silent -- a healthy umbrella must not spam the tick log.
         gh, parent, _children = _seed_umbrella_with_children(
-            parent_number=67,
-            child_labels=["done", "implementing"],
+            parent_number=NO_HELD_CHILDREN_PARENT_NUMBER,
+            child_labels=[LABEL_DONE, LABEL_IMPLEMENTING],
         )
 
         with self.assertNoLogs("orchestrator.workflow", level="INFO"):
@@ -245,13 +311,16 @@ class HandleUmbrellaChildStateTest(unittest.TestCase, _PatchedWorkflowMixin):
 
     def test_umbrella_with_no_recorded_children_parks(self) -> None:
         gh = FakeGitHubClient()
-        parent = make_issue(66, label="umbrella")
+        parent = make_issue(MISSING_CHILDREN_PARENT_NUMBER, label=UMBRELLA)
         gh.add_issue(parent)
-        gh.seed_state(66, umbrella=True)
+        gh.seed_state(MISSING_CHILDREN_PARENT_NUMBER, umbrella=True)
 
         _run_umbrella(self, gh, parent)
 
-        state = gh.pinned_data(66)
+        state = gh.pinned_data(MISSING_CHILDREN_PARENT_NUMBER)
         self.assertTrue(state.get("awaiting_human"))
-        self.assertNotIn((66, "done"), gh.label_history)
+        self.assertNotIn(
+            (MISSING_CHILDREN_PARENT_NUMBER, LABEL_DONE),
+            gh.label_history,
+        )
         self.assertFalse(parent.closed)

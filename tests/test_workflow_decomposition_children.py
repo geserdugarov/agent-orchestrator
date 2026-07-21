@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import unittest
 
+PARENT_ISSUE_NUMBER = 42
+
 
 class CreateChildIssueAlwaysUsesParentRepoTest(unittest.TestCase):
     """`create_child_issue` is structurally bound to `self.repo` so a
@@ -21,7 +23,10 @@ class CreateChildIssueAlwaysUsesParentRepoTest(unittest.TestCase):
         client.repo.create_issue.return_value = sentinel
 
         out = client.create_child_issue(
-            title="A", body="do A", parent_number=42, labels=["ready"],
+            title="A",
+            body="do A",
+            parent_number=PARENT_ISSUE_NUMBER,
+            labels=["ready"],
         )
 
         self.assertIs(out, sentinel)

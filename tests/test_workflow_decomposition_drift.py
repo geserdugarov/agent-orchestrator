@@ -18,6 +18,24 @@ from tests.workflow_helpers import (
     _agent,
 )
 
+LABEL_DECOMPOSING = "decomposing"
+LABEL_DONE = "done"
+KEY_USER_CONTENT_HASH = "user_content_hash"
+STALE_USER_CONTENT_HASH = "stale-hash"
+PRIOR_TICK_USER_CONTENT_HASH = "stale-hash-from-prior-tick"
+PICKUP_COMMENT_ID = 900
+READY_DRIFT_ISSUE_NUMBER = 50
+STABLE_READY_ISSUE_NUMBER = 51
+DECOMPOSING_DRIFT_ISSUE_NUMBER = 90
+HUMAN_COMMENT_ID = 2000
+LAST_ACTION_COMMENT_ID = 1500
+BLOCKED_PARENT_NUMBER = 300
+BLOCKED_PARENT_CHILD_NUMBER = 301
+BLOCKED_CHILD_NUMBER = 310
+BLOCKED_CHILD_PARENT_NUMBER = 309
+UMBRELLA_NUMBER = 400
+UMBRELLA_CHILD_NUMBERS = (401, 402)
+
 
 class HandleReadyRoutesBackOnHashChangeTest(
     unittest.TestCase, _PatchedWorkflowMixin,
@@ -28,14 +46,18 @@ class HandleReadyRoutesBackOnHashChangeTest(
         # must clear the locked decomposer session so the next tick spawns
         # a fresh manifest derived against the new body.
         gh = FakeGitHubClient()
-        issue = make_issue(50, label="ready", body="updated body")
+        issue = make_issue(
+            READY_DRIFT_ISSUE_NUMBER,
+            label="ready",
+            body="updated body",
+        )
         gh.add_issue(issue)
         gh.seed_state(
-            50,
-            user_content_hash="stale-hash-from-prior-tick",
+            READY_DRIFT_ISSUE_NUMBER,
+            user_content_hash=PRIOR_TICK_USER_CONTENT_HASH,
             decomposer_agent="claude",
             decomposer_session_id="old-sess",
-            pickup_comment_id=900,
+            pickup_comment_id=PICKUP_COMMENT_ID,
         )
 
         self._run(
@@ -45,8 +67,11 @@ class HandleReadyRoutesBackOnHashChangeTest(
 
         # Routed back to decomposing; the implementer must NOT have run
         # this tick.
-        self.assertIn((50, "decomposing"), gh.label_history)
-        state = gh.pinned_data(50)
+        self.assertIn(
+            (READY_DRIFT_ISSUE_NUMBER, LABEL_DECOMPOSING),
+            gh.label_history,
+        )
+        state = gh.pinned_data(READY_DRIFT_ISSUE_NUMBER)
         # Session id dropped so the next tick spawns fresh, but the
         # recorded `decomposer_agent` spec is PRESERVED -- the
         # lock-on-first-spawn rule (see FullSpecPersistenceTest) means
@@ -58,7 +83,8 @@ class HandleReadyRoutesBackOnHashChangeTest(
         # New hash now persisted so the next decomposing tick sees a
         # stable baseline.
         self.assertNotEqual(
-            state.get("user_content_hash"), "stale-hash-from-prior-tick",
+            state.get(KEY_USER_CONTENT_HASH),
+            PRIOR_TICK_USER_CONTENT_HASH,
         )
         # A human-visible notice is posted.
         self.assertTrue(any(
@@ -68,13 +94,17 @@ class HandleReadyRoutesBackOnHashChangeTest(
 
     def test_unchanged_ready_does_not_route_back(self) -> None:
         gh = FakeGitHubClient()
-        issue = make_issue(51, label="ready", body="stable body")
+        issue = make_issue(
+            STABLE_READY_ISSUE_NUMBER,
+            label="ready",
+            body="stable body",
+        )
         gh.add_issue(issue)
         current = workflow._compute_user_content_hash(issue, set())
         gh.seed_state(
-            51,
+            STABLE_READY_ISSUE_NUMBER,
             user_content_hash=current,
-            pickup_comment_id=900,
+            pickup_comment_id=PICKUP_COMMENT_ID,
         )
 
         self._run(
@@ -87,8 +117,14 @@ class HandleReadyRoutesBackOnHashChangeTest(
         )
 
         # Falls through to the normal `ready` -> `implementing` flow.
-        self.assertIn((51, "implementing"), gh.label_history)
-        self.assertNotIn((51, "decomposing"), gh.label_history)
+        self.assertIn(
+            (STABLE_READY_ISSUE_NUMBER, "implementing"),
+            gh.label_history,
+        )
+        self.assertNotIn(
+            (STABLE_READY_ISSUE_NUMBER, LABEL_DECOMPOSING),
+            gh.label_history,
+        )
 
 
 class DecomposingHashChangeResetsSessionTest(
@@ -104,23 +140,27 @@ class DecomposingHashChangeResetsSessionTest(
         # fresh spawn against the new body.
         gh = FakeGitHubClient()
         issue = make_issue(
-            90, label="decomposing", body="updated decomposition input",
+            DECOMPOSING_DRIFT_ISSUE_NUMBER,
+            label=LABEL_DECOMPOSING,
+            body="updated decomposition input",
         )
         # A pre-existing human comment so the resume path would otherwise
         # consume it; we want to verify the hash branch wins.
         issue.comments.append(FakeComment(
-            id=2000, body="please reconsider", user=FakeUser("alice"),
+            id=HUMAN_COMMENT_ID,
+            body="please reconsider",
+            user=FakeUser("alice"),
         ))
         gh.add_issue(issue)
         gh.seed_state(
-            90,
-            user_content_hash="stale-hash",
+            DECOMPOSING_DRIFT_ISSUE_NUMBER,
+            user_content_hash=STALE_USER_CONTENT_HASH,
             decomposer_agent="claude",
             decomposer_session_id="old-sess",
             awaiting_human=True,
             park_reason=None,
-            last_action_comment_id=1500,
-            pickup_comment_id=900,
+            last_action_comment_id=LAST_ACTION_COMMENT_ID,
+            pickup_comment_id=PICKUP_COMMENT_ID,
         )
 
         mocks = self._run(
@@ -140,7 +180,7 @@ class DecomposingHashChangeResetsSessionTest(
         mocks["run_agent"].assert_called_once()
         kwargs = mocks["run_agent"].call_args.kwargs
         self.assertIsNone(kwargs.get("resume_session_id"))
-        state = gh.pinned_data(90)
+        state = gh.pinned_data(DECOMPOSING_DRIFT_ISSUE_NUMBER)
         # The new session id from the fresh spawn was persisted, not the
         # stale one.
         self.assertEqual(state.get("decomposer_session_id"), "new-sess")
@@ -161,18 +201,22 @@ class HandleBlockedHashDriftTest(
 
     def test_parent_with_children_routes_back(self) -> None:
         gh = FakeGitHubClient()
-        parent = make_issue(300, label="blocked", body="updated parent body")
+        parent = make_issue(
+            BLOCKED_PARENT_NUMBER,
+            label="blocked",
+            body="updated parent body",
+        )
         gh.add_issue(parent)
         # An in-flight child -- routing the parent orphans it on the
         # GitHub side; the notice must call this out so the operator can
         # close any obsolete children manually.
-        child = make_issue(301, label="implementing")
+        child = make_issue(BLOCKED_PARENT_CHILD_NUMBER, label="implementing")
         gh.add_issue(child)
         gh.seed_state(
-            300,
-            children=[301],
+            BLOCKED_PARENT_NUMBER,
+            children=[BLOCKED_PARENT_CHILD_NUMBER],
             decomposer_session_id="old-sess",
-            user_content_hash="stale-hash",
+            user_content_hash=STALE_USER_CONTENT_HASH,
         )
 
         self._run(
@@ -183,13 +227,19 @@ class HandleBlockedHashDriftTest(
         # Routed back to decomposing per spec ("Before validating: route
         # back to decomposing"). The next tick spawns a fresh decomposer
         # against the new body.
-        self.assertIn((300, "decomposing"), gh.label_history)
-        state = gh.pinned_data(300)
+        self.assertIn(
+            (BLOCKED_PARENT_NUMBER, LABEL_DECOMPOSING),
+            gh.label_history,
+        )
+        state = gh.pinned_data(BLOCKED_PARENT_NUMBER)
         self.assertFalse(state.get("awaiting_human"))
         # Manifest state cleared so half-finished-recovery does not fire.
         self.assertEqual(state.get("children"), [])
         self.assertIsNone(state.get("decomposer_session_id"))
-        self.assertNotEqual(state.get("user_content_hash"), "stale-hash")
+        self.assertNotEqual(
+            state.get(KEY_USER_CONTENT_HASH),
+            STALE_USER_CONTENT_HASH,
+        )
         # Notice explicitly lists the now-orphaned child so the operator
         # knows to close it manually if it no longer applies.
         notice = next(
@@ -206,12 +256,16 @@ class HandleBlockedHashDriftTest(
         # the re-decomposer, even if the edited child now needs
         # splitting -- the explicit reviewer concern.
         gh = FakeGitHubClient()
-        child = make_issue(310, label="blocked", body="updated child body")
+        child = make_issue(
+            BLOCKED_CHILD_NUMBER,
+            label="blocked",
+            body="updated child body",
+        )
         gh.add_issue(child)
         gh.seed_state(
-            310,
-            parent_number=309,
-            user_content_hash="stale-hash",
+            BLOCKED_CHILD_NUMBER,
+            parent_number=BLOCKED_CHILD_PARENT_NUMBER,
+            user_content_hash=STALE_USER_CONTENT_HASH,
         )
 
         self._run(
@@ -219,9 +273,15 @@ class HandleBlockedHashDriftTest(
             run_agent=_agent(),
         )
 
-        self.assertIn((310, "decomposing"), gh.label_history)
-        state = gh.pinned_data(310)
-        self.assertNotEqual(state.get("user_content_hash"), "stale-hash")
+        self.assertIn(
+            (BLOCKED_CHILD_NUMBER, LABEL_DECOMPOSING),
+            gh.label_history,
+        )
+        state = gh.pinned_data(BLOCKED_CHILD_NUMBER)
+        self.assertNotEqual(
+            state.get(KEY_USER_CONTENT_HASH),
+            STALE_USER_CONTENT_HASH,
+        )
         # Notice posted; no orphans for a child with no own children.
         notice = next(
             body for _, body in gh.posted_comments
@@ -244,21 +304,23 @@ class HandleUmbrellaHashDriftTest(
     ) -> None:
         gh = FakeGitHubClient()
         umbrella = make_issue(
-            400, label="umbrella", body="updated umbrella body",
+            UMBRELLA_NUMBER,
+            label="umbrella",
+            body="updated umbrella body",
         )
         gh.add_issue(umbrella)
         # Children all done -- without the drift route, the umbrella
         # would close to `done` against the stale manifest on this
         # very tick.
-        c1 = make_issue(401, label="done")
-        c2 = make_issue(402, label="done")
-        gh.add_issue(c1)
-        gh.add_issue(c2)
+        first_child = make_issue(UMBRELLA_CHILD_NUMBERS[0], label=LABEL_DONE)
+        second_child = make_issue(UMBRELLA_CHILD_NUMBERS[1], label=LABEL_DONE)
+        gh.add_issue(first_child)
+        gh.add_issue(second_child)
         gh.seed_state(
-            400,
-            children=[401, 402],
+            UMBRELLA_NUMBER,
+            children=list(UMBRELLA_CHILD_NUMBERS),
             umbrella=True,
-            user_content_hash="stale-hash",
+            user_content_hash=STALE_USER_CONTENT_HASH,
         )
 
         self._run(
@@ -266,17 +328,23 @@ class HandleUmbrellaHashDriftTest(
             run_agent=_agent(),
         )
 
-        state = gh.pinned_data(400)
+        state = gh.pinned_data(UMBRELLA_NUMBER)
         # Routed back to decomposing per spec.
-        self.assertIn((400, "decomposing"), gh.label_history)
+        self.assertIn(
+            (UMBRELLA_NUMBER, LABEL_DECOMPOSING),
+            gh.label_history,
+        )
         # Crucially: did NOT close the umbrella to `done`.
-        self.assertNotIn((400, "done"), gh.label_history)
+        self.assertNotIn((UMBRELLA_NUMBER, LABEL_DONE), gh.label_history)
         self.assertFalse(umbrella.closed)
         # Manifest state cleared so half-finished-recovery does not fire
         # against the stale children list / umbrella flag.
         self.assertEqual(state.get("children"), [])
         self.assertIsNone(state.get("umbrella"))
-        self.assertNotEqual(state.get("user_content_hash"), "stale-hash")
+        self.assertNotEqual(
+            state.get(KEY_USER_CONTENT_HASH),
+            STALE_USER_CONTENT_HASH,
+        )
         # Orphans listed in the notice.
         notice = next(
             body for _, body in gh.posted_comments

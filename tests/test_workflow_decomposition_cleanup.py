@@ -16,6 +16,12 @@ from tests.workflow_helpers import (
     _agent,
 )
 
+STALE_USER_CONTENT_HASH = "stale-hash"
+READY_DRIFT_PARENT_NUMBER = 800
+READY_DRIFT_CHILD_NUMBERS = (801, 802)
+RECOVERY_PARENT_NUMBER = 1100
+RECOVERY_CHILD_NUMBER = 1101
+
 
 class ReadyDriftClearsStaleManifestStateTest(
     unittest.TestCase, _PatchedWorkflowMixin,
@@ -30,15 +36,19 @@ class ReadyDriftClearsStaleManifestStateTest(
 
     def test_drift_clears_and_orphans_children(self) -> None:
         gh = FakeGitHubClient()
-        parent = make_issue(800, label="ready", body="updated parent body")
+        parent = make_issue(
+            READY_DRIFT_PARENT_NUMBER,
+            label="ready",
+            body="updated parent body",
+        )
         gh.add_issue(parent)
         gh.seed_state(
-            800,
-            user_content_hash="stale-hash",
+            READY_DRIFT_PARENT_NUMBER,
+            user_content_hash=STALE_USER_CONTENT_HASH,
             # Children list survived from blocked->ready transition; the
             # children are all in `done` (which is how the parent
             # reached `ready` in the first place).
-            children=[801, 802],
+            children=list(READY_DRIFT_CHILD_NUMBERS),
             dep_graph={"1": [0]},
             expected_children_count=2,
             pickup_comment_id=100,
@@ -53,12 +63,18 @@ class ReadyDriftClearsStaleManifestStateTest(
         # `_handle_decomposing`'s recovery branch (which keys on
         # `expected_children_count is not None OR children is non-empty`)
         # cannot fire and short-circuit the re-decompose.
-        self.assertIn((800, "decomposing"), gh.label_history)
-        state = gh.pinned_data(800)
+        self.assertIn(
+            (READY_DRIFT_PARENT_NUMBER, "decomposing"),
+            gh.label_history,
+        )
+        state = gh.pinned_data(READY_DRIFT_PARENT_NUMBER)
         self.assertEqual(state.get("children"), [])
         self.assertIsNone(state.get("expected_children_count"))
         self.assertEqual(state.get("dep_graph"), {})
-        self.assertNotEqual(state.get("user_content_hash"), "stale-hash")
+        self.assertNotEqual(
+            state.get("user_content_hash"),
+            STALE_USER_CONTENT_HASH,
+        )
         # Orphaned children listed in the notice so the operator can
         # close any that no longer apply.
         notice = next(
@@ -90,17 +106,19 @@ class DriftBeforeHalfFinishedRecoveryTest(
         # would finalize to `blocked` against the stale manifest.
         gh = FakeGitHubClient()
         parent = make_issue(
-            1100, label="decomposing", body="updated body",
+            RECOVERY_PARENT_NUMBER,
+            label="decomposing",
+            body="updated body",
         )
         gh.add_issue(parent)
         # A real child issue so the orphan listing has something to
         # reference.
-        child = make_issue(1101, label="blocked")
+        child = make_issue(RECOVERY_CHILD_NUMBER, label="blocked")
         gh.add_issue(child)
         gh.seed_state(
-            1100,
-            user_content_hash="stale-hash",
-            children=[1101],
+            RECOVERY_PARENT_NUMBER,
+            user_content_hash=STALE_USER_CONTENT_HASH,
+            children=[RECOVERY_CHILD_NUMBER],
             expected_children_count=1,
             decomposer_session_id="old-sess",
         )
@@ -123,16 +141,25 @@ class DriftBeforeHalfFinishedRecoveryTest(
         mocks["run_agent"].assert_called_once()
         # Manifest tracking cleared so the recovery branch cannot
         # fire on subsequent ticks against the stale state.
-        state = gh.pinned_data(1100)
+        state = gh.pinned_data(RECOVERY_PARENT_NUMBER)
         self.assertEqual(state.get("children"), [])
         self.assertIsNone(state.get("expected_children_count"))
         self.assertEqual(state.get("dep_graph"), {})
         # New hash baseline persisted.
-        self.assertNotEqual(state.get("user_content_hash"), "stale-hash")
+        self.assertNotEqual(
+            state.get("user_content_hash"),
+            STALE_USER_CONTENT_HASH,
+        )
         # Parent did NOT finalize to `blocked` against the stale
         # manifest; instead the fresh decomposer voted `single` -> `ready`.
-        self.assertNotIn((1100, "blocked"), gh.label_history)
-        self.assertIn((1100, "ready"), gh.label_history)
+        self.assertNotIn(
+            (RECOVERY_PARENT_NUMBER, "blocked"),
+            gh.label_history,
+        )
+        self.assertIn(
+            (RECOVERY_PARENT_NUMBER, "ready"),
+            gh.label_history,
+        )
         # Orphans listed in the notice.
         notice = next(
             body for _, body in gh.posted_comments
