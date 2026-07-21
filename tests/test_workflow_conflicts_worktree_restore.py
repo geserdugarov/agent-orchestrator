@@ -9,6 +9,9 @@ from orchestrator import workflow, worktree_lifecycle
 
 from tests.workflow_helpers import _TEST_SPEC
 
+WORKTREE_ISSUE = 300
+WORKTREE_BRANCH = "orchestrator/geserdugarov__agent-orchestrator/issue-300"
+
 
 class _GitRecorder:
     def __init__(self, *, local_branch_present: bool):
@@ -36,10 +39,6 @@ class _AuthedFetchRecorder:
 
 
 class _WorktreeRestoreFixtureMixin:
-
-    ISSUE_NUMBER = 300
-    BRANCH = "orchestrator/geserdugarov__agent-orchestrator/issue-300"
-
     def _run_ensure(self, *, local_branch_present: bool):
         git_recorder = _GitRecorder(
             local_branch_present=local_branch_present,
@@ -48,21 +47,25 @@ class _WorktreeRestoreFixtureMixin:
         worktree_path = MagicMock()
         worktree_path.exists.return_value = False
 
-        with patch.object(worktree_lifecycle, "_git", git_recorder), \
-             patch.object(
-                 worktree_lifecycle,
-                 "_authed_target_fetch",
-                 fetch_recorder,
-             ), patch.object(
-                 worktree_lifecycle,
-                 "_worktree_path",
-                 return_value=worktree_path,
-             ), patch.object(
-                 worktree_lifecycle,
-                 "_repo_worktrees_root",
-                 return_value=MagicMock(),
-             ):
-            workflow._ensure_pr_worktree(_TEST_SPEC, self.ISSUE_NUMBER)
+        with (
+            patch.object(worktree_lifecycle, "_git", git_recorder),
+            patch.object(
+                worktree_lifecycle,
+                "_authed_target_fetch",
+                fetch_recorder,
+            ),
+            patch.object(
+                worktree_lifecycle,
+                "_worktree_path",
+                return_value=worktree_path,
+            ),
+            patch.object(
+                worktree_lifecycle,
+                "_repo_worktrees_root",
+                return_value=MagicMock(),
+            ),
+        ):
+            workflow._ensure_pr_worktree(_TEST_SPEC, WORKTREE_ISSUE)
         return git_recorder.calls, fetch_recorder.calls
 
 
@@ -90,8 +93,8 @@ class EnsurePrWorktreeRestoresFromRemoteBranchTest(
         add_args = worktree_adds[0]
         # Form is: ("worktree", "add", "-b", branch, str(wt), "origin/<branch>")
         self.assertEqual(add_args[2], "-b")
-        self.assertEqual(add_args[3], self.BRANCH)
-        self.assertEqual(add_args[5], f"origin/{self.BRANCH}")
+        self.assertEqual(add_args[3], WORKTREE_BRANCH)
+        self.assertEqual(add_args[5], f"origin/{WORKTREE_BRANCH}")
         # NOT `origin/<base>` -- that would discard the PR's commits.
         self.assertNotEqual(add_args[5], f"origin/{_TEST_SPEC.base_branch}")
 
@@ -109,7 +112,7 @@ class EnsurePrWorktreeRestoresFromRemoteBranchTest(
         add_args = worktree_adds[0]
         # No `-b` -- attach to the existing local branch as-is.
         self.assertNotIn("-b", add_args)
-        self.assertEqual(add_args[3], self.BRANCH)
+        self.assertEqual(add_args[3], WORKTREE_BRANCH)
 
     def test_non_fetch_git_calls_run_in_target_root(self) -> None:
         # All non-fetch git invocations (rev-parse, worktree add/remove)
@@ -119,9 +122,9 @@ class EnsurePrWorktreeRestoresFromRemoteBranchTest(
 
         for args, cwd in git_calls:
             self.assertEqual(
-                cwd, _TEST_SPEC.target_root,
-                f"git invocation {args} ran from {cwd}, "
-                f"expected {_TEST_SPEC.target_root}",
+                cwd,
+                _TEST_SPEC.target_root,
+                f"git invocation {args} ran from {cwd}, expected {_TEST_SPEC.target_root}",
             )
 
     def test_branch_fetch_uses_authed_target(self) -> None:
@@ -135,13 +138,14 @@ class EnsurePrWorktreeRestoresFromRemoteBranchTest(
         # Both fetches landed on the authed helper -- base and PR branch.
         self.assertEqual(len(fetch_calls), 2)
         branches = {branch for _spec, branch in fetch_calls}
-        self.assertEqual(branches, {_TEST_SPEC.base_branch, self.BRANCH})
+        self.assertEqual(branches, {_TEST_SPEC.base_branch, WORKTREE_BRANCH})
         # And no plain-git fetch leaked through (which would prompt for
         # credentials under systemd and fail).
         for args, _cwd in git_calls:
             self.assertNotEqual(
-                args[0] if args else "", "fetch",
-                f"plain `_git(\"fetch\", ...)` leaked: {args!r}",
+                args[0] if args else "",
+                "fetch",
+                f'plain `_git("fetch", ...)` leaked: {args!r}',
             )
 
 

@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for in_review feedback watermark handling: the park-message
 watermark bump and the split issue / inline-review id namespaces."""
+
 from __future__ import annotations
 
 import unittest
@@ -21,6 +22,16 @@ from tests.workflow_helpers import (
     _agent,
 )
 
+PARK_ISSUE = 60
+PARK_PR = 70
+PARK_BRANCH = "orchestrator/geserdugarov__agent-orchestrator/issue-60"
+HANDOFF_WATERMARK = 900
+SPLIT_WATERMARK_ISSUE = 65
+SPLIT_WATERMARK_PR = 95
+SPLIT_WATERMARK_BRANCH = "orchestrator/geserdugarov__agent-orchestrator/issue-65"
+INLINE_COMMENT_ID = 42
+INLINE_COMMENT_WATERMARK = 41
+
 
 class InReviewParkWatermarkTest(unittest.TestCase, _PatchedWorkflowMixin):
     """A park inside `_handle_in_review` posts an issue comment. The watermark
@@ -35,75 +46,89 @@ class InReviewParkWatermarkTest(unittest.TestCase, _PatchedWorkflowMixin):
         # watermark is bumped past it; subsequent ticks must not surface
         # the park message as fresh PR feedback.
         gh = FakeGitHubClient()
-        issue = make_issue(60, label="in_review")
+        issue = make_issue(PARK_ISSUE, label="in_review")
         gh.add_issue(issue)
         pr = FakePR(
-            number=70, head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-60",
+            number=PARK_PR,
+            head_branch=PARK_BRANCH,
             head=FakePRRef(sha="cafe1234"),
-            approved=True, approval_head_sha="cafe1234",
-            mergeable=False, check_state="success",
+            approved=True,
+            approval_head_sha="cafe1234",
+            mergeable=False,
+            check_state="success",
         )
         gh.add_pr(pr)
         gh.seed_state(
-            60, pr_number=70, branch="orchestrator/geserdugarov__agent-orchestrator/issue-60",
-            dev_agent="claude", dev_session_id="dev-sess",
-            pr_last_comment_id=900,  # an old watermark from validating handoff
+            PARK_ISSUE,
+            pr_number=PARK_PR,
+            branch=PARK_BRANCH,
+            dev_agent="claude",
+            dev_session_id="dev-sess",
+            pr_last_comment_id=HANDOFF_WATERMARK,  # an old watermark from validating handoff
         )
 
         # Tick 1: unmergeable park.
         self._run_in_review(
-            gh, issue,
+            gh,
+            issue,
             run_agent=_agent(),
         )
-        self.assertTrue(gh.pinned_data(60).get("awaiting_human"))
-        self.assertEqual(gh.pinned_data(60).get("park_reason"), "unmergeable")
+        self.assertTrue(gh.pinned_data(PARK_ISSUE).get("awaiting_human"))
+        self.assertEqual(
+            gh.pinned_data(PARK_ISSUE).get("park_reason"),
+            "unmergeable",
+        )
         comments_after_park = len(gh.posted_comments)
         self.assertGreater(comments_after_park, 0)
         # Watermark must have been bumped past the park comment -- which
         # means it's at or above the latest comment id on the issue.
         latest_id = gh.latest_comment_id(issue)
-        self.assertEqual(gh.pinned_data(60).get("pr_last_comment_id"), latest_id)
+        self.assertEqual(
+            gh.pinned_data(PARK_ISSUE).get("pr_last_comment_id"),
+            latest_id,
+        )
 
         # Tick 2: nothing new; must NOT route the orchestrator's park
         # message back through the fixing route.
         mocks = self._run_in_review(
-            gh, issue,
+            gh,
+            issue,
             run_agent=_agent(),
         )
         mocks["run_agent"].assert_not_called()
         # No additional comments posted (no second park, no fixing route).
         self.assertEqual(len(gh.posted_comments), comments_after_park)
-        self.assertNotIn((60, "fixing"), gh.label_history)
+        self.assertNotIn((PARK_ISSUE, "fixing"), gh.label_history)
 
 
 class _SplitWatermarkFixtureMixin(_PatchedWorkflowMixin):
-
-    BRANCH = "orchestrator/geserdugarov__agent-orchestrator/issue-65"
-    PR_NUMBER = 95
-
     def _setup(self, *, issue_comments=(), review_comments=(), state_extra=None):
         gh = FakeGitHubClient()
-        issue = make_issue(65, label="in_review")
+        issue = make_issue(SPLIT_WATERMARK_ISSUE, label="in_review")
         gh.add_issue(issue)
         pr = FakePR(
-            number=self.PR_NUMBER, head_branch=self.BRANCH,
+            number=SPLIT_WATERMARK_PR,
+            head_branch=SPLIT_WATERMARK_BRANCH,
             head=FakePRRef(sha="cafe1234"),
             issue_comments=list(issue_comments),
             review_comments=list(review_comments),
         )
         gh.add_pr(pr)
         state = dict(
-            pr_number=self.PR_NUMBER, branch=self.BRANCH,
-            dev_agent="claude", dev_session_id="dev-sess",
+            pr_number=SPLIT_WATERMARK_PR,
+            branch=SPLIT_WATERMARK_BRANCH,
+            dev_agent="claude",
+            dev_session_id="dev-sess",
         )
         if state_extra:
             state.update(state_extra)
-        gh.seed_state(65, **state)
+        gh.seed_state(SPLIT_WATERMARK_ISSUE, **state)
         return gh, issue, pr
 
 
 class InReviewSplitWatermarkTest(
-    unittest.TestCase, _SplitWatermarkFixtureMixin,
+    unittest.TestCase,
+    _SplitWatermarkFixtureMixin,
 ):
     """Track issue and inline-review ids in independent namespaces."""
 
@@ -112,29 +137,32 @@ class InReviewSplitWatermarkTest(
         gh, issue, pr = self._setup(
             review_comments=[
                 FakeComment(
-                    id=42, body="line 12: rename foo to bar",
-                    user=FakeUser("alice"), created_at=long_ago,
+                    id=INLINE_COMMENT_ID,
+                    body="line 12: rename foo to bar",
+                    user=FakeUser("alice"),
+                    created_at=long_ago,
                 ),
             ],
             # Inline-review watermark just below the comment id so it
             # surfaces as fresh feedback. An unset watermark would trip the
             # legacy in_review migration and treat id=42 as already-consumed.
-            state_extra={"pr_last_review_comment_id": 41},
+            state_extra={"pr_last_review_comment_id": INLINE_COMMENT_WATERMARK},
         )
 
         mocks = self._run_in_review(
-            gh, issue,
+            gh,
+            issue,
             run_agent=_agent(),
         )
 
         mocks["run_agent"].assert_not_called()
-        self.assertIn((65, "fixing"), gh.label_history)
-        self.assertNotIn((65, "validating"), gh.label_history)
-        state = gh.pinned_data(65)
+        self.assertIn((SPLIT_WATERMARK_ISSUE, "fixing"), gh.label_history)
+        self.assertNotIn((SPLIT_WATERMARK_ISSUE, "validating"), gh.label_history)
+        state = gh.pinned_data(SPLIT_WATERMARK_ISSUE)
         # Bookmark recorded but the inline-review watermark stays where it
         # was -- the fixing handler needs the triggering comment.
-        self.assertEqual(state.get("pending_fix_review_max_id"), 42)
-        self.assertEqual(state.get("pr_last_review_comment_id"), 41)
+        self.assertEqual(state.get("pending_fix_review_max_id"), INLINE_COMMENT_ID)
+        self.assertEqual(state.get("pr_last_review_comment_id"), INLINE_COMMENT_WATERMARK)
 
     def test_cross_space_id_overlap_keeps_comments(self) -> None:
         # Inline review comment id (5) is LOWER than the issue-comment
@@ -145,8 +173,10 @@ class InReviewSplitWatermarkTest(
         gh, issue, pr = self._setup(
             review_comments=[
                 FakeComment(
-                    id=5, body="please add a docstring",
-                    user=FakeUser("alice"), created_at=long_ago,
+                    id=5,
+                    body="please add a docstring",
+                    user=FakeUser("alice"),
+                    created_at=long_ago,
                 ),
             ],
             # Issue-side watermark high (1000), inline-review watermark low (4)
@@ -158,12 +188,13 @@ class InReviewSplitWatermarkTest(
         )
 
         mocks = self._run_in_review(
-            gh, issue,
+            gh,
+            issue,
             run_agent=_agent(),
         )
 
         # The inline comment surfaces and routes to fixing even though
         # id=5 < pr_last_comment_id=1000.
         mocks["run_agent"].assert_not_called()
-        self.assertIn((65, "fixing"), gh.label_history)
-        self.assertEqual(gh.pinned_data(65).get("pending_fix_review_max_id"), 5)
+        self.assertIn((SPLIT_WATERMARK_ISSUE, "fixing"), gh.label_history)
+        self.assertEqual(gh.pinned_data(SPLIT_WATERMARK_ISSUE).get("pending_fix_review_max_id"), 5)

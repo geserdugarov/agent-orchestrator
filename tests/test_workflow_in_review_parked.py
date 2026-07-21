@@ -3,6 +3,7 @@
 """Tests for parked-and-closed in_review behavior: awaiting-human parks,
 manually-closed issues with a still-open PR, and the stale-park-reason clear
 on the route to fixing."""
+
 from __future__ import annotations
 
 import unittest
@@ -22,41 +23,64 @@ from tests.fakes import (
 from tests.workflow_helpers import (
     _PatchedWorkflowMixin,
     _agent,
+    _issue_branch,
 )
+
+PARKED_ISSUE = 170
+PARKED_PR = 500
+PARK_WATERMARK = 10_000
+RETRY_COMMENT_ID = 20_000
+CLOSED_ISSUE = 250
+CLOSED_ISSUE_PR = 700
+CLOSED_ISSUE_WATERMARK = 999
+RECONSIDER_COMMENT_ID = 2000
+REVIEW_DEBOUNCE_SECONDS = 600
+MERGED_ISSUE = 251
+MERGED_PR = 701
+STALE_PARK_ISSUE = 700
+STALE_PARK_PR = 1200
+STALE_PARK_COMMENT_ID = 3000
+STALE_PARK_WATERMARK = 2999
+LABEL_IN_REVIEW = "in_review"
+LABEL_REJECTED = "rejected"
+REVIEWED_SHA = "cafe1234"
+CHECKS_SUCCESS = "success"
+RUN_AGENT = "run_agent"
 
 
 class _ParkedInReviewFixtureMixin(_PatchedWorkflowMixin):
-
-    PR_NUMBER = 500
-    BRANCH = "orchestrator/geserdugarov__agent-orchestrator/issue-170"
-
     def _parked_issue(self, *, park_reason: str, pr_kwargs: dict):
         gh = FakeGitHubClient()
-        issue = make_issue(170, label="in_review")
+        issue = make_issue(PARKED_ISSUE, label=LABEL_IN_REVIEW)
         gh.add_issue(issue)
         pr = FakePR(
-            number=self.PR_NUMBER, head_branch=self.BRANCH,
-            head=FakePRRef(sha="cafe1234"),
+            number=PARKED_PR,
+            head_branch=_issue_branch(PARKED_ISSUE),
+            head=FakePRRef(sha=REVIEWED_SHA),
             **pr_kwargs,
         )
         gh.add_pr(pr)
         gh.seed_state(
-            170, pr_number=self.PR_NUMBER, branch=self.BRANCH,
-            dev_agent="claude", dev_session_id="dev-sess",
+            PARKED_ISSUE,
+            pr_number=PARKED_PR,
+            branch=_issue_branch(PARKED_ISSUE),
+            dev_agent="claude",
+            dev_session_id="dev-sess",
             awaiting_human=True,
             park_reason=park_reason,
             # Every scan watermark sits past everything visible, so the
             # fresh-feedback scan surfaces nothing and the parked-tick guard
             # keeps the issue parked -- the post-park state a real tick leaves.
-            pr_last_comment_id=10_000,
-            pr_last_review_comment_id=10_000,
-            pr_last_review_summary_id=10_000,
+            pr_last_comment_id=PARK_WATERMARK,
+            pr_last_review_comment_id=PARK_WATERMARK,
+            pr_last_review_summary_id=PARK_WATERMARK,
         )
         return gh, issue, pr
 
 
 class AwaitingHumanParkStaysParkedTest(
-    unittest.TestCase, _ParkedInReviewFixtureMixin,
+    unittest.TestCase,
+    _ParkedInReviewFixtureMixin,
 ):
     """Keep awaiting-human review issues parked until an operator acts."""
 
@@ -70,31 +94,36 @@ class AwaitingHumanParkStaysParkedTest(
         # and silently drops the retry intent.
         gh, issue, pr = self._parked_issue(
             park_reason="auto_base_rebase_push_failed",
-            pr_kwargs=dict(mergeable=True, check_state="success"),
+            pr_kwargs=dict(mergeable=True, check_state=CHECKS_SUCCESS),
         )
         # Fresh human comment past the watermark.
-        gh._issues[170].comments.append(FakeComment(
-            id=20_000, body="branch reconciled, please retry",
-            user=FakeUser("human"),
-        ))
+        gh._issues[PARKED_ISSUE].comments.append(
+            FakeComment(
+                id=RETRY_COMMENT_ID,
+                body="branch reconciled, please retry",
+                user=FakeUser("human"),
+            )
+        )
 
         mocks = self._run_in_review(
-            gh, issue,
+            gh,
+            issue,
             run_agent=_agent(),
         )
 
         # No fixing route, no relabel, no `pending_fix_*` bookmarks,
         # no PR comment posted.
-        mocks["run_agent"].assert_not_called()
+        mocks[RUN_AGENT].assert_not_called()
         self.assertEqual(gh.label_history, [])
         self.assertEqual(gh.posted_pr_comments, [])
         self.assertEqual(gh.posted_comments, [])
         # Park preserved verbatim so the refresh's next tick still sees
         # the comment + park combo and can drive the retry.
-        state = gh.pinned_data(170)
+        state = gh.pinned_data(PARKED_ISSUE)
         self.assertTrue(state.get("awaiting_human"))
         self.assertEqual(
-            state.get("park_reason"), "auto_base_rebase_push_failed",
+            state.get("park_reason"),
+            "auto_base_rebase_push_failed",
         )
         self.assertIsNone(state.get("pending_fix_at"))
 
@@ -105,47 +134,49 @@ class AwaitingHumanParkStaysParkedTest(
         # Park flags stay so the operator notices and drives the merge.
         gh, issue, pr = self._parked_issue(
             park_reason="unmergeable",
-            pr_kwargs=dict(mergeable=True, check_state="success"),
+            pr_kwargs=dict(mergeable=True, check_state=CHECKS_SUCCESS),
         )
 
         mocks = self._run_in_review(
-            gh, issue,
+            gh,
+            issue,
             run_agent=_agent(),
         )
 
-        mocks["run_agent"].assert_not_called()
+        mocks[RUN_AGENT].assert_not_called()
         self.assertEqual(gh.merge_calls, [])
         self.assertEqual(gh.label_history, [])
         # No new park comment posted on this tick.
         self.assertEqual(gh.posted_comments, [])
         # Park flags preserved.
-        state = gh.pinned_data(170)
+        state = gh.pinned_data(PARKED_ISSUE)
         self.assertTrue(state.get("awaiting_human"))
         self.assertEqual(state.get("park_reason"), "unmergeable")
 
 
 class _ClosedInReviewFixtureMixin(_PatchedWorkflowMixin):
-
-    PR_NUMBER = 700
-    BRANCH = "orchestrator/geserdugarov__agent-orchestrator/issue-250"
-
     def _setup(self, **pr_kwargs):
         gh = FakeGitHubClient()
-        issue = make_issue(250, label="in_review")
+        issue = make_issue(CLOSED_ISSUE, label=LABEL_IN_REVIEW)
         issue.closed = True  # human closed the issue, PR still open
         gh.add_issue(issue)
         defaults = dict(
-            number=self.PR_NUMBER, head_branch=self.BRANCH,
-            head=FakePRRef(sha="cafe1234"),
-            mergeable=True, check_state="success",
+            number=CLOSED_ISSUE_PR,
+            head_branch=_issue_branch(CLOSED_ISSUE),
+            head=FakePRRef(sha=REVIEWED_SHA),
+            mergeable=True,
+            check_state=CHECKS_SUCCESS,
         )
         defaults.update(pr_kwargs)
         pr = FakePR(**defaults)
         gh.add_pr(pr)
         gh.seed_state(
-            250, pr_number=self.PR_NUMBER, branch=self.BRANCH,
-            dev_agent="claude", dev_session_id="dev-sess",
-            pr_last_comment_id=999,
+            CLOSED_ISSUE,
+            pr_number=CLOSED_ISSUE_PR,
+            branch=_issue_branch(CLOSED_ISSUE),
+            dev_agent="claude",
+            dev_session_id="dev-sess",
+            pr_last_comment_id=CLOSED_ISSUE_WATERMARK,
             pr_last_review_comment_id=0,
             pr_last_review_summary_id=0,
         )
@@ -153,7 +184,8 @@ class _ClosedInReviewFixtureMixin(_PatchedWorkflowMixin):
 
 
 class ManuallyClosedInReviewIssueTest(
-    unittest.TestCase, _ClosedInReviewFixtureMixin,
+    unittest.TestCase,
+    _ClosedInReviewFixtureMixin,
 ):
     """Treat a manually closed issue with an open PR as rejected."""
 
@@ -161,16 +193,17 @@ class ManuallyClosedInReviewIssueTest(
         gh, issue, pr = self._setup()
 
         mocks = self._run_in_review(
-            gh, issue,
+            gh,
+            issue,
             run_agent=_agent(),
         )
 
         # The handler must not fall through to the HITL ping over a
         # manually-closed issue even though the PR is otherwise mergeable.
         self.assertEqual(gh.merge_calls, [])
-        self.assertIn((250, "rejected"), gh.label_history)
-        self.assertNotIn((250, "done"), gh.label_history)
-        self.assertIn("closed_without_merge_at", gh.pinned_data(250))
+        self.assertIn((CLOSED_ISSUE, LABEL_REJECTED), gh.label_history)
+        self.assertNotIn((CLOSED_ISSUE, "done"), gh.label_history)
+        self.assertIn("closed_without_merge_at", gh.pinned_data(CLOSED_ISSUE))
         self.assertEqual(gh.posted_comments, [])
         # Closing the issue while the PR is still open is a human stop
         # signal. The PR may still be useful for inspection / salvage, so
@@ -188,10 +221,11 @@ class ManuallyClosedInReviewIssueTest(
         # operator must clean up the branch / worktree by hand.
         gh, issue, pr = self._setup()
         mocks = self._run_in_review(
-            gh, issue,
+            gh,
+            issue,
             run_agent=_agent(),
         )
-        self.assertIn((250, "rejected"), gh.label_history)
+        self.assertIn((CLOSED_ISSUE, LABEL_REJECTED), gh.label_history)
         mocks["_cleanup_terminal_branch"].assert_not_called()
 
         # Operator now closes the PR. The issue is already closed +
@@ -200,7 +234,8 @@ class ManuallyClosedInReviewIssueTest(
         pr.state = "closed"
         pollable_numbers = {pollable.number for pollable in gh.list_pollable_issues()}
         self.assertNotIn(
-            250, pollable_numbers,
+            CLOSED_ISSUE,
+            pollable_numbers,
             "rejected closed issues are not swept, so the orchestrator "
             "cannot observe the later PR close; cleanup must be manual.",
         )
@@ -213,81 +248,92 @@ class ManuallyClosedInReviewIssueTest(
         gh, issue, pr = self._setup()
         pr.issue_comments.append(
             FakeComment(
-                id=2000, body="actually let's reconsider",
-                user=FakeUser("alice"), created_at=long_ago,
+                id=RECONSIDER_COMMENT_ID,
+                body="actually let's reconsider",
+                user=FakeUser("alice"),
+                created_at=long_ago,
             ),
         )
 
-        with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
+        with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", REVIEW_DEBOUNCE_SECONDS):
             mocks = self._run_in_review(
-                gh, issue,
+                gh,
+                issue,
                 run_agent=_agent(),
             )
 
-        mocks["run_agent"].assert_not_called()
-        self.assertIn((250, "rejected"), gh.label_history)
+        mocks[RUN_AGENT].assert_not_called()
+        self.assertIn((CLOSED_ISSUE, LABEL_REJECTED), gh.label_history)
 
     def test_external_merge_finalizes_done(self) -> None:
         # The original closed-issue sweep purpose: a Resolves #N footer
         # auto-closes the issue when the PR merges. Issue closed AND PR
         # merged must still flip to `done`, not `rejected`.
         gh = FakeGitHubClient()
-        issue = make_issue(251, label="in_review")
+        issue = make_issue(MERGED_ISSUE, label=LABEL_IN_REVIEW)
         issue.closed = True
         gh.add_issue(issue)
         pr = FakePR(
-            number=701, head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-251",
-            head=FakePRRef(sha="cafe1234"),
-            merged=True, state="closed",
+            number=MERGED_PR,
+            head_branch=_issue_branch(MERGED_ISSUE),
+            head=FakePRRef(sha=REVIEWED_SHA),
+            merged=True,
+            state="closed",
         )
         gh.add_pr(pr)
-        gh.seed_state(251, pr_number=701, branch="orchestrator/geserdugarov__agent-orchestrator/issue-251")
+        gh.seed_state(MERGED_ISSUE, pr_number=MERGED_PR, branch=_issue_branch(MERGED_ISSUE))
 
         self._run_in_review(
-            gh, issue,
+            gh,
+            issue,
             run_agent=_agent(),
         )
 
-        self.assertIn((251, "done"), gh.label_history)
-        self.assertNotIn((251, "rejected"), gh.label_history)
-        self.assertIn("merged_at", gh.pinned_data(251))
+        self.assertIn((MERGED_ISSUE, "done"), gh.label_history)
+        self.assertNotIn((MERGED_ISSUE, LABEL_REJECTED), gh.label_history)
+        self.assertIn("merged_at", gh.pinned_data(MERGED_ISSUE))
 
 
-class StaleParkReasonClearedOnFixingRouteTest(
-    unittest.TestCase, _PatchedWorkflowMixin
-):
+class StaleParkReasonClearedOnFixingRouteTest(unittest.TestCase, _PatchedWorkflowMixin):
     """A transient in_review park (unmergeable) followed by a fresh PR
     comment must clear the stale `park_reason` and `awaiting_human` flags
     as part of the in_review -> fixing route so the fixing handler is not
     greeted with stale park state.
     """
 
-    PR_NUMBER = 1200
-    BRANCH = "orchestrator/geserdugarov__agent-orchestrator/issue-700"
-
     def test_fixing_route_clears_stale_reason(self) -> None:
         gh = FakeGitHubClient()
         long_ago = datetime.now(timezone.utc) - timedelta(hours=1)
         # Tick 0 already parked for unmergeable; the human posted a
         # follow-up comment ("any update?") to nudge the orchestrator.
-        issue = make_issue(700, label="in_review", comments=[
-            FakeComment(
-                id=3000, body="any update?",
-                user=FakeUser("alice"), created_at=long_ago,
-            ),
-        ])
+        issue = make_issue(
+            STALE_PARK_ISSUE,
+            label=LABEL_IN_REVIEW,
+            comments=[
+                FakeComment(
+                    id=STALE_PARK_COMMENT_ID,
+                    body="any update?",
+                    user=FakeUser("alice"),
+                    created_at=long_ago,
+                ),
+            ],
+        )
         gh.add_issue(issue)
         pr = FakePR(
-            number=self.PR_NUMBER, head_branch=self.BRANCH,
-            head=FakePRRef(sha="cafe1234"),
-            mergeable=True, check_state="success",
+            number=STALE_PARK_PR,
+            head_branch=_issue_branch(STALE_PARK_ISSUE),
+            head=FakePRRef(sha=REVIEWED_SHA),
+            mergeable=True,
+            check_state=CHECKS_SUCCESS,
         )
         gh.add_pr(pr)
         gh.seed_state(
-            700,
-            pr_number=self.PR_NUMBER, branch=self.BRANCH,
-            dev_agent="claude", dev_session_id="dev-sess",
-            pr_last_comment_id=2999,
+            STALE_PARK_ISSUE,
+            pr_number=STALE_PARK_PR,
+            branch=_issue_branch(STALE_PARK_ISSUE),
+            dev_agent="claude",
+            dev_session_id="dev-sess",
+            pr_last_comment_id=STALE_PARK_WATERMARK,
             pr_last_review_comment_id=0,
             pr_last_review_summary_id=0,
             # Carryover from the original transient park.
@@ -298,24 +344,23 @@ class StaleParkReasonClearedOnFixingRouteTest(
         # Tick A: the new comment arrives; the handler routes to `fixing`
         # and clears both the stale `park_reason` and `awaiting_human`
         # flag so the fixing handler is not greeted with stale park state.
-        with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
+        with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", REVIEW_DEBOUNCE_SECONDS):
             mocks = self._run_in_review(
-                gh, issue,
+                gh,
+                issue,
                 run_agent=_agent(),
             )
 
-        mocks["run_agent"].assert_not_called()
-        self.assertIn((700, "fixing"), gh.label_history)
-        state = gh.pinned_data(700)
+        mocks[RUN_AGENT].assert_not_called()
+        self.assertIn((STALE_PARK_ISSUE, "fixing"), gh.label_history)
+        state = gh.pinned_data(STALE_PARK_ISSUE)
         self.assertFalse(
             state.get("awaiting_human"),
-            "the route to fixing consumes the human signal and clears the "
-            "stale awaiting_human flag",
+            "the route to fixing consumes the human signal and clears the stale awaiting_human flag",
         )
         self.assertIsNone(
             state.get("park_reason"),
-            "stale 'unmergeable' park reason must be cleared by the route "
-            "to fixing",
+            "stale 'unmergeable' park reason must be cleared by the route to fixing",
         )
-        self.assertEqual(state.get("pending_fix_issue_max_id"), 3000)
+        self.assertEqual(state.get("pending_fix_issue_max_id"), STALE_PARK_COMMENT_ID)
         self.assertEqual(gh.merge_calls, [])

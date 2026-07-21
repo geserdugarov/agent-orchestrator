@@ -22,10 +22,22 @@ from tests.workflow_helpers import (
     _agent,
 )
 
+MERGED_ISSUE = 120
+MERGED_PR = 12000
+MERGED_BRANCH = "orchestrator/geserdugarov__agent-orchestrator/issue-120"
+CLOSED_ISSUE = 121
+OPEN_PR = 12100
+CLOSED_ISSUE_BRANCH = "orchestrator/geserdugarov__agent-orchestrator/issue-121"
+APPROVAL_ISSUE = 9
+APPROVAL_PR = 91
+APPROVAL_BRANCH = "orchestrator/geserdugarov__agent-orchestrator/issue-9"
+REVIEWED_SHA = "rev91"
+SQUASHED_SHA = "sq91"
+PICKUP_COMMENT_ID = 901
+PR_OPEN_COMMENT_ID = 902
 
-class HandleValidatingExternalMergeTest(
-    unittest.TestCase, _PatchedWorkflowMixin
-):
+
+class HandleValidatingExternalMergeTest(unittest.TestCase, _PatchedWorkflowMixin):
     """A human merged the PR while the reviewer was queued. `_handle_validating`
     must short-circuit to `done` instead of running the reviewer against a
     branch that already landed.
@@ -33,42 +45,46 @@ class HandleValidatingExternalMergeTest(
 
     def test_external_merge_finalizes_to_done(self) -> None:
         gh = FakeGitHubClient()
-        issue = make_issue(120, label="validating")
+        issue = make_issue(MERGED_ISSUE, label="validating")
         gh.add_issue(issue)
         pr = FakePR(
-            number=12000,
-            head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-120",
+            number=MERGED_PR,
+            head_branch=MERGED_BRANCH,
             head=FakePRRef(sha="cafe1234"),
             merged=True,
             state="closed",
         )
         gh.add_pr(pr)
         gh.seed_state(
-            120, pr_number=12000, branch="orchestrator/geserdugarov__agent-orchestrator/issue-120",
-            dev_agent="claude", dev_session_id="dev-sess",
+            MERGED_ISSUE,
+            pr_number=MERGED_PR,
+            branch=MERGED_BRANCH,
+            dev_agent="claude",
+            dev_session_id="dev-sess",
             review_round=0,
         )
 
         mocks = self._run_validating(
-            gh, issue,
+            gh,
+            issue,
             run_agent=_agent(),
         )
 
-        self.assertIn((120, "done"), gh.label_history)
-        self.assertIn("merged_at", gh.pinned_data(120))
+        self.assertIn((MERGED_ISSUE, "done"), gh.label_history)
+        self.assertIn("merged_at", gh.pinned_data(MERGED_ISSUE))
         self.assertTrue(issue.closed)
         # Reviewer was not spawned.
         mocks["run_agent"].assert_not_called()
         # Terminal cleanup runs for the external-merge arc.
         mocks["_cleanup_terminal_branch"].assert_called_once_with(
-            gh, _TEST_SPEC, 120,
-            branch="orchestrator/geserdugarov__agent-orchestrator/issue-120",
+            gh,
+            _TEST_SPEC,
+            MERGED_ISSUE,
+            branch=MERGED_BRANCH,
         )
 
 
-class HandleValidatingClosedIssueTest(
-    unittest.TestCase, _PatchedWorkflowMixin
-):
+class HandleValidatingClosedIssueTest(unittest.TestCase, _PatchedWorkflowMixin):
     """Closed `validating` issues yielded by the new closed-issue sweep
     must NOT relabel back to `in_review` via the reviewer agent. The
     handler now flips to `rejected` after the external-merge finalize
@@ -77,73 +93,82 @@ class HandleValidatingClosedIssueTest(
 
     def test_open_pr_marks_closed_issue_rejected(self) -> None:
         gh = FakeGitHubClient()
-        issue = make_issue(121, label="validating")
+        issue = make_issue(CLOSED_ISSUE, label="validating")
         issue.closed = True
         gh.add_issue(issue)
         pr = FakePR(
-            number=12100,
-            head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-121",
+            number=OPEN_PR,
+            head_branch=CLOSED_ISSUE_BRANCH,
             head=FakePRRef(sha="cafe1234"),
             merged=False,
             state="open",
         )
         gh.add_pr(pr)
         gh.seed_state(
-            121, pr_number=12100, branch="orchestrator/geserdugarov__agent-orchestrator/issue-121",
-            dev_agent="claude", dev_session_id="dev-sess",
+            CLOSED_ISSUE,
+            pr_number=OPEN_PR,
+            branch=CLOSED_ISSUE_BRANCH,
+            dev_agent="claude",
+            dev_session_id="dev-sess",
             review_round=0,
         )
 
         mocks = self._run_validating(
-            gh, issue,
+            gh,
+            issue,
             run_agent=_agent(),
         )
 
-        self.assertIn((121, "rejected"), gh.label_history)
-        self.assertIn("closed_without_merge_at", gh.pinned_data(121))
+        self.assertIn((CLOSED_ISSUE, "rejected"), gh.label_history)
+        self.assertIn("closed_without_merge_at", gh.pinned_data(CLOSED_ISSUE))
         mocks["run_agent"].assert_not_called()
         # The PR is still open: do not clobber it via cleanup.
         mocks["_cleanup_terminal_branch"].assert_not_called()
 
 
 class _ApprovalHandoffFixtureMixin(_PatchedWorkflowMixin):
-
-    PR_NUMBER = 91
-    BRANCH = "orchestrator/geserdugarov__agent-orchestrator/issue-9"
-    REVIEWED_SHA = "rev91"
-    SQUASHED_SHA = "sq91"
-
     def _setup(self, **extra_state):
         gh = FakeGitHubClient()
-        issue = make_issue(9, label="validating", comments=[
-            FakeComment(
-                id=901, body=":robot: orchestrator picking this up.",
-                user=FakeUser("orchestrator"),
-            ),
-            FakeComment(
-                id=902, body=":sparkles: PR opened: #91",
-                user=FakeUser("orchestrator"),
-            ),
-        ])
+        issue = make_issue(
+            APPROVAL_ISSUE,
+            label="validating",
+            comments=[
+                FakeComment(
+                    id=PICKUP_COMMENT_ID,
+                    body=":robot: orchestrator picking this up.",
+                    user=FakeUser("orchestrator"),
+                ),
+                FakeComment(
+                    id=PR_OPEN_COMMENT_ID,
+                    body=":sparkles: PR opened: #91",
+                    user=FakeUser("orchestrator"),
+                ),
+            ],
+        )
         gh.add_issue(issue)
         pr = FakePR(
-            number=self.PR_NUMBER, head_branch=self.BRANCH,
-            head=FakePRRef(sha=self.SQUASHED_SHA),
+            number=APPROVAL_PR,
+            head_branch=APPROVAL_BRANCH,
+            head=FakePRRef(sha=SQUASHED_SHA),
         )
         gh.add_pr(pr)
         state = dict(
-            pr_number=self.PR_NUMBER, branch=self.BRANCH,
-            dev_agent="claude", dev_session_id="dev-sess",
-            review_round=0, pickup_comment_id=901,
-            orchestrator_comment_ids=[901, 902],
+            pr_number=APPROVAL_PR,
+            branch=APPROVAL_BRANCH,
+            dev_agent="claude",
+            dev_session_id="dev-sess",
+            review_round=0,
+            pickup_comment_id=PICKUP_COMMENT_ID,
+            orchestrator_comment_ids=[PICKUP_COMMENT_ID, PR_OPEN_COMMENT_ID],
         )
         state.update(extra_state)
-        gh.seed_state(9, **state)
+        gh.seed_state(APPROVAL_ISSUE, **state)
         return gh, issue, pr
 
 
 class ApprovalThroughDocumentingTest(
-    unittest.TestCase, _ApprovalHandoffFixtureMixin,
+    unittest.TestCase,
+    _ApprovalHandoffFixtureMixin,
 ):
     """Hand approval to documenting only after verify and squash succeed."""
 
@@ -152,27 +177,32 @@ class ApprovalThroughDocumentingTest(
 
         with patch.object(config, "SQUASH_ON_APPROVAL", True):
             self._run_validating(
-                gh, issue,
+                gh,
+                issue,
                 run_agent=_agent(last_message=REVIEW_APPROVED_MESSAGE),
-                head_shas=(self.REVIEWED_SHA,),
-                squash_result=(True, self.SQUASHED_SHA, 2, None),
+                head_shas=(REVIEWED_SHA,),
+                squash_result=(True, SQUASHED_SHA, 2, None),
             )
 
         # Label hop: validating -> documenting (NOT directly in_review).
-        self.assertIn((9, "documenting"), gh.label_history)
-        self.assertNotIn((9, "in_review"), gh.label_history)
-        state = gh.pinned_data(9)
+        self.assertIn((APPROVAL_ISSUE, "documenting"), gh.label_history)
+        self.assertNotIn((APPROVAL_ISSUE, "in_review"), gh.label_history)
+        state = gh.pinned_data(APPROVAL_ISSUE)
         # Watermark, approval and squash comments all seeded before the
         # relabel and preserved across the hop.
         self.assertIsNotNone(state.get("pr_last_comment_id"))
-        self.assertTrue(any(
-            ":white_check_mark:" in body and "approved" in body
-            for _, body in gh.posted_pr_comments
-        ))
-        self.assertTrue(any(
-            ":package: squashed 2 commits to 1" in body
-            for _, body in gh.posted_pr_comments
-        ))
+        self.assertTrue(
+            any(
+                ":white_check_mark:" in body and "approved" in body
+                for _, body in gh.posted_pr_comments
+            )
+        )
+        self.assertTrue(
+            any(
+                ":package: squashed 2 commits to 1" in body
+                for _, body in gh.posted_pr_comments
+            )
+        )
 
     def test_verify_failure_keeps_validating(self) -> None:
         # Local-verify gate fires BEFORE the approval/squash/handoff, so
@@ -183,20 +213,23 @@ class ApprovalThroughDocumentingTest(
 
         with patch.object(config, "VERIFY_COMMANDS", ("pytest -q",)):
             self._run_validating(
-                gh, issue,
+                gh,
+                issue,
                 run_agent=_agent(last_message=REVIEW_APPROVED_MESSAGE),
-                head_shas=(self.REVIEWED_SHA,),
+                head_shas=(REVIEWED_SHA,),
                 verify_result=VerifyResult(
-                    status="failed", command="pytest -q",
-                    exit_code=2, output="boom",
+                    status="failed",
+                    command="pytest -q",
+                    exit_code=2,
+                    output="boom",
                 ),
             )
 
-        state = gh.pinned_data(9)
+        state = gh.pinned_data(APPROVAL_ISSUE)
         self.assertTrue(state.get("awaiting_human"))
         self.assertEqual(state.get("park_reason"), "verify_failed")
-        self.assertNotIn((9, "documenting"), gh.label_history)
-        self.assertNotIn((9, "in_review"), gh.label_history)
+        self.assertNotIn((APPROVAL_ISSUE, "documenting"), gh.label_history)
+        self.assertNotIn((APPROVAL_ISSUE, "in_review"), gh.label_history)
 
     def test_squash_failure_keeps_validating(self) -> None:
         # Squash failure parks awaiting human on `validating`; no
@@ -207,18 +240,21 @@ class ApprovalThroughDocumentingTest(
 
         with patch.object(config, "SQUASH_ON_APPROVAL", True):
             self._run_validating(
-                gh, issue,
+                gh,
+                issue,
                 run_agent=_agent(last_message=REVIEW_APPROVED_MESSAGE),
-                head_shas=(self.REVIEWED_SHA,),
+                head_shas=(REVIEWED_SHA,),
                 squash_result=(False, None, 0, "force-with-lease rejected"),
             )
 
-        state = gh.pinned_data(9)
+        state = gh.pinned_data(APPROVAL_ISSUE)
         self.assertTrue(state.get("awaiting_human"))
         # The park comment names the failure so the operator can triage.
-        self.assertTrue(any(
-            "squash-on-approval failed" in body
-            for _, body in gh.posted_comments
-        ))
-        self.assertNotIn((9, "documenting"), gh.label_history)
-        self.assertNotIn((9, "in_review"), gh.label_history)
+        self.assertTrue(
+            any(
+                "squash-on-approval failed" in body
+                for _, body in gh.posted_comments
+            )
+        )
+        self.assertNotIn((APPROVAL_ISSUE, "documenting"), gh.label_history)
+        self.assertNotIn((APPROVAL_ISSUE, "in_review"), gh.label_history)
