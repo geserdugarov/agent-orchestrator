@@ -20,22 +20,11 @@ from tests.fakes import (
 from tests.workflow_helpers import (
     REVIEW_APPROVED_MESSAGE,
     _PatchedWorkflowMixin,
-    _TEST_SPEC,
     _agent,
 )
 
 
-class ValidatingPushedFixesStayOnValidatingTest(
-    unittest.TestCase, _PatchedWorkflowMixin,
-):
-    """Validating-side dev fixes that PUSH stay on `validating`.
-
-    Any time the dev's fix lands on the PR branch during validating
-    (CHANGES_REQUESTED, awaiting-human resume, user-content drift, or
-    a transient-park recovery that finishes a push), the issue stays
-    on `validating` -- the docs pass only runs as the final-docs
-    handoff after a reviewer approval, not as a pre-review hop.
-    """
+class _ValidatingHandoffFixtureMixin(_PatchedWorkflowMixin):
 
     def _validating_issue(
         self,
@@ -62,6 +51,12 @@ class ValidatingPushedFixesStayOnValidatingTest(
         gh.seed_state(issue_number, **defaults)
         return gh, issue
 
+
+class ValidatingPushedFixesStayOnValidatingTest(
+    unittest.TestCase, _ValidatingHandoffFixtureMixin,
+):
+    """Keep pushed fixes on validating for another review pass."""
+
     def test_pushed_fix_stays_validating(self) -> None:
         gh, issue = self._validating_issue(issue_number=301, review_round=1)
         review = _agent(
@@ -71,8 +66,8 @@ class ValidatingPushedFixesStayOnValidatingTest(
         )
         dev_fix = _agent(session_id="dev-sess", last_message="fixed")
 
-        self._run(
-            lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+        self._run_validating(
+            gh, issue,
             run_agent=[review, dev_fix],
             dirty_files=(),
             push_branch=True,
@@ -96,8 +91,8 @@ class ValidatingPushedFixesStayOnValidatingTest(
         )
         dev = _agent(session_id="dev-sess", last_message="not sure, ideas?")
 
-        self._run(
-            lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+        self._run_validating(
+            gh, issue,
             run_agent=[review, dev],
             dirty_files=(),
             push_branch=True,
@@ -127,8 +122,8 @@ class ValidatingPushedFixesStayOnValidatingTest(
             ],
         )
 
-        self._run(
-            lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+        self._run_validating(
+            gh, issue,
             run_agent=_agent(session_id="dev-sess", last_message="done"),
             dirty_files=(),
             push_branch=True,
@@ -148,8 +143,8 @@ class ValidatingPushedFixesStayOnValidatingTest(
             review_round=1,
         )
 
-        self._run(
-            lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+        self._run_validating(
+            gh, issue,
             run_agent=_agent(session_id="dev-sess", last_message="fixed"),
             dirty_files=(),
             push_branch=True,
@@ -173,8 +168,8 @@ class ValidatingPushedFixesStayOnValidatingTest(
             review_round=1,
         )
 
-        self._run(
-            lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+        self._run_validating(
+            gh, issue,
             run_agent=_agent(
                 session_id="dev-sess",
                 last_message="ACK: prior commits already cover the edit.",
@@ -196,6 +191,12 @@ class ValidatingPushedFixesStayOnValidatingTest(
             for _, body in gh.posted_comments
         ))
 
+
+class ValidatingRecoveryStaysOnValidatingTest(
+    unittest.TestCase, _ValidatingHandoffFixtureMixin,
+):
+    """Recover transient validating parks without entering documenting."""
+
     def test_reviewer_recovery_keeps_label(self) -> None:
         # No commit happened during a reviewer-side park (the reviewer
         # crashed, the dev never ran). Recovery clears the flags and
@@ -209,8 +210,8 @@ class ValidatingPushedFixesStayOnValidatingTest(
         )
 
         with patch.object(workflow, "_worktree_path", return_value=Path("/tmp")):
-            self._run(
-                lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+            self._run_validating(
+                gh, issue,
                 run_agent=_agent(),
                 push_branch=True,
             )
@@ -236,8 +237,8 @@ class ValidatingPushedFixesStayOnValidatingTest(
         )
 
         with patch.object(workflow, "_worktree_path", return_value=Path("/tmp")):
-            self._run(
-                lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+            self._run_validating(
+                gh, issue,
                 run_agent=_agent(),
                 dirty_files=(),
                 push_branch=True,
@@ -264,8 +265,8 @@ class ValidatingPushedFixesStayOnValidatingTest(
         )
 
         with patch.object(workflow, "_worktree_path", return_value=Path("/tmp")):
-            self._run(
-                lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+            self._run_validating(
+                gh, issue,
                 run_agent=_agent(),
                 dirty_files=(),
                 push_branch=True,
@@ -277,15 +278,7 @@ class ValidatingPushedFixesStayOnValidatingTest(
         self.assertNotIn((308, "documenting"), gh.label_history)
 
 
-class ValidatingToInReviewHandoffTest(unittest.TestCase, _PatchedWorkflowMixin):
-    """The validating -> in_review handoff has to seed `pr_last_comment_id`
-    as a high-watermark past every comment that already exists at handoff.
-    Without this, the in_review handler sees the orchestrator's own
-    ":robot: picking this up", ":sparkles: PR opened: #N", and
-    ":white_check_mark: codex review approved" comments as fresh PR
-    feedback once the debounce expires and resumes the dev session
-    against them.
-    """
+class _ValidatingToInReviewFixtureMixin(_PatchedWorkflowMixin):
 
     PR_NUMBER = 11
     BRANCH = "orchestrator/geserdugarov__agent-orchestrator/issue-5"
@@ -323,6 +316,12 @@ class ValidatingToInReviewHandoffTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
         return gh, issue, pr
 
+
+class ValidatingToInReviewHandoffTest(
+    unittest.TestCase, _ValidatingToInReviewFixtureMixin,
+):
+    """Seed and ratchet feedback watermarks during approval handoff."""
+
     def test_approval_handoff_does_not_replay(self) -> None:
         # End-to-end: validating approves -> in_review tick pings HITL
         # without resuming the dev on the orchestrator's own automated
@@ -338,8 +337,8 @@ class ValidatingToInReviewHandoffTest(unittest.TestCase, _PatchedWorkflowMixin):
         for c in list(issue.comments) + list(pr.issue_comments):
             c.created_at = long_ago
 
-        mocks_v = self._run(
-            lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+        mocks_v = self._run_validating(
+            gh, issue,
             run_agent=_agent(last_message=REVIEW_APPROVED_MESSAGE),
             head_shas=("newhead42",),
         )
@@ -367,8 +366,8 @@ class ValidatingToInReviewHandoffTest(unittest.TestCase, _PatchedWorkflowMixin):
             issue.labels = [FakeLabel("in_review")]
 
         with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
-            mocks_r = self._run(
-                lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+            mocks_r = self._run_in_review(
+                gh, issue,
                 run_agent=_agent(),
             )
 
@@ -428,8 +427,8 @@ class ValidatingToInReviewHandoffTest(unittest.TestCase, _PatchedWorkflowMixin):
             pickup_comment_id=900,
         )
 
-        self._run(
-            lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+        self._run_validating(
+            gh, issue,
             run_agent=_agent(last_message=REVIEW_APPROVED_MESSAGE),
         )
 

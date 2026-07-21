@@ -26,18 +26,19 @@ def _paused_view(number: int) -> object:
     return view
 
 
+def _assert_no_park_comment(test_case, gh) -> None:
+    test_case.assertFalse(any(
+        "timed out" in body
+        or "rebase is still in progress" in body
+        or "agent needs your input" in body
+        or "git push failed" in body
+        for _, body in gh.posted_comments
+    ))
+
+
 class ResolvingConflictLivePauseTest(unittest.TestCase, _ResolvingConflictMixin):
     """A live pause applied mid-run short-circuits each of the three dev
     resume paths before any push / relabel / pinned-state write."""
-
-    def _assert_no_park_comment(self, gh) -> None:
-        self.assertFalse(any(
-            "timed out" in body
-            or "rebase is still in progress" in body
-            or "agent needs your input" in body
-            or "git push failed" in body
-            for _, body in gh.posted_comments
-        ))
 
     def test_fresh_pause_blocks_push_and_relabel(
         self,
@@ -68,7 +69,7 @@ class ResolvingConflictLivePauseTest(unittest.TestCase, _ResolvingConflictMixin)
         data = gh.pinned_data(200)
         self.assertFalse(data.get("awaiting_human"))
         self.assertEqual(data.get("conflict_round"), 0)
-        self._assert_no_park_comment(gh)
+        _assert_no_park_comment(self, gh)
 
     def test_resume_pause_keeps_park(self) -> None:
         # A parked issue resumes the dev on a fresh human reply; the operator

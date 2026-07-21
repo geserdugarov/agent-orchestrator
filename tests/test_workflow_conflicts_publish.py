@@ -22,16 +22,18 @@ from tests.workflow_helpers import (
 )
 
 
-class ResolvingConflictPublishesAlreadyRebasedTest(
-    unittest.TestCase, _PatchedWorkflowMixin
-):
-    """A worktree the dev already rebased onto base in an earlier run but
-    never pushed reaches `_handle_resolving_conflict` diverged from the
-    stale PR head (ahead AND behind it). Instead of the conservative
-    `diverged_branch` park, the handler force-publishes -- but ONLY when
-    the rebase is genuinely on base AND the stale PR head is one the
-    orchestrator produced. Either guard failing keeps the park.
-    """
+def _assert_diverged_park(test_case, gh) -> None:
+    test_case.assertNotIn((310, "validating"), gh.label_history)
+    test_case.assertTrue(gh.pinned_data(310).get("awaiting_human"))
+    parks = [
+        event for event in gh.recorded_events
+        if event.get("event") == "park_awaiting_human"
+        and event.get("reason") == "diverged_branch"
+    ]
+    test_case.assertEqual(len(parks), 1)
+
+
+class _PublishFixtureMixin(_PatchedWorkflowMixin):
 
     BRANCH = "orchestrator/issue-310"
     PR_NUMBER = 910
@@ -75,15 +77,20 @@ class ResolvingConflictPublishesAlreadyRebasedTest(
             conflicts, "_pr_head_orchestrator_produced",
             MagicMock(return_value=recognized),
         ), patch.object(workflow, "_git", git_on_base):
-            return self._run(
-                lambda: workflow._handle_resolving_conflict(
-                    gh, _TEST_SPEC, issue,
-                ),
+            return self._run_resolving_conflict(
+                gh,
+                issue,
                 run_agent=_agent(session_id="dev-sess"),
                 branch_ahead_behind=(4, 2),
                 push_branch=True,
                 head_shas=("local", "local"),
             )
+
+
+class ResolvingConflictPublishesAlreadyRebasedTest(
+    unittest.TestCase, _PublishFixtureMixin,
+):
+    """Publish only recognized PR heads already rebased onto current base."""
 
     def test_publishes_when_on_base_and_recognized(self) -> None:
         gh, issue, _ = self._seed()
@@ -111,27 +118,15 @@ class ResolvingConflictPublishesAlreadyRebasedTest(
             force_with_lease=self.PR_HEAD,
         )
 
-    def _assert_diverged_park(self, gh) -> None:
-        # `_park_awaiting_human` records the reason on the audit event;
-        # the durable `park_reason` field stays None by its contract.
-        self.assertNotIn((310, "validating"), gh.label_history)
-        self.assertTrue(gh.pinned_data(310).get("awaiting_human"))
-        parks = [
-            event for event in gh.recorded_events
-            if event.get("event") == "park_awaiting_human"
-            and event.get("reason") == "diverged_branch"
-        ]
-        self.assertEqual(len(parks), 1)
-
     def test_parks_when_not_on_base(self) -> None:
         gh, issue, _ = self._seed()
         self._run_diverged(gh, issue, on_base=False, recognized=True)
-        self._assert_diverged_park(gh)
+        _assert_diverged_park(self, gh)
 
     def test_parks_when_pr_head_unrecognized(self) -> None:
         gh, issue, _ = self._seed()
         self._run_diverged(gh, issue, on_base=True, recognized=False)
-        self._assert_diverged_park(gh)
+        _assert_diverged_park(self, gh)
 
 
 if __name__ == "__main__":

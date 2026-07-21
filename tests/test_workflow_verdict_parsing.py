@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import unittest
 
+from orchestrator import workflow
 from orchestrator.workflow_messages import (
     _parse_documentation_verdict,
     _parse_review_verdict,
@@ -136,6 +137,10 @@ class ParseDocumentationVerdictTest(unittest.TestCase):
         )
         self.assertEqual(verdict, VERDICT_UNKNOWN)
 
+
+class ParseDocumentationMarkerGuardTest(unittest.TestCase):
+    """Reject inline, nonfinal, punctuated, or missing documentation markers."""
+
     def test_inline_marker_in_prose_is_unknown(self) -> None:
         # The marker must start its own line. An inline reference
         # embedded in a sentence -- e.g. "I cannot conclude DOCS:
@@ -177,13 +182,11 @@ class VerdictParserReexportTest(unittest.TestCase):
     `workflow_messages` module defines."""
 
     def test_facade_reexports_focused_parsers(self) -> None:
-        from orchestrator import workflow, workflow_messages
-
         self.assertIs(
             workflow._parse_review_verdict,
-            workflow_messages._parse_review_verdict,
+            _parse_review_verdict,
         )
         self.assertIs(
             workflow._parse_documentation_verdict,
-            workflow_messages._parse_documentation_verdict,
+            _parse_documentation_verdict,
         )

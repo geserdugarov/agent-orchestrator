@@ -9,7 +9,6 @@ from orchestrator import workflow
 
 from tests.workflow_helpers import (
     _ResolvingConflictMixin,
-    _TEST_SPEC,
     _agent,
 )
 
@@ -38,10 +37,8 @@ class ResolvingConflictDirtyParkingTest(
         ), patch.object(workflow, "_git", git_mock), patch.object(
             workflow, "_git_hardened", git_mock,
         ):
-            mocks = self._run(
-                lambda: workflow._handle_resolving_conflict(
-                    gh, _TEST_SPEC, issue,
-                ),
+            mocks = self._run_resolving_conflict(
+                gh, issue,
                 run_agent=_agent(
                     session_id="dev-sess", last_message="halfway there",
                 ),
@@ -90,10 +87,8 @@ class ResolvingConflictDirtyParkingTest(
         merge_mock = MagicMock(return_value=(True, []))
 
         with patch.object(workflow, "_rebase_base_into_worktree", merge_mock):
-            mocks = self._run(
-                lambda: workflow._handle_resolving_conflict(
-                    gh, _TEST_SPEC, issue,
-                ),
+            mocks = self._run_resolving_conflict(
+                gh, issue,
                 run_agent=_agent(),
                 push_branch=True,
                 branch_ahead_behind=(1, 0),

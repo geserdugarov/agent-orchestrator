@@ -5,7 +5,7 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
-from orchestrator import config, workflow
+from orchestrator import config
 
 from tests.fakes import (
     FakeComment,
@@ -49,8 +49,8 @@ class HandleValidatingExternalMergeTest(
             review_round=0,
         )
 
-        mocks = self._run(
-            lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+        mocks = self._run_validating(
+            gh, issue,
             run_agent=_agent(),
         )
 
@@ -94,8 +94,8 @@ class HandleValidatingClosedIssueTest(
             review_round=0,
         )
 
-        mocks = self._run(
-            lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+        mocks = self._run_validating(
+            gh, issue,
             run_agent=_agent(),
         )
 
@@ -106,16 +106,7 @@ class HandleValidatingClosedIssueTest(
         mocks["_cleanup_terminal_branch"].assert_not_called()
 
 
-class ApprovalThroughDocumentingTest(
-    unittest.TestCase, _PatchedWorkflowMixin
-):
-    """Issue #266: after `VERDICT: APPROVED` + verify + squash/force-push,
-    `_handle_validating` hands the issue off to `documenting` (not directly
-    to `in_review`). `_handle_documenting`'s success exits advance to
-    `in_review` unconditionally (#270 removed the `validating` fallback).
-    PR watermarks, approval comment, and squash comment are preserved
-    across the hop.
-    """
+class _ApprovalHandoffFixtureMixin(_PatchedWorkflowMixin):
 
     PR_NUMBER = 91
     BRANCH = "orchestrator/geserdugarov__agent-orchestrator/issue-9"
@@ -150,12 +141,18 @@ class ApprovalThroughDocumentingTest(
         gh.seed_state(9, **state)
         return gh, issue, pr
 
+
+class ApprovalThroughDocumentingTest(
+    unittest.TestCase, _ApprovalHandoffFixtureMixin,
+):
+    """Hand approval to documenting only after verify and squash succeed."""
+
     def test_approval_relabels_to_documenting(self) -> None:
         gh, issue, pr = self._setup()
 
         with patch.object(config, "SQUASH_ON_APPROVAL", True):
-            self._run(
-                lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+            self._run_validating(
+                gh, issue,
                 run_agent=_agent(last_message=REVIEW_APPROVED_MESSAGE),
                 head_shas=(self.REVIEWED_SHA,),
                 squash_result=(True, self.SQUASHED_SHA, 2, None),
@@ -185,8 +182,8 @@ class ApprovalThroughDocumentingTest(
         from orchestrator.worktrees import VerifyResult
 
         with patch.object(config, "VERIFY_COMMANDS", ("pytest -q",)):
-            self._run(
-                lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+            self._run_validating(
+                gh, issue,
                 run_agent=_agent(last_message=REVIEW_APPROVED_MESSAGE),
                 head_shas=(self.REVIEWED_SHA,),
                 verify_result=VerifyResult(
@@ -209,8 +206,8 @@ class ApprovalThroughDocumentingTest(
         gh, issue, pr = self._setup()
 
         with patch.object(config, "SQUASH_ON_APPROVAL", True):
-            self._run(
-                lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+            self._run_validating(
+                gh, issue,
                 run_agent=_agent(last_message=REVIEW_APPROVED_MESSAGE),
                 head_shas=(self.REVIEWED_SHA,),
                 squash_result=(False, None, 0, "force-with-lease rejected"),

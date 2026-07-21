@@ -12,7 +12,7 @@ awaiting-human resume, and the CHANGES_REQUESTED reviewer-feedback fix."""
 from __future__ import annotations
 
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from orchestrator import workflow
 from orchestrator.github import PAUSED_LABEL
@@ -27,7 +27,6 @@ from tests.fakes import (
 )
 from tests.workflow_helpers import (
     _PatchedWorkflowMixin,
-    _TEST_SPEC,
     _agent,
 )
 
@@ -72,8 +71,8 @@ class ValidatingLivePauseDriftResumeTest(
         before_writes = gh.write_state_calls
 
         with patch.object(gh, "get_issue", return_value=_paused_view(80)):
-            mocks = self._run(
-                lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+            mocks = self._run_validating(
+                gh, issue,
                 run_agent=_agent(session_id="dev-sess", last_message="fixed"),
                 head_shas=["before-sha", "after-sha"],
             )
@@ -127,8 +126,8 @@ class ValidatingLivePauseAwaitingHumanTest(
         before_writes = gh.write_state_calls
 
         with patch.object(gh, "get_issue", return_value=_paused_view(81)):
-            mocks = self._run(
-                lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+            mocks = self._run_validating(
+                gh, issue,
                 run_agent=_agent(session_id="dev-sess", last_message="done"),
                 head_shas=["before-sha", "after-sha"],
             )
@@ -186,19 +185,15 @@ class ValidatingLivePauseChangesRequestedTest(
         # its fetch and only the post-dev-resume guard sees `paused` -- a
         # blanket paused view would trip the reviewer-run guard first and the
         # dev would never resume.
-        fetches = {"n": 0}
-
-        def _get_issue(_number):
-            fetches["n"] += 1
-            return (
-                make_issue(82, label="validating")
-                if fetches["n"] == 1
-                else _paused_view(82)
-            )
-
-        with patch.object(gh, "get_issue", side_effect=_get_issue):
-            mocks = self._run(
-                lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+        issue_fetch = MagicMock(
+            side_effect=[
+                make_issue(82, label="validating"),
+                _paused_view(82),
+            ],
+        )
+        with patch.object(gh, "get_issue", issue_fetch):
+            mocks = self._run_validating(
+                gh, issue,
                 run_agent=[reviewer, dev],
                 head_shas=["before-sha", "after-sha"],
             )

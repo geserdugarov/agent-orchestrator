@@ -9,7 +9,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
-from orchestrator import config, workflow
+from orchestrator import config
 
 from tests.fakes import (
     FakeComment,
@@ -22,21 +22,11 @@ from tests.fakes import (
 )
 from tests.workflow_helpers import (
     _PatchedWorkflowMixin,
-    _TEST_SPEC,
     _agent,
 )
 
 
-class LegacyInReviewWatermarkSeedTest(unittest.TestCase, _PatchedWorkflowMixin):
-    """An issue that reached `in_review` before validating started seeding
-    watermarks (or that was manually relabeled, or whose handoff failed to
-    snapshot the PR) sits on the in_review handler with all three watermarks
-    unset. Without the first-tick migration, every historical comment --
-    including the orchestrator's own pickup / PR-opened / approval messages
-    -- would surface as fresh PR feedback once the debounce expired,
-    routing the issue to `fixing` (and back to `validating` on the
-    eventual pushed fix).
-    """
+class _LegacyWatermarkFixtureMixin(_PatchedWorkflowMixin):
 
     PR_NUMBER = 300
     BRANCH = "orchestrator/geserdugarov__agent-orchestrator/issue-150"
@@ -97,12 +87,18 @@ class LegacyInReviewWatermarkSeedTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
         return gh, issue, pr
 
+
+class LegacyInReviewWatermarkSeedTest(
+    unittest.TestCase, _LegacyWatermarkFixtureMixin,
+):
+    """Seed legacy watermarks without replaying historical feedback."""
+
     def test_first_tick_does_not_replay_history(self) -> None:
         gh, issue, pr = self._legacy_setup()
 
         with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
-            mocks = self._run(
-                lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+            mocks = self._run_in_review(
+                gh, issue,
                 run_agent=_agent(),
             )
 
@@ -128,8 +124,8 @@ class LegacyInReviewWatermarkSeedTest(unittest.TestCase, _PatchedWorkflowMixin):
         pr.approved = True
 
         with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
-            self._run(
-                lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+            self._run_in_review(
+                gh, issue,
                 run_agent=_agent(),
             )
 
@@ -147,18 +143,7 @@ class LegacyInReviewWatermarkSeedTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
 
 
-class LegacyMigrationPersistsEmptyWatermarksTest(
-    unittest.TestCase, _PatchedWorkflowMixin
-):
-    """The legacy in_review migration runs on every tick where any of the
-    three watermarks is unset. If the surface has no content yet, the
-    migration would previously leave the watermark unset and re-fire next
-    tick -- the FIRST human inline / summary review added in between would
-    then be consumed by the migration before _handle_in_review built
-    new_comments, silently swallowing that first review and skipping the
-    `fixing` route. The migration must persist 0 even on empty surfaces
-    so the next tick scans new comments instead of re-migrating.
-    """
+class _EmptyWatermarkMigrationFixtureMixin(_PatchedWorkflowMixin):
 
     PR_NUMBER = 900
     BRANCH = "orchestrator/geserdugarov__agent-orchestrator/issue-400"
@@ -183,13 +168,19 @@ class LegacyMigrationPersistsEmptyWatermarksTest(
         )
         return gh, issue, pr
 
+
+class LegacyMigrationPersistsEmptyWatermarksTest(
+    unittest.TestCase, _EmptyWatermarkMigrationFixtureMixin,
+):
+    """Persist zero watermarks so first feedback remains visible."""
+
     def test_first_inline_review_surfaces(self) -> None:
         gh, issue, pr = self._legacy_setup()
 
         # Tick 1: legacy migration runs, surfaces have nothing to seed past.
         # The migration must persist 0 on every namespace anyway.
-        self._run(
-            lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+        self._run_in_review(
+            gh, issue,
             run_agent=_agent(),
         )
         state = gh.pinned_data(400)
@@ -209,8 +200,8 @@ class LegacyMigrationPersistsEmptyWatermarksTest(
         )
 
         with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
-            mocks = self._run(
-                lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+            mocks = self._run_in_review(
+                gh, issue,
                 run_agent=_agent(),
             )
 
@@ -235,8 +226,8 @@ class LegacyMigrationPersistsEmptyWatermarksTest(
             dev_agent="claude", dev_session_id="dev-sess",
         )
 
-        self._run(
-            lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+        self._run_in_review(
+            gh, issue,
             run_agent=_agent(),
         )
         state = gh.pinned_data(400)
@@ -254,8 +245,8 @@ class LegacyMigrationPersistsEmptyWatermarksTest(
         )
 
         with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
-            mocks = self._run(
-                lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+            mocks = self._run_in_review(
+                gh, issue,
                 run_agent=_agent(),
             )
 
@@ -321,8 +312,8 @@ class ZeroWatermarkSurvivesFallbackTest(unittest.TestCase, _PatchedWorkflowMixin
         )
 
         with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
-            mocks = self._run(
-                lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+            mocks = self._run_in_review(
+                gh, issue,
                 run_agent=_agent(),
             )
 

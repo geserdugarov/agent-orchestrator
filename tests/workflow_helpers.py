@@ -182,6 +182,34 @@ class _PatchedWorkflowMixin:
             **run_options,
         )
 
+    def _run_validating(self, gh, issue, *, run_agent, **run_options):
+        return self._run(
+            partial(workflow._handle_validating, gh, _TEST_SPEC, issue),
+            run_agent=run_agent,
+            **run_options,
+        )
+
+    def _run_in_review(self, gh, issue, *, run_agent, **run_options):
+        return self._run(
+            partial(workflow._handle_in_review, gh, _TEST_SPEC, issue),
+            run_agent=run_agent,
+            **run_options,
+        )
+
+    def _run_resolving_conflict(
+        self, gh, issue, *, run_agent, **run_options,
+    ):
+        return self._run(
+            partial(
+                workflow._handle_resolving_conflict,
+                gh,
+                _TEST_SPEC,
+                issue,
+            ),
+            run_agent=run_agent,
+            **run_options,
+        )
+
     def _run(
         self,
         callable_,
@@ -346,6 +374,46 @@ class _PatchedWorkflowMixin:
         return workflow_mocks
 
 
+class _GitRunRecorder:
+    """Record the token-bearing git invocation behind a config probe."""
+
+    def __init__(self, *, probe_result=None, command_result=None):
+        self.probe_result = probe_result
+        self.command_result = command_result or MagicMock(
+            returncode=0,
+            stdout="",
+            stderr="",
+        )
+        self.calls = []
+        self.args = None
+        self.env = None
+        self.cwd = None
+
+    def __call__(self, args, **kwargs):
+        self.calls.append(args)
+        if (
+            self.probe_result is not None
+            and args
+            and args[:3] == ["git", "config", "--get-regexp"]
+        ):
+            return self.probe_result
+        self.args = args
+        self.env = kwargs.get("env")
+        self.cwd = kwargs.get("cwd")
+        return self.command_result
+
+
+class _TokenResolver:
+    """Return a slug-derived token while retaining the requested slugs."""
+
+    def __init__(self):
+        self.slugs = []
+
+    def __call__(self, slug: str) -> str:
+        self.slugs.append(slug)
+        return f"ghp-token-for-{slug.replace('/', '-')}"
+
+
 class _ResolvingConflictMixin(_PatchedWorkflowMixin):
     """Shared seed / merge-run / baseline-hash helpers for the
     `_handle_resolving_conflict` scenario tests split across the focused
@@ -355,8 +423,10 @@ class _ResolvingConflictMixin(_PatchedWorkflowMixin):
     happens.
     """
 
-    BRANCH = _issue_branch(200)
+    ISSUE_NUMBER = 200
+    BRANCH = _issue_branch(ISSUE_NUMBER)
     PR_NUMBER = 800
+    PR_HEAD_SHA = "cafe1234"
 
     def _seed(
         self,
@@ -371,11 +441,14 @@ class _ResolvingConflictMixin(_PatchedWorkflowMixin):
         extra_state=None,
     ):
         gh = FakeGitHubClient()
-        issue = make_issue(200, label=LABEL_RESOLVING_CONFLICT)
+        issue = make_issue(
+            self.ISSUE_NUMBER,
+            label=LABEL_RESOLVING_CONFLICT,
+        )
         gh.add_issue(issue)
         pr = FakePR(
             number=self.PR_NUMBER, head_branch=self.BRANCH,
-            head=FakePRRef(sha="cafe1234"),
+            head=FakePRRef(sha=self.PR_HEAD_SHA),
             mergeable=False, check_state="success",
             merged=pr_merged, state=pr_state,
         )
@@ -388,7 +461,7 @@ class _ResolvingConflictMixin(_PatchedWorkflowMixin):
         )
         if extra_state:
             state.update(extra_state)
-        gh.seed_state(200, **state)
+        gh.seed_state(self.ISSUE_NUMBER, **state)
         return gh, issue, pr
 
     def _run_with_merge(
@@ -396,7 +469,7 @@ class _ResolvingConflictMixin(_PatchedWorkflowMixin):
         gh,
         issue,
         *,
-        merge_succeeded: bool,
+        merge_succeeded: bool = True,
         conflicted_files=(),
         head_shas=("before", "after"),
         push_branch: bool = True,
@@ -423,10 +496,9 @@ class _ResolvingConflictMixin(_PatchedWorkflowMixin):
         ), patch.object(workflow, "_git", git_mock), patch.object(
             workflow, "_git_hardened", git_hardened_mock,
         ):
-            mocks = self._run(
-                lambda: workflow._handle_resolving_conflict(
-                    gh, _TEST_SPEC, issue,
-                ),
+            mocks = self._run_resolving_conflict(
+                gh,
+                issue,
                 run_agent=agent,
                 push_branch=push_branch,
                 head_shas=head_shas,
@@ -439,9 +511,9 @@ class _ResolvingConflictMixin(_PatchedWorkflowMixin):
         # Re-seed pinned state with a matching `user_content_hash` (plus any
         # extra fields) so the drift detector's first-encounter persistence
         # doesn't itself write -- these interrupted tests assert ZERO writes.
-        data = gh.pinned_data(200)
+        data = gh.pinned_data(self.ISSUE_NUMBER)
         data.update(extra)
         data["user_content_hash"] = workflow._compute_user_content_hash(
             issue, set(),
         )
-        gh.seed_state(200, **data)
+        gh.seed_state(self.ISSUE_NUMBER, **data)

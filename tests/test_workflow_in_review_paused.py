@@ -13,11 +13,10 @@ from __future__ import annotations
 import unittest
 from unittest.mock import MagicMock, patch
 
-from orchestrator import workflow
 from orchestrator.github import PAUSED_LABEL
 
 from tests.fakes import FakeGitHubClient, FakeLabel, FakePR, make_issue
-from tests.workflow_helpers import _PatchedWorkflowMixin, _TEST_SPEC, _agent
+from tests.workflow_helpers import _PatchedWorkflowMixin, _agent
 
 BRANCH = "orchestrator/geserdugarov__agent-orchestrator/issue-85"
 
@@ -57,8 +56,8 @@ class InReviewLivePauseDriftTest(unittest.TestCase, _PatchedWorkflowMixin):
 
         get_issue_mock = MagicMock(return_value=_paused_view(85))
         with patch.object(gh, "get_issue", get_issue_mock):
-            mocks = self._run(
-                lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+            mocks = self._run_in_review(
+                gh, issue,
                 run_agent=_agent(session_id="dev-sess", last_message="addressed"),
                 has_new_commits=True,
                 dirty_files=(),

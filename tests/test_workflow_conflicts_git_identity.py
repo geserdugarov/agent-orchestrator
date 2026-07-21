@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import unittest
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 from orchestrator import config, workflow
 
@@ -18,19 +19,14 @@ class GitHardenedInjectsIdentityTest(unittest.TestCase):
     """
 
     def test_env_has_committer_and_author_identity(self) -> None:
-        from unittest.mock import patch as mock_patch
+        subprocess_run = MagicMock(
+            return_value=MagicMock(returncode=0, stdout="", stderr=""),
+        )
 
-        captured: dict[str, dict] = {}
-
-        def fake_run(args, *, cwd, capture_output, text, env):
-            captured["env"] = env
-            from unittest.mock import MagicMock
-            return MagicMock(returncode=0, stdout="", stderr="")
-
-        with mock_patch("subprocess.run", side_effect=fake_run):
+        with patch("subprocess.run", subprocess_run):
             workflow._git_hardened("rebase", "x", cwd=Path("/tmp"))
 
-        env = captured["env"]
+        env = subprocess_run.call_args.kwargs["env"]
         self.assertEqual(env.get("GIT_AUTHOR_NAME"), config.AGENT_GIT_NAME)
         self.assertEqual(env.get("GIT_AUTHOR_EMAIL"), config.AGENT_GIT_EMAIL)
         self.assertEqual(env.get("GIT_COMMITTER_NAME"), config.AGENT_GIT_NAME)

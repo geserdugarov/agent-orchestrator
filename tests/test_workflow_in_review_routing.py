@@ -9,7 +9,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
-from orchestrator import config, workflow
+from orchestrator import config, workflow, workflow_messages
 
 from tests.fakes import (
     FakeComment,
@@ -27,11 +27,17 @@ from tests.workflow_helpers import (
 )
 
 
-class HandleInReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
-    """Drive the in_review handler through merged / closed-not-merged /
-    open-PR (HITL ready-ping gates and PR-comment debounce) branches
-    against a seeded FakePR.
-    """
+class _PostWithConcurrentComment:
+    def __init__(self, comment):
+        self.comment = comment
+
+    def __call__(self, gh, issue, state, body):
+        if "ready for review/merge" in body:
+            issue.comments.append(self.comment)
+        return workflow_messages._post_issue_comment(gh, issue, state, body)
+
+
+class _InReviewRoutingFixtureMixin(_PatchedWorkflowMixin):
 
     PR_NUMBER = 77
     BRANCH = "orchestrator/geserdugarov__agent-orchestrator/issue-30"
@@ -71,12 +77,18 @@ class HandleInReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
         defaults.update(kwargs)
         return FakePR(**defaults)
 
+
+class HandleInReviewTest(
+    unittest.TestCase, _InReviewRoutingFixtureMixin,
+):
+    """Route terminal pull-request states from in-review."""
+
     def test_in_review_pr_merged_externally(self) -> None:
         pr = self._open_pr(merged=True, state="closed")
         gh, issue = self._seed(pr=pr)
 
-        mocks = self._run(
-            lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+        mocks = self._run_in_review(
+            gh, issue,
             run_agent=_agent(),
         )
 
@@ -96,8 +108,8 @@ class HandleInReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
         pr = self._open_pr(merged=False, state="closed")
         gh, issue = self._seed(pr=pr)
 
-        mocks = self._run(
-            lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+        mocks = self._run_in_review(
+            gh, issue,
             run_agent=_agent(),
         )
 
@@ -112,6 +124,12 @@ class HandleInReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
             gh, _TEST_SPEC, 30,
             branch="orchestrator/geserdugarov__agent-orchestrator/issue-30",
         )
+
+
+class InReviewReadyPingRoutingTest(
+    unittest.TestCase, _InReviewRoutingFixtureMixin,
+):
+    """Gate and deduplicate the ready-for-merge notification."""
 
     def test_mergeable_final_docs_ping_human(self) -> None:
         # PR mergeable: post a one-shot HITL ping so the human knows the
@@ -130,8 +148,8 @@ class HandleInReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
 
         with patch.object(config, "HITL_MENTIONS", "@alice @bob"):
-            mocks = self._run(
-                lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+            mocks = self._run_in_review(
+                gh, issue,
                 run_agent=_agent(),
             )
 
@@ -169,8 +187,8 @@ class HandleInReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
         pr = self._open_pr(approved=False, mergeable=True, check_state="success")
         gh, issue = self._seed(pr=pr)
 
-        self._run(
-            lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+        self._run_in_review(
+            gh, issue,
             run_agent=_agent(),
         )
 
@@ -198,8 +216,8 @@ class HandleInReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
             },
         )
 
-        self._run(
-            lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+        self._run_in_review(
+            gh, issue,
             run_agent=_agent(),
         )
 
@@ -215,13 +233,13 @@ class HandleInReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
         pr = self._open_pr(approved=True, mergeable=True, check_state="success")
         gh, issue = self._seed(pr=pr)
 
-        self._run(
-            lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+        self._run_in_review(
+            gh, issue,
             run_agent=_agent(),
         )
         comments_after_first = list(gh.posted_comments)
-        self._run(
-            lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+        self._run_in_review(
+            gh, issue,
             run_agent=_agent(),
         )
 
@@ -234,8 +252,8 @@ class HandleInReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
         pr = self._open_pr(approved=True, mergeable=True, check_state="success")
         gh, issue = self._seed(pr=pr)
 
-        self._run(
-            lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+        self._run_in_review(
+            gh, issue,
             run_agent=_agent(),
         )
         pings_first = [
@@ -243,8 +261,8 @@ class HandleInReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
             if "ready for review/merge" in body
         ]
         pr.head = FakePRRef(sha="beefcafe")
-        self._run(
-            lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+        self._run_in_review(
+            gh, issue,
             run_agent=_agent(),
         )
 
@@ -271,8 +289,8 @@ class HandleInReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
         pr.head = FakePRRef(sha="beefcafe")
 
-        self._run(
-            lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+        self._run_in_review(
+            gh, issue,
             run_agent=_agent(),
         )
 
@@ -285,7 +303,6 @@ class HandleInReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
         # NOT bump `pr_last_comment_id` past the unseen human comment;
         # otherwise the next tick's `comments_after` would skip the human
         # feedback and the dev would never resume on it.
-        from unittest.mock import patch as _patch_mock
         long_ago = datetime.now(timezone.utc) - timedelta(hours=1)
         pr = self._open_pr(approved=True, mergeable=True, check_state="success")
         gh, issue = self._seed(
@@ -300,18 +317,13 @@ class HandleInReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
             id=1600, body="please hold off, doing one more pass",
             user=FakeUser("alice"), created_at=long_ago,
         )
-        from orchestrator import workflow_messages
-        real_post = workflow_messages._post_issue_comment
-
-        def post_with_race(gh_arg, issue_arg, state_arg, body_arg):
-            # Simulate a human comment landing right before our ping.
-            if "ready for review/merge" in body_arg:
-                issue_arg.comments.append(human_comment)
-            return real_post(gh_arg, issue_arg, state_arg, body_arg)
-
-        with _patch_mock.object(workflow, "_post_issue_comment", post_with_race):
-            self._run(
-                lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+        with patch.object(
+            workflow,
+            "_post_issue_comment",
+            _PostWithConcurrentComment(human_comment),
+        ):
+            self._run_in_review(
+                gh, issue,
                 run_agent=_agent(),
             )
 
@@ -325,8 +337,8 @@ class HandleInReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
         # `_handle_in_review` here). The ping itself is filtered as
         # orchestrator-authored, so the route is driven by the (real,
         # human-authored) `human_comment`.
-        mocks = self._run(
-            lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+        mocks = self._run_in_review(
+            gh, issue,
             run_agent=_agent(),
         )
         mocks["run_agent"].assert_not_called()
@@ -334,6 +346,12 @@ class HandleInReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertEqual(
             gh.pinned_data(30).get("pending_fix_issue_max_id"), human_comment.id,
         )
+
+
+class InReviewFeedbackRoutingTest(
+    unittest.TestCase, _InReviewRoutingFixtureMixin,
+):
+    """Park or route open pull requests based on checks and feedback."""
 
     def test_in_review_unmergeable_parks_for_human(self) -> None:
         # PR not mergeable: park awaiting human with
@@ -343,8 +361,8 @@ class HandleInReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
         pr = self._open_pr(approved=True, mergeable=False, check_state="success")
         gh, issue = self._seed(pr=pr)
 
-        mocks = self._run(
-            lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+        mocks = self._run_in_review(
+            gh, issue,
             run_agent=_agent(),
         )
 
@@ -367,8 +385,8 @@ class HandleInReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
         pr = self._open_pr(approved=True, mergeable=None, check_state="success")
         gh, issue = self._seed(pr=pr)
 
-        self._run(
-            lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+        self._run_in_review(
+            gh, issue,
             run_agent=_agent(),
         )
 
@@ -400,8 +418,8 @@ class HandleInReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
 
         with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
-            mocks = self._run(
-                lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+            mocks = self._run_in_review(
+                gh, issue,
                 run_agent=_agent(),
             )
 
@@ -431,8 +449,8 @@ class HandleInReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
             pr=pr, extra_state={"pr_last_comment_id": 1999}
         )
 
-        mocks = self._run(
-            lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+        mocks = self._run_in_review(
+            gh, issue,
             run_agent=_agent(),
         )
 
@@ -454,8 +472,8 @@ class HandleInReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
         # Manually-relabeled in_review without a pinned PR -- park once.
         gh, issue = self._seed(pr=None, with_pr_number=False)
 
-        self._run(
-            lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+        self._run_in_review(
+            gh, issue,
             run_agent=_agent(),
         )
 
@@ -466,8 +484,8 @@ class HandleInReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
         # A second tick with awaiting_human set must NOT re-park (no second
         # comment posted; comment count stays at 1).
         before = len(gh.posted_comments)
-        self._run(
-            lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+        self._run_in_review(
+            gh, issue,
             run_agent=_agent(),
         )
         self.assertEqual(len(gh.posted_comments), before)
@@ -495,8 +513,8 @@ class HandleInReviewClosedIssueExternalMergeTest(
         gh.add_pr(pr)
         gh.seed_state(40, pr_number=99, branch="orchestrator/geserdugarov__agent-orchestrator/issue-40")
 
-        self._run(
-            lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+        self._run_in_review(
+            gh, issue,
             run_agent=_agent(),
         )
 
@@ -504,15 +522,7 @@ class HandleInReviewClosedIssueExternalMergeTest(
         self.assertIn("merged_at", gh.pinned_data(40))
 
 
-class InReviewPRReviewSummaryTest(unittest.TestCase, _PatchedWorkflowMixin):
-    """A human can leave PR feedback either through inline review comments
-    or through the *review summary* body (the textbox above the
-    Approve / Request Changes / Comment buttons). The summary lives in the
-    PullRequestReview id namespace, distinct from issue comments and inline
-    review comments. Without surfacing it, a "Comment" review with body or
-    a CHANGES_REQUESTED summary would never be routed to `fixing` -- the
-    dev would never see the feedback.
-    """
+class _ReviewSummaryFixtureMixin(_PatchedWorkflowMixin):
 
     PR_NUMBER = 130
     BRANCH = "orchestrator/geserdugarov__agent-orchestrator/issue-90"
@@ -539,6 +549,12 @@ class InReviewPRReviewSummaryTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
         return gh, issue, pr
 
+
+class InReviewPRReviewSummaryTest(
+    unittest.TestCase, _ReviewSummaryFixtureMixin,
+):
+    """Route actionable review-summary bodies while ignoring approvals."""
+
     def test_change_request_body_enters_fixing(self) -> None:
         long_ago = datetime.now(timezone.utc) - timedelta(hours=1)
         review = FakePRReview(
@@ -552,8 +568,8 @@ class InReviewPRReviewSummaryTest(unittest.TestCase, _PatchedWorkflowMixin):
         gh, issue, pr = self._setup_with_review(review)
 
         with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
-            mocks = self._run(
-                lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+            mocks = self._run_in_review(
+                gh, issue,
                 run_agent=_agent(),
             )
 
@@ -585,8 +601,8 @@ class InReviewPRReviewSummaryTest(unittest.TestCase, _PatchedWorkflowMixin):
         gh, issue, pr = self._setup_with_review(review)
 
         with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
-            mocks = self._run(
-                lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+            mocks = self._run_in_review(
+                gh, issue,
                 run_agent=_agent(),
             )
 
@@ -614,8 +630,8 @@ class InReviewPRReviewSummaryTest(unittest.TestCase, _PatchedWorkflowMixin):
         pr.approval_head_sha = "cafe1234"
 
         with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
-            mocks = self._run(
-                lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+            mocks = self._run_in_review(
+                gh, issue,
                 run_agent=_agent(),
             )
 
@@ -645,8 +661,8 @@ class InReviewPRReviewSummaryTest(unittest.TestCase, _PatchedWorkflowMixin):
         pr.changes_requested_head_sha = "cafe1234"
 
         with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
-            mocks = self._run(
-                lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+            mocks = self._run_in_review(
+                gh, issue,
                 run_agent=_agent(),
             )
 

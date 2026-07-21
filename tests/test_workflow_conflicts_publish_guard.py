@@ -18,12 +18,13 @@ from tests.fakes import (
 from tests.workflow_helpers import _TEST_SPEC
 
 
+def _pr(sha):
+    return FakePR(number=1, head_branch="b", head=FakePRRef(sha=sha))
+
+
 class ResolvingConflictPublishGuardUnitTest(unittest.TestCase):
     """Unit tests for the two safety probes behind the already-rebased
     force-publish decision."""
-
-    def _pr(self, sha):
-        return FakePR(number=1, head_branch="b", head=FakePRRef(sha=sha))
 
     def test_pr_head_recognizes_docs_checked_sha(self) -> None:
         # `docs_checked_sha` is the only key production code persists for
@@ -38,14 +39,14 @@ class ResolvingConflictPublishGuardUnitTest(unittest.TestCase):
         gh.seed_state(1, docs_checked_sha="abc")
         state = gh.read_pinned_state(issue)
         self.assertTrue(
-            conflicts._pr_head_orchestrator_produced(state, self._pr("abc")),
+            conflicts._pr_head_orchestrator_produced(state, _pr("abc")),
         )
         self.assertFalse(
-            conflicts._pr_head_orchestrator_produced(state, self._pr("xyz")),
+            conflicts._pr_head_orchestrator_produced(state, _pr("xyz")),
         )
         # An empty/missing head never matches.
         self.assertFalse(
-            conflicts._pr_head_orchestrator_produced(state, self._pr("")),
+            conflicts._pr_head_orchestrator_produced(state, _pr("")),
         )
         # No `docs_checked_sha` recorded -- e.g. a pre-docs validating
         # PR head -- must NOT match an empty-string lookup either.
@@ -55,7 +56,7 @@ class ResolvingConflictPublishGuardUnitTest(unittest.TestCase):
         gh2.seed_state(2, dev_agent="claude")
         state2 = gh2.read_pinned_state(issue2)
         self.assertFalse(
-            conflicts._pr_head_orchestrator_produced(state2, self._pr("abc")),
+            conflicts._pr_head_orchestrator_produced(state2, _pr("abc")),
         )
 
     def test_already_rebased_reads_rev_list_count(self) -> None:

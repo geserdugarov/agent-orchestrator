@@ -23,7 +23,6 @@ from tests.fakes import (
 from tests.workflow_helpers import (
     REVIEW_APPROVED_MESSAGE,
     _PatchedWorkflowMixin,
-    _TEST_SPEC,
     _agent,
 )
 
@@ -83,8 +82,8 @@ class SameAccountHumanFeedbackTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
 
         with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
-            mocks = self._run(
-                lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+            mocks = self._run_in_review(
+                gh, issue,
                 run_agent=_agent(),
             )
 
@@ -146,8 +145,8 @@ class SameAccountHumanFeedbackTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
 
         # Step 1: validating approves; watermark seed must STOP at id=950.
-        self._run(
-            lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+        self._run_validating(
+            gh, issue,
             run_agent=_agent(last_message=REVIEW_APPROVED_MESSAGE),
         )
         last_comment_id = gh.pinned_data(101).get("pr_last_comment_id")
@@ -164,8 +163,8 @@ class SameAccountHumanFeedbackTest(unittest.TestCase, _PatchedWorkflowMixin):
         if not any(label.name == "in_review" for label in issue.labels):
             issue.labels = [FakeLabel("in_review")]
         with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
-            mocks = self._run(
-                lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+            mocks = self._run_in_review(
+                gh, issue,
                 run_agent=_agent(),
             )
 
@@ -230,8 +229,8 @@ class OrchestratorMarkerFeedbackFilterTest(
         )
 
         with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
-            mocks = self._run(
-                lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+            mocks = self._run_in_review(
+                gh, issue,
                 run_agent=_agent(),
             )
 
@@ -321,8 +320,8 @@ class OrchestratorMarkerFeedbackFilterTest(
         )
 
         with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
-            mocks = self._run(
-                lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+            mocks = self._run_in_review(
+                gh, issue,
                 run_agent=_agent(),
             )
 
@@ -379,8 +378,8 @@ class CrossNamespaceFilterTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
 
         with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
-            mocks = self._run(
-                lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+            mocks = self._run_in_review(
+                gh, issue,
                 run_agent=_agent(),
             )
 
@@ -424,8 +423,8 @@ class CrossNamespaceFilterTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
 
         with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
-            mocks = self._run(
-                lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+            mocks = self._run_in_review(
+                gh, issue,
                 run_agent=_agent(),
             )
 
@@ -438,16 +437,7 @@ class CrossNamespaceFilterTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
 
 
-class InReviewAllowlistFeedbackFilterTest(
-    unittest.TestCase, _PatchedWorkflowMixin,
-):
-    """With `ALLOWED_ISSUE_AUTHORS` set, PR feedback from an author outside the
-    allowlist must not set a pending-fix bookmark or route `in_review` to
-    `fixing`, on any of the four feedback surfaces (issue thread, PR
-    conversation, inline review, review summary). An allowed author on the same
-    surface must still route exactly as before. The filter is opt-in: these
-    assertions hold only under a populated allowlist.
-    """
+class _AllowlistFeedbackFixtureMixin(_PatchedWorkflowMixin):
 
     PR_NUMBER = 550
     BRANCH = "orchestrator/geserdugarov__agent-orchestrator/issue-540"
@@ -509,6 +499,12 @@ class InReviewAllowlistFeedbackFilterTest(
         )
         return gh, issue
 
+
+class InReviewAllowlistFeedbackFilterTest(
+    unittest.TestCase, _AllowlistFeedbackFixtureMixin,
+):
+    """Filter every feedback surface through the configured allowlist."""
+
     def test_outsider_feedback_never_routes(self) -> None:
         for surface, _ in self._SURFACES:
             with self.subTest(surface=surface):
@@ -516,10 +512,9 @@ class InReviewAllowlistFeedbackFilterTest(
                 with patch.object(
                     config, "ALLOWED_ISSUE_AUTHORS", (self.ALLOWED,)
                 ), patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
-                    mocks = self._run(
-                        lambda: workflow._handle_in_review(
-                            gh, _TEST_SPEC, issue,
-                        ),
+                    mocks = self._run_in_review(
+                        gh,
+                        issue,
                         run_agent=_agent(),
                     )
 
@@ -538,10 +533,9 @@ class InReviewAllowlistFeedbackFilterTest(
                 with patch.object(
                     config, "ALLOWED_ISSUE_AUTHORS", (self.ALLOWED,)
                 ), patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
-                    mocks = self._run(
-                        lambda: workflow._handle_in_review(
-                            gh, _TEST_SPEC, issue,
-                        ),
+                    mocks = self._run_in_review(
+                        gh,
+                        issue,
                         run_agent=_agent(),
                     )
 
