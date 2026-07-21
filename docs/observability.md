@@ -238,9 +238,13 @@ cannot stop the per-issue tick.
 landed. The per-invocation `skill_triggered` audit event on [`EVENT_LOG_PATH`](#audit-event-log-event_log_path) (see the
 [audit event-kinds list](#audit-event-log-event_log_path)) is gated on the same `TRACK_SKILL_TRIGGERS` switch and
 reuses the list `record_agent_exit` already parsed — `_run_agent_tracked` emits one event per distinct triggered
-skill. The skill-trigger-rate dashboard widget (`get_skill_trigger_rates` + the "Skill trigger rates" panel — see the
+skill. The dashboard's primary skill metric is per-session **adoption** (`get_skill_adoption` + the "Skill adoption"
+panel), which counts, for each `(repo, role, backend, skill)` cell, how many logical agent sessions had the skill
+available and how many loaded it — an incidental `SKILL.md` reference stays a separate diagnostic column and never
+raises the rate. The invocation-level views (`get_skill_trigger_rates` and `get_skill_trigger_matrix`) sit
+beneath it as a clearly named invocation-level diagnostic — see the
 [read model](#read-model-orchestratoranalyticsreadpy) and [dashboard](#dashboard-orchestratordashboardpy) sections
-below) is a pure read-side addition over `extras JSONB` with no schema change.
+below. All are pure read-side additions over `extras JSONB` with no schema change.
 
 ### `repo_skill_catalog` records
 
@@ -930,9 +934,11 @@ the per-issue drill-down renderer, and the immutable page-state dataclasses the 
 `orchestrator/dashboard_widgets.py`, which builds the KPI strip by handing a `_KpiInputs` to the
 `orchestrator/dashboard_kpi_strip.py` aggregations through the facade. The historical `orchestrator.dashboard.*`
 entry points that `dashboard_state` / `dashboard_kpis` / `dashboard_html` / `dashboard_cards` / `dashboard_kpi_strip` /
-`dashboard_reads` own are each re-exported through the facade under their original names; from `dashboard_skill_matrix`
-only its two public entry points (`_skill_matrix_html` / `parse_skill_matrix_sort`) are re-exported, its internal sort /
-header / row helpers staying private. The `dashboard_widgets` widget / page-state members and the `dashboard_kpi_strip`
+`dashboard_reads` own are each re-exported through the facade under their original names; from
+`dashboard_skill_adoption` and `dashboard_skill_matrix` only their two public entry points each
+(`_skill_adoption_html` / `parse_skill_adoption_sort` and `_skill_matrix_html` / `parse_skill_matrix_sort`) are
+re-exported, their internal sort / header / row helpers staying private. The `dashboard_widgets` widget / page-state
+members and the `dashboard_kpi_strip`
 KPI-strip entry points (`_KpiInputs` / `_build_kpi_strip_data`) the pipeline and the dashboard tests reach through
 `dashboard.<name>` are re-exported (and listed in
 `__all__`) too, while the leaf-private internal helpers stay private to their modules — the `dashboard_cards`
@@ -943,7 +949,7 @@ patch points) are unchanged.
 The repo-root `sys.path` shim that lets `streamlit run` resolve the absolute `orchestrator.*` imports is factored
 into the shared import-light `orchestrator/script_launch.py` helper (`ensure_repo_root_on_path`), which
 `orchestrator/trajectory_dashboard.py` also calls.
-The extracted helpers live in eight import-light modules (stdlib plus `orchestrator.analytics`, so they hold
+The extracted helpers live in nine import-light modules (stdlib plus `orchestrator.analytics`, so they hold
 the lazy-import invariant): `orchestrator/dashboard_state.py` (date / window math, preset and timezone vocabulary,
 stage-filter / cache-key resolution, the issue-number parser, the DB-config banner check, and the read fan-out switch),
 `orchestrator/dashboard_kpis.py` (KPI delta math, the computed insight banners, the reliability-tile triples, the
@@ -951,7 +957,9 @@ top-cost issue ordering, and the rework-share aggregation), `orchestrator/dashbo
 KPI-strip / sparkline / issues- and skill-trigger-table inline-HTML builders below),
 `orchestrator/dashboard_cards.py` (the insight / backend-efficiency / cost-coverage / reliability-tile inline-HTML card
 family), `orchestrator/dashboard_kpi_strip.py` (the KPI-strip aggregations: the token / throughput / rework helpers that
-feed the four KPI tiles), `orchestrator/dashboard_skill_matrix.py` (the per-skill trigger matrix: its `mtx_sort` /
+feed the four KPI tiles), `orchestrator/dashboard_skill_adoption.py` (the primary per-session skill-adoption matrix: its
+`adopt_sort` / `adopt_dir` sort-param parser and the sortable inline-HTML table),
+`orchestrator/dashboard_skill_matrix.py` (the invocation-level per-skill trigger matrix: its `mtx_sort` /
 `mtx_dir` sort-param parser and the sortable inline-HTML table), `orchestrator/dashboard_reads.py` (the read
 orchestration: the filter-to-query adapters, the cached data-extent / filter-option and per-filter widget readers, the
 two-wave reader registries, the staged parallel dispatch, the static-metadata load, the two-wave data load, and the
@@ -978,12 +986,12 @@ so a filter change invalidates every cached query in lockstep. `get_data_extent`
 filter inputs and live in argument-less wrappers under the longer `STATIC_METADATA_TTL_SECONDS = 300` (5 min) TTL so the
 sidebar / topbar only re-hit Postgres when `analytics.sync` ingests new events.
 
-**Two-wave loading.** The 15 widget reads are staged into two waves:
+**Two-wave loading.** The 16 widget reads are staged into two waves:
 
 - **First wave (6 reads).** `summary`, `prev_summary`, `ts_points`, `review_round_rows`, `throughput_rows`,
   `cost_coverage_rows` — feeds the topbar, filter meta, insight banners, and KPI strip.
-- **Second wave (9 reads).** `stage_rows`, `agent_exits`, `issues_rows`, `backend_rows`, `repo_rows`, `heatmap_rows`,
-  `backend_daily_rows`, `skill_rows`, `skill_matrix_rows` — feeds the rest of the body.
+- **Second wave (10 reads).** `stage_rows`, `agent_exits`, `issues_rows`, `backend_rows`, `repo_rows`, `heatmap_rows`,
+  `backend_daily_rows`, `skill_adoption_rows`, `skill_rows`, `skill_matrix_rows` — feeds the rest of the body.
 
 `main()` renders the above-the-fold chrome between waves on the main thread (worker threads only return data through
 futures, so every `st.*` write runs on the main thread). The second wave is skipped on an empty window. A single inline
@@ -1011,26 +1019,32 @@ futures, so every `st.*` write runs on the main thread). The second wave is skip
    in the recent agent-runs table below. The widget binds to `st.session_state["tz_offset_hours"]`; the offset is read
    before the second-wave fan-out so the heatmap query buckets in the chosen zone, and the card subtitle / x-axis title
    render the matching `UTC±N` label.
-8. "Skill trigger rates" panel — an aggregate table plus a fold-out matrix. The aggregate table (one row per
-   `(agent_role, backend)` group) over `get_skill_trigger_rates` shows runs, skill runs, a trigger-rate bar, and the
-   total trigger count. Below it, the **per-skill trigger matrix** (`_skill_matrix_html` over
-   `get_skill_trigger_matrix`) sits inside a collapsed `st.expander` (mirroring the "Recent agent runs" block) so it
-   does not dominate the card until opened; it renders one row per `(repo, agent_role, backend, skill)` cell with
-   columns Repo / Role / Backend / Skill / Runs / Runs with skill / Trigger rate, where `Runs` is the cohort's total
-   agent-exit runs, `Runs with skill` the subset that fired the skill, and `Trigger rate` the share of the two
-   (`skill_runs / runs`). It folds each repo's `repo_skill_catalog` into the observed triggers so a skill the repo
-   offers but no cohort fired surfaces as an explicit (muted) `0` "Runs with skill" cell (and a matching muted `0%`
-   trigger rate) rather than a missing row (the cohort `Runs` total is never muted). The read model caps the list at
-   100 rows (selected by Runs-with-skill DESC then Runs DESC), so the expander never floods the page; by default those
-   rows display sorted by Repo ascending, then Trigger rate descending. Each column header is a clickable sort control:
-   it is an anchor that writes `mtx_sort` / `mtx_dir` query params (parsed back by `parse_skill_matrix_sort`), so
-   clicking a column re-sorts the matrix on it and clicking the active column flips the direction (a ▲ / ▼ indicator
-   marks the current sort); an unknown / absent param falls back to that default Repo-ascending, Trigger-rate-descending
-   order. Both tables are
-   opt-in: they only carry signal when `TRACK_SKILL_TRIGGERS` is on. A window whose aggregate groups all show a `0%`
-   rate renders a caption naming the switch, an empty window renders the aggregate no-rows notice, and the matrix shows
-   a clear fallback notice in place of the table when no catalog-backed matrix can be built (no catalog records matched
-   and no run fired a skill).
+8. "Skill adoption" panel — the primary per-session adoption matrix above a fold-out invocation-level diagnostic. The
+   headline table (`_skill_adoption_html` over `get_skill_adoption`) renders one row per `(repo, agent_role, backend,
+   skill)` cell with columns Repo / Role / Backend / Skill / Sessions / Sessions using skill / Adoption rate /
+   Invocation loads / Incidental references, counting skill use by **logical agent session** rather than by raw run:
+   `Sessions` is how many sessions in the cohort had the skill available, `Sessions using skill` the subset that loaded
+   it, and `Adoption rate` their share (`adopted / sessions`, once per session). The two trailing columns are the
+   window-scoped invocation diagnostics — `Invocation loads` counts the window runs that loaded the skill and
+   `Incidental references` the window runs that referenced its `SKILL.md` without loading it — so an incidental mention
+   is a separate column and can never raise the adoption rate (a cell with no available session renders a muted `—`
+   rate rather than a misleading `0%`). The read model caps the list at 100 rows (Sessions DESC then Sessions-using
+   DESC then Invocations DESC); by default rows display sorted by Repo ascending, then Adoption rate descending. Each
+   column header is a clickable sort control writing `adopt_sort` / `adopt_dir` query params (parsed by
+   `parse_skill_adoption_sort`), with a ▲ / ▼ indicator; an unknown / absent param falls back to that default order.
+   Beneath the adoption table a collapsed `st.expander` ("Invocation-level diagnostics · per-run skill triggers")
+   carries the older per-run views as a clearly named diagnostic: the per-`(agent_role, backend)` aggregate table
+   (`_skill_triggers_html` over `get_skill_trigger_rates`, showing runs, skill runs, a trigger-rate bar, and total
+   trigger count) and, below it, the per-skill **trigger matrix** (`_skill_matrix_html` over
+   `get_skill_trigger_matrix`) with columns Repo / Role / Backend / Skill / Runs / Runs with skill / Trigger rate. The
+   matrix folds each repo's `repo_skill_catalog` into the observed triggers so a skill the repo offers but no cohort
+   fired surfaces as an explicit (muted) `0` "Runs with skill" cell (and a matching muted `0%` trigger rate) rather
+   than a missing row (the cohort `Runs` total is never muted); its headers write `mtx_sort` / `mtx_dir` params (parsed
+   by `parse_skill_matrix_sort`) and default to Repo ascending, then Trigger rate descending. All three tables are
+   opt-in: they only carry signal when `TRACK_SKILL_TRIGGERS` is on. When rows are present a zero-adoption window
+   captions a neutral genuine-0% result (a present row proves tracking is on), an empty adoption window renders the
+   adoption table's fallback notice naming the switch, and the matrix shows its own fallback notice when no
+   catalog-backed matrix can be built (no catalog records matched and no run fired a skill).
 9. Recent agent-runs table as a collapsible expander; the `ts` column is shifted to the wall-clock of the selected UTC
    offset via `shift_ts`.
 10. Per-issue drill-down when a number is entered.
@@ -1046,10 +1060,10 @@ SQL-level filter when a specific repo is selected AND triggers the drill-down se
 stays inert (GitHub issue numbers are not unique across repos).
 
 **Parallel read fan-out.** Setting `DASHBOARD_PARALLEL_READS=on` (or `1` / `true` / `yes`, case-insensitive) flips the
-15 widget reads from sequential to a `ThreadPoolExecutor` capped at eight workers. Each worker opens its own
+16 widget reads from sequential to a `ThreadPoolExecutor` capped at eight workers. Each worker opens its own
 thread-local psycopg connection via `analytics.read.analytics_connection()` — `psycopg.Connection` is not thread-safe,
 so sharing one socket across workers would corrupt the wire protocol. The fan-out emits a single INFO log line on every
-dashboard load — `dashboard.load: total=X.Xs reads=15 parallel=true|false` on a full render, or `reads=6` when the
+dashboard load — `dashboard.load: total=X.Xs reads=16 parallel=true|false` on a full render, or `reads=6` when the
 empty-window short-circuit skips the second wave — so the two paths can be A/B'd with `grep dashboard.load
 streamlit.log`. An `AnalyticsReadError` raised by any worker propagates verbatim from the first failing future.
 
@@ -1075,9 +1089,11 @@ inlines its own empty-state and imports none) -- so the dependency runs one way 
 is cycle-free. The topbar, filter meta, KPI strip,
 sparkline / delta pill, most-expensive-issues table, and skill-trigger-rates aggregate table are built by inline-HTML
 helpers in `orchestrator/dashboard_html.py`; the insight banners, per-card header, backend-efficiency cards,
-cost-source coverage bar, and reliability-tile strip live in `orchestrator/dashboard_cards.py`; the per-skill trigger
-matrix (its `mtx_sort` / `mtx_dir` sort-param parser and the sortable table) lives in
-`orchestrator/dashboard_skill_matrix.py` (all re-exported through `dashboard.py`).
+cost-source coverage bar, and reliability-tile strip live in `orchestrator/dashboard_cards.py`; the primary per-session
+skill-adoption matrix (its `adopt_sort` / `adopt_dir` sort-param parser and the sortable table) lives in
+`orchestrator/dashboard_skill_adoption.py`, and the invocation-level per-skill trigger matrix (its `mtx_sort` /
+`mtx_dir` sort-param parser and the sortable table) in `orchestrator/dashboard_skill_matrix.py` (all re-exported through
+`dashboard.py`).
 
 **Theme.** `orchestrator/dashboard_theme.py` is a plotly-free token module: palette (cool gray `#f4f5f8` page, white
 cards, indigo accent, muted ink tints), spacing tokens, the `1480px` content max-width, per-token-type / per-backend /

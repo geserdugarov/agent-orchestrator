@@ -38,7 +38,8 @@ import dashboard as _dashboard`), not as module-local names, so
 `patch.object(dashboard, ...)` on any of those re-exports intercepts the
 running pipeline (mirroring the `workflow.py` stage-handler facade). The
 module-private helpers, the read primitives (`_scoped_read` / `_filter_list`),
-and the pure `dashboard_html` / `dashboard_cards` / `dashboard_skill_matrix` /
+and the pure `dashboard_html` / `dashboard_cards` /
+`dashboard_skill_adoption` / `dashboard_skill_matrix` /
 `dashboard_kpis` / `dashboard_state` builders are called directly.
 
 Streamlit / Plotly / pandas are never imported here: every helper that
@@ -47,7 +48,8 @@ loaded handle as a plain parameter (bundled in `_DashboardModules`, or
 passed directly). Together with the stdlib-plus-`orchestrator` imports
 below (`analytics.read`, the import-light `dashboard_state` /
 `dashboard_kpis` / `dashboard_html` / `dashboard_cards` /
-`dashboard_kpi_strip` / `dashboard_skill_matrix` / `dashboard_reads`
+`dashboard_kpi_strip` / `dashboard_skill_adoption` /
+`dashboard_skill_matrix` / `dashboard_reads`
 helpers), this keeps the module off the polling tick's dependency
 footprint; `tests/test_dashboard.py` asserts the invariant.
 """
@@ -62,6 +64,7 @@ from orchestrator.analytics import read as analytics_read
 from orchestrator.analytics.read import (
     CostCoverageRow,
     DataExtent,
+    SkillAdoptionRow,
     SkillTriggerMatrixRow,
     SkillTriggerRateRow,
     Summary,
@@ -81,6 +84,10 @@ from orchestrator.dashboard_html import (
     _topbar_html,
 )
 from orchestrator.dashboard_kpi_strip import _KpiInputs
+from orchestrator.dashboard_skill_adoption import (
+    _skill_adoption_html,
+    parse_skill_adoption_sort,
+)
 from orchestrator.dashboard_skill_matrix import (
     _skill_matrix_html,
     parse_skill_matrix_sort,
@@ -338,8 +345,9 @@ def _render_remaining_widgets(
 ) -> None:
     from orchestrator import dashboard as _dashboard
 
-    _dashboard._render_skill_triggers(
+    _dashboard._render_skill_adoption(
         st=modules.st,
+        skill_adoption_rows=loaded.read_results["skill_adoption_rows"],
         skill_rows=loaded.read_results["skill_rows"],
         skill_matrix_rows=loaded.read_results["skill_matrix_rows"],
     )
@@ -738,21 +746,197 @@ def _render_activity_heatmap(
         )
 
 
+def _render_skill_adoption(
+    *,
+    st: Any,
+    skill_adoption_rows: Sequence[SkillAdoptionRow],
+    skill_rows: Sequence[SkillTriggerRateRow],
+    skill_matrix_rows: Sequence[SkillTriggerMatrixRow],
+) -> None:
+    """Render the per-session skill-adoption matrix and invocation diagnostics.
+
+    The headline metric is *session* adoption: for each `(repo, role,
+    backend, skill)` cell, what share of the logical agent sessions that
+    had the skill available actually loaded it -- counted once per session,
+    so a resume chain that pulled a skill across three ticks weighs one, not
+    three. The window-scoped invocation loads and incidental references ride
+    alongside as diagnostics; an incidental reference never counts toward
+    adoption, so it can never raise the rate. The per-run trigger views stay
+    reachable as a clearly named invocation-level diagnostic below.
+
+    This is an opt-in read-side widget over the `skills_available` /
+    `skills_triggered` / `skills_incidental` fields `record_agent_exit`
+    folds into `extras` when `TRACK_SKILL_TRIGGERS` is on. When no rows
+    surface at all the table names the switch, but any row proves tracking
+    recorded evidence -- a `sessions > 0` count means availability was
+    tracked, an incidental reference means the stream was parsed -- so a
+    zero-adoption window with rows present captions a neutral genuine-0%
+    result rather than nagging to enable an already-on switch.
+    """
+    from orchestrator import dashboard as _dashboard
+
+    with st.container(border=True):
+        st.markdown(
+            _card_header_html(
+                "Skill adoption",
+                "Share of agent sessions that loaded each available skill, "
+                "by repo, role, and backend (requires TRACK_SKILL_TRIGGERS)",
+            ),
+            unsafe_allow_html=True,
+        )
+        if not skill_rows:
+            st.info("No `agent_exit` rows match the current filters.")
+            return
+
+        # Clickable column headers re-sort the matrix: each header anchor
+        # writes `adopt_sort` / `adopt_dir` query params, which this parses
+        # back into a (column, direction) pair the render applies on top of
+        # the read model's default order.
+        adopt_sort_key, adopt_sort_desc = parse_skill_adoption_sort(
+            st.query_params
+        )
+        st.markdown(
+            _skill_adoption_html(
+                skill_adoption_rows,
+                sort_key=adopt_sort_key,
+                descending=adopt_sort_desc,
+            ),
+            unsafe_allow_html=True,
+        )
+        caption = _skill_adoption_zero_caption(skill_adoption_rows)
+        if caption is not None:
+            st.caption(caption)
+        # Any adoption row proves `TRACK_SKILL_TRIGGERS` recorded skill
+        # evidence, so the diagnostics below must not tell the operator to
+        # enable a switch the adoption caption just confirmed is on.
+        _dashboard._render_skill_invocation_diagnostics(
+            st=st,
+            skill_rows=skill_rows,
+            skill_matrix_rows=skill_matrix_rows,
+            tracking_confirmed=bool(skill_adoption_rows),
+        )
+
+
+def _skill_adoption_zero_caption(
+    skill_adoption_rows: Sequence[SkillAdoptionRow],
+) -> Optional[str]:
+    """Caption for a zero-adoption window, or None when a caption is unwanted.
+
+    Only fires when rows are present but none were adopted. A present row is
+    itself proof `TRACK_SKILL_TRIGGERS` is on -- `sessions > 0` means the
+    session's `skills_available` set was recorded, a load or incidental
+    reference means the stream was parsed -- so this never recommends
+    enabling the switch (the empty-rows path leaves that to the table's own
+    `SKILL_ADOPTION_EMPTY_MESSAGE`).
+
+    A cohort with availability but no loads is a genuine 0% adoption. When
+    every row has `sessions == 0` the rows exist only as window-scoped
+    diagnostics, and the caption names the evidence the columns actually
+    show -- loads (a session loaded a skill it did not report available),
+    incidental references, or both -- so it never claims "incidental only"
+    over a non-zero Invocation loads column. Returns None when a skill was
+    adopted (no caption) or when there are no rows at all.
+    """
+    if not skill_adoption_rows:
+        return None
+    if any(row.adopted for row in skill_adoption_rows):
+        return None
+    if any(row.sessions for row in skill_adoption_rows):
+        return (
+            "Skills were available to sessions this window but none loaded "
+            "one -- a genuine 0% adoption, not missing tracking."
+        )
+    loaded = any(row.load_rows for row in skill_adoption_rows)
+    incidental = any(row.incidental for row in skill_adoption_rows)
+    if loaded and incidental:
+        return (
+            "Skills were loaded and referenced incidentally this window, but "
+            "no session reported one available to adopt."
+        )
+    if loaded:
+        return (
+            "Skills were loaded this window, but no session reported one "
+            "available to adopt."
+        )
+    return (
+        "Only incidental skill references were recorded this window; no "
+        "session reported a skill available to adopt."
+    )
+
+
+def _render_skill_invocation_diagnostics(
+    *,
+    st: Any,
+    skill_rows: Sequence[SkillTriggerRateRow],
+    skill_matrix_rows: Sequence[SkillTriggerMatrixRow],
+    tracking_confirmed: bool = False,
+) -> None:
+    """Render the invocation-level skill diagnostics in a collapsed expander.
+
+    The per-run trigger views -- the aggregate trigger-rate table (by role
+    and backend) and the per-skill trigger matrix -- are a clearly named
+    diagnostic beneath the session-adoption view rather than the headline
+    metric. A run-level rate answers a different question from session
+    adoption (how often a single agent invocation reached for a skill, not
+    whether the logical session ever loaded it), so it folds into a
+    collapsed expander so it does not dominate the card by default.
+
+    When no run triggered a skill the zero-trigger caption depends on
+    `tracking_confirmed`: with adoption evidence in hand (the caller has
+    proof `TRACK_SKILL_TRIGGERS` is on) it reports a genuine no-trigger
+    window, and only without that evidence does it name the switch -- so
+    the diagnostic never contradicts an adoption panel that already
+    confirmed tracking is on.
+    """
+    with st.expander(
+        "Invocation-level diagnostics · per-run skill triggers",
+        expanded=False,
+    ):
+        st.markdown(
+            _skill_triggers_html(skill_rows),
+            unsafe_allow_html=True,
+        )
+        if not any(row.skill_runs for row in skill_rows):
+            if tracking_confirmed:
+                st.caption(
+                    "No agent run triggered a skill in this window."
+                )
+            else:
+                st.caption(
+                    "No skill triggers recorded in this window. Enable "
+                    "`TRACK_SKILL_TRIGGERS` (default off) so "
+                    "`record_agent_exit` records which skills each run pulls."
+                )
+        # Clickable column headers re-sort the matrix: each header anchor
+        # writes `mtx_sort` / `mtx_dir` query params, which this parses
+        # back into a (column, direction) pair the render applies on top
+        # of the read model's default order.
+        matrix_sort_key, matrix_sort_desc = parse_skill_matrix_sort(
+            st.query_params
+        )
+        st.markdown(
+            _skill_matrix_html(
+                skill_matrix_rows,
+                sort_key=matrix_sort_key,
+                descending=matrix_sort_desc,
+            ),
+            unsafe_allow_html=True,
+        )
+
+
 def _render_skill_triggers(
     *,
     st: Any,
     skill_rows: Sequence[SkillTriggerRateRow],
     skill_matrix_rows: Sequence[SkillTriggerMatrixRow],
 ) -> None:
-    """Render the skill-trigger aggregate table and matrix expander.
+    """Compatibility entry point rendering the trigger-rates skill panel.
 
-    The aggregate is an opt-in read-side widget over the
-    `skills_triggered` / `skills_triggered_count` fields
-    `record_agent_exit` folds into `extras` when
-    `TRACK_SKILL_TRIGGERS` is on. A `0%` rate is a real signal ("this
-    role's skill is not firing"), but it cannot tell a tracked-but-quiet
-    run from one whose tracking was off, so the caption names the switch
-    when nothing has triggered yet.
+    A stable name on the `orchestrator.dashboard` facade for external callers
+    and `patch.object(dashboard, ...)` points: renders a "Skill trigger
+    rates" card with the per-`(role, backend)` aggregate table above the
+    fold-out per-skill trigger matrix. The page pipeline renders the skill
+    panel through `_render_skill_adoption`.
     """
     from orchestrator import dashboard as _dashboard
 
@@ -790,16 +974,18 @@ def _render_skill_matrix_expander(
     st: Any,
     skill_matrix_rows: Sequence[SkillTriggerMatrixRow],
 ) -> None:
-    """Render the per-skill trigger matrix inside a collapsed expander."""
+    """Compatibility entry point: the per-skill trigger matrix in a collapsed expander.
+
+    A stable name on the `orchestrator.dashboard` facade for external callers
+    and `patch.object(dashboard, ...)` points: renders the per-skill trigger
+    matrix inside a collapsed `st.expander`. The page pipeline renders the
+    matrix through `_render_skill_invocation_diagnostics`.
+    """
     with st.expander(
         "Per-skill trigger matrix · which skills each "
         "repo × role × backend cohort reaches for",
         expanded=False,
     ):
-        # Clickable column headers re-sort the matrix: each header anchor
-        # writes `mtx_sort` / `mtx_dir` query params, which this parses
-        # back into a (column, direction) pair the render applies on top
-        # of the read model's default order.
         matrix_sort_key, matrix_sort_desc = parse_skill_matrix_sort(
             st.query_params
         )

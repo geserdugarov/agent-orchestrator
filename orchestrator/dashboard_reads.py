@@ -11,7 +11,7 @@ everything between "resolved filters" and "read-model rows in hand":
   connection.
 - The cached reader wrappers -- the static-metadata reads
   (`_read_data_extent`, `_read_filter_options`) and the per-filter widget
-  reads (`_read_summary` ... `_read_skill_trigger_matrix`) -- each of
+  reads (`_read_summary` ... `_read_skill_adoption`) -- each of
   which stays connection-free so a raw `psycopg.Connection` never lands
   in the `st.cache_data` key.
 - The reader registries (`_widget_task`, `_first_wave_readers`,
@@ -259,6 +259,10 @@ def _read_skill_trigger_matrix(key: tuple):
     return _read_filtered(analytics_read.get_skill_trigger_matrix, key)
 
 
+def _read_skill_adoption(key: tuple):
+    return _read_filtered(analytics_read.get_skill_adoption, key)
+
+
 def _widget_task(
     st: Any,
     name: str,
@@ -303,6 +307,7 @@ def _second_wave_readers(
             int(tz_offset_choice),
         ),
         _widget_task(st, "backend_daily_rows", _read_backend_daily_tokens, key),
+        _widget_task(st, "skill_adoption_rows", _read_skill_adoption, key),
         _widget_task(st, "skill_rows", _read_skill_trigger_rates, key),
         _widget_task(st, "skill_matrix_rows", _read_skill_trigger_matrix, key),
     ]
@@ -328,7 +333,7 @@ def _widget_readers(*, st: Any, key, prev_key, tz_offset_choice: int):
     Split into two staged waves so the topbar / filter meta / insight
     banners / KPI strip can paint as soon as their inputs are available
     instead of blocking on every widget: the first wave carries the six
-    reads those above-the-fold widgets consume, the second the nine
+    reads those above-the-fold widgets consume, the second the ten
     remaining widget reads. Each task is a zero-argument `partial` bound
     to its immutable filter tuple, and worker threads only return data --
     every `st.*` write happens on the caller's render thread between waves.
@@ -393,7 +398,7 @@ def _log_dashboard_load(*, load_start: float, reads: int, parallel: bool) -> Non
     """Emit the single `dashboard.load:` INFO line for the A/B rollout.
 
     Carries total wall-clock, the reader count (6 when the empty-window
-    short-circuit skips the second wave, else 15), and the parallel flag,
+    short-circuit skips the second wave, else 16), and the parallel flag,
     so the sequential / parallel paths can be A/B'd with one
     `grep dashboard.load streamlit.log`.
     """
