@@ -32,10 +32,11 @@ designed around that assumption.
 
 ## Top-level layout
 
-The workflow and worktree subsystems expose stable lazy facades backed by immutable export manifests. Their
-implementations live in responsibility-named private leaves, while facade lookups preserve every historical import and
-object identity. Leaves call through the owning facade at runtime where patch interception is part of the compatibility
-contract, so `patch.object(workflow, "<helper>", ...)` still intercepts calls made from other workflow and stage leaves.
+The workflow, worktree, analytics-read, and dashboard subsystems expose stable lazy facades backed by immutable export
+manifests. Their implementations live in responsibility-named private leaves, while facade lookups preserve every
+historical import and object identity. Leaves call through the owning facade at runtime where patch interception is
+part of the compatibility contract, so `patch.object(workflow, "<helper>", ...)` still intercepts calls made from
+other workflow and stage leaves.
 
 ```
 orchestrator/
@@ -95,6 +96,30 @@ orchestrator/
                         subsystem facades above
   _worktrees_export_manifest.py / _worktrees_exports.py
                         immutable public inventory and lazy resolver hooks
+  analytics/
+    __init__.py         import-only package compatibility facade and sink bootstrap
+    _package_*.py       package initialization, immutable inventory, and hooks
+    read.py             lazy read-model compatibility facade with a `.pyi` surface
+    _read_*.py          query-family implementations, typed query rows, and hooks
+    read_*.py           stable raw, rollup, dashboard, and model compatibility hubs
+    read_request*.py    typed filters, connection inputs, options, and legacy binding
+    _recording*.py      event-family recording, settings, usage, and JSONL persistence
+    _retention*.py      retention scanning and atomic rewrite leaves
+    sync.py / _sync_*.py
+                        CLI, ingestion, row parsing/mapping, and database lifecycle
+    _trajectories.py / _trajectory_*.py
+                        trajectory serialization, sanitization, and persistence
+  dashboard.py          lazy compatibility facade and direct Streamlit entrypoint
+  dashboard_*.py        stable component, read, chart, state, and widget hubs
+  _dashboard_*.py       bootstrap/hooks plus focused render, query, and chart leaves
+  usage.py              stable usage, skill, and trajectory parser surface
+  _usage_*.py           provider payload, pricing, skill, and trajectory leaves
+  trajectory_reader.py  pure file-backed filter and summary read model
+  _trajectory_*.py      record/view models, parsing, filtering, and file-read leaves
+  trajectory_dashboard.py
+                        lazy compatibility facade and direct Streamlit entrypoint
+  _trajectory_dashboard_*.py
+                        viewer bootstrap, page controls, rendering, and HTML leaves
   skill_catalog.py      per-tick repo skill-catalog collection: enumerate
                         SKILL.md definitions on the target base ref and
                         append one `repo_skill_catalog` analytics record;
@@ -119,12 +144,14 @@ orchestrator/
     _question_*.py      read-only session, run, outcomes, and handler routing
 ```
 
-`workflow.py` and `worktrees.py` publish explicit sorted `__all__` inventories, `.pyi` surfaces, and immutable target
-registries. Resolution is lazy and cached on the facade, but the resolved object is the implementation object's exact
-identity. Existing direct imports, wildcard imports, and `patch.object` calls therefore keep working. Patches that need
-to intercept base-sync or publication internals still target their owning facade (`base_sync` or
-`branch_publication`), just as before the split. Config and analytics modules retain their original import-time identity
-through `_workflow_dependencies.py`, so a diagnostic reload does not silently rebind already-imported workflow leaves.
+`workflow.py`, `worktrees.py`, `analytics.read`, and `dashboard.py` publish explicit sorted `__all__` inventories,
+`.pyi` surfaces, and immutable target registries. Resolution is lazy and cached on the facade, but the resolved object
+is the implementation object's exact identity. Existing direct imports, wildcard imports, and `patch.object` calls
+therefore keep working. Patches that need to intercept base-sync or publication internals still target their owning
+facade (`base_sync` or `branch_publication`), just as before the split. Config and analytics modules retain their
+original import-time identity through `_workflow_dependencies.py`, so a diagnostic reload does not silently rebind
+already-imported workflow leaves. The analytics package has its own import-only bootstrap so an explicit package reload
+still reparses sink settings and keeps stale package holders isolated as before.
 
 Stage-private helpers stay private to their stage facade (`_bump_in_review_watermarks`,
 `_seed_legacy_in_review_watermarks`, `_emit_conflict_round_incremented`). Cross-stage helpers like `_comment_created_at`

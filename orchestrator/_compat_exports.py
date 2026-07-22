@@ -7,7 +7,7 @@ from __future__ import annotations
 import importlib
 import sys
 from dataclasses import dataclass
-from typing import Any, Callable, Iterable, Optional
+from typing import Any, Callable, Iterable, MutableMapping, Optional
 
 
 ExportNamePair = tuple[str, Optional[str]]
@@ -33,10 +33,17 @@ class CompatibilityExports:
         facade_name: str,
         targets: Iterable[ExportTarget],
         exported_names: Optional[tuple[str, ...]],
+        facade_namespace: Optional[MutableMapping[str, Any]] = None,
     ) -> None:
         self._facade_name = facade_name
         self._targets = {target.export_name: target for target in targets}
         self._exported_names = exported_names
+        self._facade_namespace = facade_namespace
+
+    def _namespace(self) -> MutableMapping[str, Any]:
+        if self._facade_namespace is not None:
+            return self._facade_namespace
+        return sys.modules[self._facade_name].__dict__
 
     def resolve(self, export_name: str) -> Any:
         """Resolve one registered attribute and cache it on the facade."""
@@ -50,12 +57,12 @@ class CompatibilityExports:
                 )
             target_module = importlib.import_module(target.module_name)
             resolved = target_module if target.target_name is None else getattr(target_module, target.target_name)
-        sys.modules[self._facade_name].__dict__[export_name] = resolved
+        self._namespace()[export_name] = resolved
         return resolved
 
     def exported_dir(self) -> list[str]:
         """Include registered lazy attributes in facade introspection."""
-        facade_names = set(sys.modules[self._facade_name].__dict__)
+        facade_names = set(self._namespace())
         registered = set(self._targets)
         if self._exported_names is not None:
             registered.add("__all__")
@@ -77,7 +84,13 @@ def build_exports(
     facade_name: str,
     targets: Iterable[ExportTarget],
     exported_names: Optional[tuple[str, ...]],
+    facade_namespace: Optional[MutableMapping[str, Any]] = None,
 ) -> ExportHooks:
     """Return module hooks backed by one compatibility registry."""
-    registry = CompatibilityExports(facade_name, targets, exported_names)
+    registry = CompatibilityExports(
+        facade_name,
+        targets,
+        exported_names,
+        facade_namespace,
+    )
     return registry.resolve, registry.exported_dir

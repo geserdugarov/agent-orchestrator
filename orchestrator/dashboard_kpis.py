@@ -159,7 +159,7 @@ def reliability_tile_data(
     timed_out = int(summary.timed_out_agent_runs or 0)
     success_pct = (
         (1.0 - failed / total_runs) * 100
-        if total_runs > 0 else 0.0
+        if total_runs > 0 else float()
     )
     return [
         (total_runs, "Agent runs", ""),

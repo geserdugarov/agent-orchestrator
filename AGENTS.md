@@ -30,8 +30,9 @@ orchestrator process is stateless.
   `workflow_messages.py` subsystem facades. Their immutable `_export_manifest.py` inventories and `_exports.py` hooks
   route historical imports and patch points to responsibility-named private leaves (`_workflow_*`, `_base_sync_*`,
   `_branch_*`, `_git_*`, `_verify_*`, `_worktree_*`, and stage-specific prefixes). The package also contains per-tick
-  repo skill-catalog analytics (`skill_catalog.py`), the process-local scheduler (`scheduler.py`), and stable
-  runtime-core facades (`main.py`, `agents.py`, `github.py`, `config.py`, `state_machine.py`).
+  repo skill-catalog analytics (`skill_catalog.py`), lazy analytics/read and dashboard facades backed by focused
+  recording, query, rendering, usage-provider, and trajectory leaves, the process-local scheduler (`scheduler.py`),
+  and stable runtime-core facades (`main.py`, `agents.py`, `github.py`, `config.py`, `state_machine.py`).
   Full module-by-module map: [`docs/architecture.md`](docs/architecture.md#top-level-layout).
 - `tests/` — pytest suite. In-memory fakes in `tests/fakes.py`. Stage-handler tests in
   `tests/test_workflow_<stage>.py` (the validating stage is split across `tests/test_workflow_validating_*.py`, the

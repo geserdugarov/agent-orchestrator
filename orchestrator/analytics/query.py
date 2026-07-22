@@ -10,6 +10,7 @@ connection via the injected `connect_fn`. Driver-level failures are
 wrapped in `AnalyticsReadError` so callers have one exception type to
 catch regardless of which step failed.
 """
+
 from __future__ import annotations
 
 import contextlib
@@ -66,7 +67,9 @@ class _ReadQuery:
 
 
 def _execute_select(
-    conn: Any, sql: str, bindings: Sequence[Any],
+    conn: Any,
+    sql: str,
+    bindings: Sequence[Any],
 ) -> list[tuple]:
     """Run one SELECT on `conn` and return every row as a tuple.
 
@@ -84,7 +87,8 @@ def _execute_select(
 
 
 def _connect_for_read(
-    connect_fn: Callable[[str], Any], db_url: Optional[str],
+    connect_fn: Callable[[str], Any],
+    db_url: Optional[str],
 ) -> Any:
     """Open a fresh read connection, normalizing failures to
     `AnalyticsReadError`.
@@ -99,9 +103,7 @@ def _connect_for_read(
     except AnalyticsReadError:
         raise
     except Exception as error:
-        raise AnalyticsReadError(
-            f"could not connect to analytics database: {error}"
-        ) from error
+        raise AnalyticsReadError(f"could not connect to analytics database: {error}") from error
 
 
 @contextlib.contextmanager

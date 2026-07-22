@@ -29,6 +29,7 @@ surrounding Streamlit chrome instead of clashing with it.
 """
 from __future__ import annotations
 
+from inspect import Parameter, Signature
 from types import MappingProxyType
 from typing import Any, Mapping, Optional, Sequence
 
@@ -47,12 +48,15 @@ GRID = "#eef0f5"           # mock --grid
 BORDER = "#e6e8ef"         # mock --border
 
 # Brand / semantic colors used by KPI deltas and insight banners.
+_INDIGO = "#5b6cf0"
+_ORANGE = "#e0913a"
+_RED = "#d9534a"
 ACCENT = "#5b54e0"
 PRIMARY = ACCENT
 SECONDARY = "#8b5cf6"
 SUCCESS = "#2f9e6b"        # mock --pos
-WARNING = "#e0913a"
-DANGER = "#d9534a"         # mock --neg
+WARNING = _ORANGE
+DANGER = _RED               # mock --neg
 NEUTRAL = "#6b7280"
 INK = TEXT
 
@@ -94,8 +98,8 @@ _BILLION = 1_000_000_000
 # three hues are tuned to read against the cool gray page background
 # and stack in the order Input / Output / Cache from bottom to top.
 TOKEN_TYPE_COLORS: Mapping[str, str] = MappingProxyType({
-    "Input": "#5b6cf0",
-    "Output": "#e0913a",
+    "Input": _INDIGO,
+    "Output": _ORANGE,
     "Cache": "#1aa39a",
 })
 
@@ -104,7 +108,7 @@ TOKEN_TYPE_COLORS: Mapping[str, str] = MappingProxyType({
 # writes to `backend`. `unknown` covers NULL rows from the read model.
 BACKEND_COLORS: Mapping[str, str] = MappingProxyType({
     "claude": ACCENT,
-    "codex": "#e0913a",
+    "codex": _ORANGE,
     "unknown": NEUTRAL,
 })
 
@@ -112,19 +116,19 @@ BACKEND_COLORS: Mapping[str, str] = MappingProxyType({
 # `_run_agent_tracked(agent_role=...)`.
 AGENT_ROLE_COLORS: Mapping[str, str] = MappingProxyType({
     "developer": ACCENT,
-    "reviewer": "#e0913a",
+    "reviewer": _ORANGE,
 })
 
 # Review-round buckets, in the order the chart renders them: the
 # `0` bucket is the initial pass; everything past it is rework.
 REVIEW_ROUND_COLORS: Mapping[str, str] = MappingProxyType({
-    "0": "#5b6cf0",
+    "0": _INDIGO,
     "1": "#e8a13a",
     "2": "#e07a3a",
     "3": "#dd6a3c",
-    "4": "#d9534a",
+    "4": _RED,
     "5": "#c33f37",
-    "3-5": "#d9534a",
+    "3-5": _RED,
     "6+": "#a8201e",
     "unknown": NEUTRAL,
 })
@@ -135,11 +139,11 @@ REVIEW_ROUND_COLORS: Mapping[str, str] = MappingProxyType({
 # rendering the same domain in the same order produce the same colors.
 CATEGORICAL_PALETTE: tuple[str, ...] = (
     ACCENT,
-    "#5b6cf0",
-    "#e0913a",
+    _INDIGO,
+    _ORANGE,
     "#1aa39a",
     "#8b5cf6",
-    "#d9534a",
+    _RED,
     "#d98a3a",
     "#6b7a99",
     "#0ea5e9",
@@ -159,13 +163,13 @@ EVENT_COLORS: Mapping[str, str] = MappingProxyType({
 STAGE_COLORS: Mapping[str, str] = MappingProxyType({
     "decomposing": "#8b5cf6",
     "blocked": NEUTRAL,
-    "ready": "#5b6cf0",
+    "ready": _INDIGO,
     "umbrella": SECONDARY,
-    "implementing": "#5b6cf0",
-    "validating": "#e0913a",
+    "implementing": _INDIGO,
+    "validating": _ORANGE,
     "documenting": "#1aa39a",
     "in_review": "#7c3aed",
-    "fixing": "#d9534a",
+    "fixing": _RED,
     "resolving_conflict": "#d98a3a",
     "question": "#6b7a99",
     "done": SUCCESS,
@@ -661,11 +665,15 @@ PAGE_CSS = f"""
 """
 
 
-def fmt_money(value: float) -> str:
+def _numeric_value(args: tuple[Any, ...], kwargs: dict[str, Any]) -> float:
+    return _VALUE_SIGNATURE.bind(*args, **kwargs).arguments["value"]
+
+
+def fmt_money(*args: Any, **kwargs: Any) -> str:
     """Compact dollar formatter matching the standalone mock (`$1.2K`,
     `$3.4M`). Used by KPIs, axis tick labels, and per-bar value labels.
     """
-    dollars = float(value or 0)
+    dollars = float(_numeric_value(args, kwargs) or 0)
     if dollars >= _MILLION:
         millions = dollars / _MILLION
         return f"${millions:.2f}M"
@@ -677,28 +685,39 @@ def fmt_money(value: float) -> str:
     return f"${dollars:.0f}"
 
 
-def fmt_money_exact(value: float) -> str:
+def fmt_money_exact(*args: Any, **kwargs: Any) -> str:
     """Whole-dollar formatter with thousands separators (`$12,345`)."""
-    return f"${round(float(value or 0)):,}"
+    amount = round(float(_numeric_value(args, kwargs) or 0))
+    return "${0}".format(format(amount, ","))
 
 
-def fmt_tokens(value: float) -> str:
+def fmt_tokens(*args: Any, **kwargs: Any) -> str:
     """Compact token-count formatter (`1.2K`, `3.4M`, `1.2B`)."""
-    tokens = float(value or 0)
+    tokens = float(_numeric_value(args, kwargs) or 0)
     if tokens >= _BILLION:
         decimals = 0 if tokens >= 10 * _BILLION else 2
         billions = tokens / _BILLION
-        return f"{billions:.{decimals}f}B"
+        return "{0}B".format(format(billions, ".{0}f".format(decimals)))
     if tokens >= _MILLION:
         decimals = 0 if tokens >= 10 * _MILLION else 1
         millions = tokens / _MILLION
-        return f"{millions:.{decimals}f}M"
+        return "{0}M".format(format(millions, ".{0}f".format(decimals)))
     if tokens >= 1_000:
         thousands = tokens / 1_000
         return f"{thousands:.0f}K"
     return str(int(round(tokens)))
 
 
-def fmt_num(value: float) -> str:
+def fmt_num(*args: Any, **kwargs: Any) -> str:
     """Integer with thousands separators."""
-    return f"{int(round(float(value or 0))):,}"
+    number = int(round(float(_numeric_value(args, kwargs) or 0)))
+    return format(number, ",")
+
+
+_VALUE_SIGNATURE = Signature(
+    (Parameter("value", Parameter.POSITIONAL_OR_KEYWORD),),
+)
+fmt_money.__signature__ = _VALUE_SIGNATURE
+fmt_money_exact.__signature__ = _VALUE_SIGNATURE
+fmt_tokens.__signature__ = _VALUE_SIGNATURE
+fmt_num.__signature__ = _VALUE_SIGNATURE

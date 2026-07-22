@@ -114,16 +114,14 @@ any time without affecting workflow correctness.
 Project-local JSONL sink for raw metric records, separate from `EVENT_LOG_PATH`. Opts in or out independently via
 `ANALYTICS_LOG_PATH` / `ANALYTICS_RETENTION_DAYS` and the helpers in `orchestrator/analytics/`.
 
-**Module layout.** The event-recording implementation — sink configuration, the JSONL append primitives, and the stage /
-repo-skill / agent-exit recorders — lives in `orchestrator/analytics/_recording.py`; the opt-in trajectory sink's
-serialization, redaction / truncation, budgeting, and append helpers live in the sibling
-`orchestrator/analytics/_trajectories.py` (which reuses `_recording`'s append core and reads its `_live_settings`); the
-by-age retention pruning for both sinks — the JSONL prune, scan models, atomic temp-file rewrite, retention logging, and
-the `prune_old_records` / `prune_trajectory_records` / `prune_with_retention_logging` entry points — lives in the
-sibling `orchestrator/analytics/_retention.py` (which shares `_recording`'s `_FILE_LOCK`, `_trajectories`'
-`_TRAJECTORY_FILE_LOCK`, and both modules' `_live_settings`). `orchestrator/analytics/__init__.py` is a facade that
-re-exports all three surfaces and binds the sink knobs as package attributes. The read / sync submodules (`read`,
-`read_*`, `sync`, `connection`, `query`, `predicates`, `db_url`) are the separate Postgres-facing surfaces.
+**Module layout.** `orchestrator/analytics/__init__.py` is an import-only compatibility facade. Its bootstrap reparses
+the six sink knobs on every package import and assembles fresh recording, trajectory, and retention hubs so references
+held across a package reload keep their historical isolation. `_recording.py`, `_trajectories.py`, and `_retention.py`
+retain the established patch/import surfaces; their implementations are split into focused `_recording_*`,
+`_trajectory_*`, and `_retention_*` leaves for settings, event families, serialization, sanitization, persistence,
+scanning, and atomic rewrites. The read and sync surfaces are separate Postgres-facing families: `analytics.read` is a
+manifest-backed lazy facade, while `sync.py`, `connection.py`, `query.py`, `predicates.py`, and their private leaves own
+typed requests, SQL boundaries, row mapping, ingestion, and connection lifecycle.
 
 **Settings ownership.** `ANALYTICS_LOG_PATH`, `ANALYTICS_RETENTION_DAYS`, and `ANALYTICS_DB_URL` (and the sibling
 trajectory-sink knobs `TRAJECTORY_LOG_PATH` / `TRAJECTORY_RETENTION_DAYS`) are parsed at import by
@@ -619,11 +617,11 @@ dashboard reads the numeric usage / cost rollup from Postgres, while the viewer 
 the file on disk (no database, no `analytics.sync`).
 
 **Read model (`orchestrator/trajectory_reader.py`).** A pure, import-light, Streamlit-free reader (the file-backed
-analogue of `orchestrator/analytics/read.py`). The record and view dataclasses (`TrajectoryRun` and its
-`TrajectoryStepView` / `TimelineEntry` / `TurnUsageView` / `RunUsageView` sub-views), the log-path resolution, and the
-defensive JSONL parsing / reading pipeline live in the private `orchestrator/_trajectory_records.py` leaf and are
-re-exported from `trajectory_reader` under their original names; `trajectory_reader` itself owns the free-text filtering
-and the filter-option / summary aggregation. Together they read `TRAJECTORY_LOG_PATH`, parse each `agent_trajectory`
+analogue of `orchestrator/analytics/read.py`). `_trajectory_records.py` preserves the historical record API while the
+record parser, file reader, run model, timeline/aggregation views, and immutable sub-views live in focused
+`_trajectory_*` leaves. `trajectory_reader` owns the typed filter request, free-text matching, filter-option projection,
+and summary aggregation while re-exporting the original record names. Together they read `TRAJECTORY_LOG_PATH`, parse
+each `agent_trajectory`
 record into a frozen `TrajectoryRun` (with a normalised `TrajectoryStepView` per step), and expose `read_trajectories`
 (newest first by `ts`, file order as the tie-break), `filter_options`, `filter_runs` (repo / backend / agent-role /
 stage / issue / free-text-search, every filter conjunctive and an empty multi-value meaning "no constraint", plus an
@@ -669,12 +667,11 @@ no usage, so the row and strips are absent and it renders exactly as before. The
 in the overview table and the run-level picker (the `[fixture]` prefix rides the run option; and the detail card carries
 a notice) so the operator can tell the inherited test-suite records from real runs even with the toggle off. When the
 sink is off it renders the opt-in banner and stops; an empty file or an empty filter set renders an explanatory notice
-rather than a blank page. The page's pure inline-HTML builders — the topbar, the five-tile KPI strip, the run cards,
-and the per-turn usage strips, each a string builder over plain values or `trajectory_reader` view objects that reuses
-the `dashboard_theme` chrome — live in the Streamlit-free `orchestrator/_trajectory_dashboard_html.py` leaf, so
-`trajectory_dashboard.py` holds the Streamlit `_render_*` calls, the sidebar / run-picker and page-load helpers, the
-page-state dataclasses, and `main()`, but none of the pure HTML string-building; the leaf never imports the page module
-back, keeping the dependency one-directional.
+rather than a blank page. `trajectory_dashboard.py` is now a lazy compatibility facade and direct-launch entrypoint.
+Its bootstrap, page state, filters, picker, selected-run rendering, and runtime orchestration live in focused
+`_trajectory_dashboard_*` leaves. The historical `_trajectory_dashboard_html.py` surface composes Streamlit-free
+summary, run, timeline, usage, and CSS leaves, so every established HTML helper and patch point keeps its original
+identity without pulling Streamlit into imports.
 
 ## Analytics database (`analytics-db/`)
 
@@ -795,11 +792,11 @@ JSONL file is absent. The CLI is safe to schedule before the operator deploys Po
 the import is lazy inside the connect helper so the module load path remains driver-free for callers that only need
 `SyncResult`.
 
-**Row mapping.** The pure record → DB-row mapping — the promoted-column / JSONB / required-key schema, the
-canonical-JSON `content_hash` dedup key, and the per-record validation that promotes known columns, routes the rest to
-`extras`, and turns a validated record into the positional INSERT tuple — lives in the driver-free (stdlib + typing, no
-psycopg) `orchestrator/analytics/_sync_rows.py` leaf; `sync.py` owns the connection lifecycle, batching, rollup refresh,
-and CLI and imports the mapping layer one-directionally.
+**Row mapping.** The driver-free `_sync_rows.py` compatibility hub preserves the historical mapping objects. Their
+implementations are split by boundary: `_sync_row_schema.py` owns promoted / JSONB / required columns,
+`_sync_row_parse.py` owns canonical JSON and `content_hash`, and `_sync_row_mapping.py` validates records, routes
+extras, and constructs INSERT rows. `sync.py` remains the stable CLI surface over focused ingestion, database,
+redaction, and run leaves; psycopg stays out of the pure row modules.
 
 ### Operator feedback
 
@@ -848,20 +845,17 @@ Thin, testable data-access layer over `analytics_events`, the `analytics_agent_r
 drill-downs and widgets the rollup cannot reconstruct exactly stay on the base table or the agent-run view. The module
 is Streamlit-free so the read path can be wired into any UI.
 
-`read.py` is the public facade: it owns no query helpers of its own and re-exports everything below so the
-`orchestrator.analytics.read` import surface every caller already depends on is unchanged. The reader functions are
-split across three focused sibling modules by data source / shape — `read_raw.py` (foundational readers over
-`analytics_events` / the agent-run view: `get_filter_options`, `get_data_extent`, `get_event_breakdown`,
-`get_recent_agent_exits`, `get_issues`, `get_issue_events`), `read_rollup.py` (the `analytics_daily_rollup`-backed
-aggregates: `get_summary`, `get_kpi_prev`, `get_time_series`, `get_stage_breakdown`, `get_backend_efficiency`,
-`get_repo_breakdown`, `get_throughput_breakdown`), and `read_dashboard.py` (the redesigned-dashboard chart breakdowns
-the rollup cannot reconstruct: `get_review_round_breakdown`, `get_skill_trigger_rates`, `get_skill_trigger_matrix`,
-`get_skill_adoption`, `get_cost_coverage`, `get_backend_daily_tokens`, `get_hourly_heatmap`). The supporting plumbing is
-split into further
-sibling modules — `read_models.py` (the frozen read-model dataclasses), `connection.py` (`AnalyticsReadError`, the
-deferred-psycopg connect factories, and the thread-local connection cache behind `analytics_connection` /
-`close_thread_local_connection`), `db_url.py` (`_resolve_db_url`), `query.py` (`_query`), and `predicates.py` (the
-window / filter `WHERE`-clause builders).
+`read.py` is a manifest-backed lazy facade with a complete `read.pyi`; it owns no query helpers and preserves the exact
+historical object identity, wildcard surface, and `from` imports. `read_raw.py`, `read_rollup.py`, and
+`read_dashboard.py` remain stable family hubs, backed by focused `_read_*` leaves for issue/event reads, summary and
+rollup series, cost/breakdown queries, skill views, and typed query-row conversion. Frozen result models are grouped in
+the `read_models_*` modules and re-exported through `read_models.py`.
+
+The shared call boundary is a `ReadRequest` composed of `ReadFilters`, `ReadConnection`, and `ReadOptions`.
+`read_request.py` binds every historical keyword signature into that typed request before the family leaf executes, so
+existing calls and error behavior are unchanged while implementation helpers no longer thread large argument lists.
+`connection.py`, `db_url.py`, `query.py`, and `predicates.py` remain the stable plumbing hubs over focused connection,
+query, and predicate leaves.
 
 - `get_summary` (rollup) — date-bounded totals + per-event / per-stage breakdowns + token / cost sums, plus
   `total_agent_runs` / `failed_agent_runs` / `timed_out_agent_runs` scoped to `event='agent_exit'`. `distinct_issues` is
@@ -996,52 +990,18 @@ or non-dashboard caller does not require the group to be installed. A regression
 asserts that loading `orchestrator.dashboard` keeps `streamlit`, `pandas`, `plotly`, and `orchestrator.dashboard_charts`
 out of `sys.modules`.
 
-**Module layout.** `orchestrator/dashboard.py` keeps page startup, the sidebar / date-range controls, and the
-compatibility re-exports — `main()` is a thin orchestrator that delegates the static-metadata read
-(`_read_static_metadata`) and, once the controls resolve the filters and staged read plan (`_prepare_dashboard_page`),
-hands the page to `orchestrator/dashboard_widgets.py` for the two-wave render. The widget-rendering pipeline — the
-two-wave data load (`_load_dashboard_data` → `_run_read_waves`, which owns the staged
-`_dispatch_reads` fan-out, the between-wave short-circuit, and the `_log_dashboard_load` timing line), the empty /
-no-data states (`_render_no_data`, `_render_empty_window`), every filter / widget section (the `_render_*` helpers) plus
-the per-issue drill-down renderer, and the immutable page-state dataclasses the pipeline threads — live in
-`orchestrator/dashboard_widgets.py`, which builds the KPI strip by handing a `_KpiInputs` to the
-`orchestrator/dashboard_kpi_strip.py` aggregations through the facade. The historical `orchestrator.dashboard.*`
-entry points that `dashboard_state` / `dashboard_kpis` / `dashboard_html` / `dashboard_cards` / `dashboard_kpi_strip` /
-`dashboard_reads` own are each re-exported through the facade under their original names; from
-`dashboard_skill_adoption` and `dashboard_skill_matrix` only their two public entry points each
-(`_skill_adoption_html` / `parse_skill_adoption_sort` and `_skill_matrix_html` / `parse_skill_matrix_sort`) are
-re-exported, their internal sort / header / row helpers staying private. The `dashboard_widgets` widget / page-state
-members and the `dashboard_kpi_strip`
-KPI-strip entry points (`_KpiInputs` / `_build_kpi_strip_data`) the pipeline and the dashboard tests reach through
-`dashboard.<name>` are re-exported (and listed in
-`__all__`) too, while the leaf-private internal helpers stay private to their modules — the `dashboard_cards`
-`_safe_ratio` / `_backend_efficiency_metrics` math, the `dashboard_kpi_strip` `_kpi_totals` aggregations, the
-`dashboard_html` sparkline / table internals, and the `dashboard_widgets` token / layout math helpers. So
-`streamlit run orchestrator/dashboard.py` and the historical `orchestrator.dashboard.*` import surface (and its test
-patch points) are unchanged.
+**Module layout.** `orchestrator/dashboard.py` is a manifest-backed lazy compatibility facade with a complete
+`dashboard.pyi`. `_dashboard_facade_bootstrap.py` owns both package import and direct-script setup, while
+`_dashboard_runtime.py`, `_dashboard_page_controls.py`, and the date/drill-down leaves own page orchestration.
+Historical `dashboard.<name>` imports, wildcard exports, object identity, and test patch points are unchanged.
 The repo-root `sys.path` shim that lets `streamlit run` resolve the absolute `orchestrator.*` imports is factored
 into the shared import-light `orchestrator/script_launch.py` helper (`ensure_repo_root_on_path`), which
 `orchestrator/trajectory_dashboard.py` also calls.
-The extracted helpers live in nine import-light modules (stdlib plus `orchestrator.analytics`, so they hold
-the lazy-import invariant): `orchestrator/dashboard_state.py` (date / window math, preset and timezone vocabulary,
-stage-filter / cache-key resolution, the issue-number parser, the DB-config banner check, and the read fan-out switch),
-`orchestrator/dashboard_kpis.py` (KPI delta math, the computed insight banners, the reliability-tile triples, the
-top-cost issue ordering, and the rework-share aggregation), `orchestrator/dashboard_html.py` (the topbar / filter-meta /
-KPI-strip / sparkline / issues- and skill-trigger-table inline-HTML builders below),
-`orchestrator/dashboard_cards.py` (the insight / backend-efficiency / cost-coverage / reliability-tile inline-HTML card
-family), `orchestrator/dashboard_kpi_strip.py` (the KPI-strip aggregations: the token / throughput / rework helpers that
-feed the four KPI tiles), `orchestrator/dashboard_skill_adoption.py` (the primary per-session skill-adoption matrix: its
-`adopt_sort` / `adopt_dir` sort-param parser and the sortable inline-HTML table),
-`orchestrator/dashboard_skill_matrix.py` (the invocation-level per-skill trigger matrix: its `mtx_sort` /
-`mtx_dir` sort-param parser and the sortable inline-HTML table), `orchestrator/dashboard_reads.py` (the read
-orchestration: the filter-to-query adapters, the cached data-extent / filter-option and per-filter widget readers, the
-two-wave reader registries, the staged parallel dispatch, the static-metadata load, the two-wave data load, and the
-load-timing log — where the cache keys / TTLs, read
-ordering, parallel-read toggle, and one-banner-and-stop read-error behavior live), and
-`orchestrator/dashboard_widgets.py` (the widget-rendering pipeline: the two-wave render
-passes, the empty / no-data states, the per-issue drill-down renderer, the page footer, and the page-state dataclasses).
-Streamlit is never imported in any of them — `st` (with the chart / theme / pandas handles) is always passed in as a
-parameter.
+The stable `dashboard_*.py` component hubs delegate to focused `_dashboard_*` leaves grouped by responsibility:
+window/filter state; raw, rollup, skill, and dispatched reads; KPI series/values; cards, tables, sparklines, and skill
+matrices; widget state/usage/cost/skill/run sections; and cost/usage Plotly construction. Compatibility metadata keeps
+the established defining-module assertions intact. Streamlit is never imported in these helpers — `st` (with chart,
+theme, and pandas handles) is passed in as a parameter.
 
 ```sh
 uv sync --group dashboard                                  # install streamlit + plotly alongside the runtime + dev deps
@@ -1054,10 +1014,11 @@ extent's max timestamp and clamped to its min) plus two date inputs for arbitrar
 surfaces a `Custom` preset fallback, a repo selector, event / stage multi-selects, and a `#123` / `123` issue-number
 input.
 
-**Caching.** Every per-filter read is wrapped in `st.cache_data` keyed by `(start, end, repo, events, stages, issue)`,
-so a filter change invalidates every cached query in lockstep. `get_data_extent` and `get_filter_options` carry no
-filter inputs and live in argument-less wrappers under the longer `STATIC_METADATA_TTL_SECONDS = 300` (5 min) TTL so the
-sidebar / topbar only re-hit Postgres when `analytics.sync` ingests new events.
+**Caching.** Every per-filter read is wrapped in `st.cache_data` keyed by the immutable `DashboardCacheKey(start, end,
+repo, events, stages, issue)`, so a filter change invalidates every cached query in lockstep. `get_data_extent` and
+`get_filter_options` carry no filter inputs and live in argument-less wrappers under the longer
+`STATIC_METADATA_TTL_SECONDS = 300` (5 min) TTL so the sidebar / topbar only re-hit Postgres when `analytics.sync`
+ingests new events.
 
 **Two-wave loading.** The 16 widget reads are staged into two waves:
 
@@ -1238,16 +1199,12 @@ backend, distinct model(s), turn count, input / output / cached / cache-read / c
 a `cost_source` tag of `reported` / `estimated` / `unknown-price` / `no-usage`. No external dependency: the parser is
 jq-free.
 
-**Module layout.** The usage-metric parsing — the `UsageMetrics` dataclass and the claude / codex token, model, turn,
-pricing, and cost parsing reached through `parse_agent_usage` (`parse_claude_usage` / `parse_codex_usage`) — lives in
-the private `orchestrator/_usage_metrics.py`; the skill-trigger parsing — the `SkillTriggers` dataclass and the
-`parse_claude_skills` / `parse_codex_skills` / `parse_agent_skills` trio — lives in the private
-`orchestrator/_usage_skills.py`; and the trajectory parsing — the `TrajectoryStep` / `TurnUsage` / `AgentTrajectory`
-dataclasses and the `parse_claude_trajectory` / `parse_codex_trajectory` / `parse_agent_trajectory` classifier — lives
-in the private `orchestrator/_usage_trajectory.py`. `orchestrator.usage` re-exports exactly those three public surfaces
-so it stays the stable import site for callers (`agents`, `workflow`, `analytics`). The trajectory classifier reuses the
-metric module's shared event iterator, token decoders, and price path and the skill module's offered-set init-frame
-helpers, so the resilience contract and cost precedence stay defined once.
+**Module layout.** `_usage_metrics.py`, `_usage_skills.py`, and `_usage_trajectory.py` remain the stable model/parser
+hubs re-exported by `orchestrator.usage`. Provider payload handling is split behind them: the shared event stream,
+protocol keys, model paths, and price tables have focused leaves; Claude and Codex usage rows/summaries and skill
+evidence have provider-specific leaves; and trajectory models, Claude blocks/turns, and Codex reconstruction are
+separate. The trajectory classifier still reuses the same event decoder, pricing path, and skill evidence owners, so
+the resilience and cost-precedence contracts remain defined once.
 
 **Two parsers, one dispatcher.** `parse_claude_usage(stdout)` consumes claude `--output-format stream-json` events,
 groups assistant frames by `message.id` so the final-frame usage wins (claude streams partial counts on intermediate

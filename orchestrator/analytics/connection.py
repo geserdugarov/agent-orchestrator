@@ -11,6 +11,7 @@ connection cache behind `analytics_connection` /
 time so the module load path stays driver-free and tests can inject a
 fake `connect(db_url)` factory.
 """
+
 from __future__ import annotations
 
 import logging
@@ -18,9 +19,16 @@ import threading
 from contextlib import contextmanager
 from typing import Any, Callable, Iterator, Optional
 
+from orchestrator.analytics._connection_cache import (
+    _cached_entry as _cached_entry,
+    _connection_for_url as _connection_for_url,
+    _discard_broken_connection as _discard_broken_connection,
+    _open_cached_connection as _open_cached_connection,
+)
 from orchestrator.analytics.db_url import _resolve_db_url
 
 log = logging.getLogger(__name__)
+_COMPATIBILITY_EXPORTS = (_cached_entry, _open_cached_connection)
 
 
 class AnalyticsReadError(RuntimeError):
@@ -45,15 +53,12 @@ def _default_connect(db_url: str) -> Any:
         import psycopg
     except ImportError as error:
         raise AnalyticsReadError(
-            "psycopg is required for analytics.read; "
-            "run `uv sync --locked` to install it"
+            "psycopg is required for analytics.read; run `uv sync --locked` to install it"
         ) from error
     try:
         return psycopg.connect(db_url)
     except Exception as error:
-        raise AnalyticsReadError(
-            f"could not connect to analytics database: {error}"
-        ) from error
+        raise AnalyticsReadError(f"could not connect to analytics database: {error}") from error
 
 
 def _default_persistent_connect(db_url: str) -> Any:
@@ -75,15 +80,12 @@ def _default_persistent_connect(db_url: str) -> Any:
         import psycopg
     except ImportError as error:
         raise AnalyticsReadError(
-            "psycopg is required for analytics.read; "
-            "run `uv sync --locked` to install it"
+            "psycopg is required for analytics.read; run `uv sync --locked` to install it"
         ) from error
     try:
         return psycopg.connect(db_url, autocommit=True)
     except Exception as error:
-        raise AnalyticsReadError(
-            f"could not connect to analytics database: {error}"
-        ) from error
+        raise AnalyticsReadError(f"could not connect to analytics database: {error}") from error
 
 
 _thread_local = threading.local()
@@ -113,9 +115,7 @@ def _is_broken_connection_exc(exc: BaseException) -> bool:
         import psycopg
     except ImportError:
         return False
-    return isinstance(
-        cause, (psycopg.OperationalError, psycopg.InterfaceError)
-    )
+    return isinstance(cause, (psycopg.OperationalError, psycopg.InterfaceError))
 
 
 def _close_quietly(conn: Any) -> None:
@@ -123,57 +123,6 @@ def _close_quietly(conn: Any) -> None:
         conn.close()
     except Exception:
         log.exception("analytics.read: connection close failed")
-
-
-def _cached_entry(url: str) -> Optional[tuple[str, Any]]:
-    """Return this thread's matching cache entry, closing a stale one."""
-    entry = getattr(_thread_local, "entry", None)
-    if entry is None:
-        return None
-    cached_url, cached_conn = entry
-    if cached_url == url:
-        return entry
-    _thread_local.entry = None
-    _close_quietly(cached_conn)
-    return None
-
-
-def _open_cached_connection(
-    url: str,
-    connect_fn: Callable[[str], Any],
-) -> Any:
-    """Open and cache one persistent connection with normalized errors."""
-    try:
-        conn = connect_fn(url)
-    except AnalyticsReadError:
-        raise
-    except Exception as error:
-        raise AnalyticsReadError(
-            f"could not connect to analytics database: {error}"
-        ) from error
-    _thread_local.entry = (url, conn)
-    return conn
-
-
-def _connection_for_url(
-    url: str,
-    connect_fn: Callable[[str], Any],
-) -> Any:
-    entry = _cached_entry(url)
-    if entry is None:
-        return _open_cached_connection(url, connect_fn)
-    return entry[1]
-
-
-def _discard_broken_connection(exc: BaseException) -> None:
-    """Evict this thread's cached socket when the escaped error broke it."""
-    if not _is_broken_connection_exc(exc):
-        return
-    entry = getattr(_thread_local, "entry", None)
-    if entry is None:
-        return
-    _thread_local.entry = None
-    _close_quietly(entry[1])
 
 
 @contextmanager

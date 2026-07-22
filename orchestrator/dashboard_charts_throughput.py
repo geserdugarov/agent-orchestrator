@@ -27,6 +27,9 @@ from orchestrator.analytics.read import ThroughputDayRow
 from orchestrator.dashboard_charts_base import _empty_figure
 
 
+_THROUGHPUT_CHART_HEIGHT = 150
+
+
 @dataclass(frozen=True)
 class _ThroughputSeries:
     days: Sequence[date]
@@ -82,7 +85,8 @@ def done_per_day_bars(
     series = _throughput_series(rows, window_start, window_end)
     if not series.days:
         return _empty_figure(
-            "No resolved issues in the current window.", height=150,
+            "No resolved issues in the current window.",
+            height=_THROUGHPUT_CHART_HEIGHT,
         )
     fig = go.Figure(
         go.Bar(
@@ -102,6 +106,6 @@ def done_per_day_bars(
     # The throughput strip sits in the narrow reliability column;
     # at the 450px Plotly default it would dwarf the tiles above.
     # 150px matches the standalone mock's thin per-day strip.
-    layout["height"] = 150
+    layout["height"] = _THROUGHPUT_CHART_HEIGHT
     fig.update_layout(**layout)
     return fig

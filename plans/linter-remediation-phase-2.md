@@ -147,7 +147,7 @@ direct-launch command remain covered by tests.
 
 | Stage | Goal | Findings owned | Packages complete | Status |
 |---|---|---:|---:|---:|
-| 1 | Production cleanup | 223 | 2/3 | [ ] |
+| 1 | Production cleanup | 223 | 3/3 | [x] |
 | 2 | Test cleanup | 1,350 | 0/7 | [ ] |
 | 3 | Final zero-finding validation | 0 | 0/1 | [ ] |
 
@@ -214,23 +214,23 @@ Baseline: `WPS110` 16, `WPS111` 2, `WPS114` 4, `WPS201` 4, `WPS202` 29, `WPS203`
 `WPS214` 1, `WPS226` 11, `WPS227` 1, `WPS237` 6, `WPS358` 30, `WPS402` 1, `WPS410` 3, `WPS412` 1,
 `WPS432` 11, and `WPS459` 1.
 
-- [ ] Split analytics reads by query/result family, recording by event family, usage by provider payload, and dashboard
+- [x] Split analytics reads by query/result family, recording by event family, usage by provider payload, and dashboard
   rendering by component so every implementation module satisfies import/member limits.
-- [ ] Convert `analytics`, `analytics.read`, and `dashboard` to compatibility export hooks with complete `.pyi` and
+- [x] Convert `analytics`, `analytics.read`, and `dashboard` to compatibility export hooks with complete `.pyi` and
   runtime surface tests.
-- [ ] Separate the Streamlit direct-launch bootstrap and remove all E402 `noqa` annotations.
-- [ ] Introduce typed filter/request objects for the 21 argument-heavy analytics and dashboard readers/helpers while
+- [x] Separate the Streamlit direct-launch bootstrap and remove all E402 `noqa` annotations.
+- [x] Introduce typed filter/request objects for the 21 argument-heavy analytics and dashboard readers/helpers while
   preserving legacy keyword calls.
-- [ ] Move trajectory views and analytics result models to domain-specific internal field names with compatible public
+- [x] Move trajectory views and analytics result models to domain-specific internal field names with compatible public
   properties/serialization.
-- [ ] Replace the dashboard numeric preset identifiers with descriptive names and compatibility aliases.
-- [ ] Replace positional row access with typed query-boundary rows and replace the dashboard cache tuple with a named
+- [x] Replace the dashboard numeric preset identifiers with descriptive names and compatibility aliases.
+- [x] Replace positional row access with typed query-boundary rows and replace the dashboard cache tuple with a named
   hashable key object.
-- [ ] Consolidate Plotly keys, modes, palette hues, and numeric rendering into typed constructors and focused
+- [x] Consolidate Plotly keys, modes, palette hues, and numeric rendering into typed constructors and focused
   formatters.
-- [ ] Replace all float-zero literals and the direct axis-step float comparison without changing numeric output.
-- [ ] Split the method-heavy trajectory model by view/aggregation responsibility.
-- [ ] Run analytics/dashboard/usage/trajectory tests and reduce this package's 147 findings to zero.
+- [x] Replace all float-zero literals and the direct axis-step float comparison without changing numeric output.
+- [x] Split the method-heavy trajectory model by view/aggregation responsibility.
+- [x] Run analytics/dashboard/usage/trajectory tests and reduce this package's 147 findings to zero.
 
 Completion gate: database rows, JSON/events, pricing, charts, HTML, direct launch, cache behavior, and all historical
 facade names remain compatible; all 35 scoped files and their new leaves scan clean.

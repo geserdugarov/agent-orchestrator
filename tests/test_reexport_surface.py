@@ -11,18 +11,23 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from orchestrator import dashboard, workflow, worktrees
+from orchestrator import analytics, dashboard, workflow, worktrees
+from orchestrator import _dashboard_export_manifest
 from orchestrator import _workflow_export_manifest
 from orchestrator import _worktrees_export_manifest
 from orchestrator.analytics import read as analytics_read
+from orchestrator.analytics import _read_export_manifest
 
 
-_FACADES = (workflow, worktrees, analytics_read, dashboard)
-_STATIC_FACADES = (analytics_read, dashboard)
-_PURE_STATIC_HUBS = (analytics_read,)
+_FACADES = (analytics, workflow, worktrees, analytics_read, dashboard)
+_STUBBED_FACADES = (analytics, analytics_read, dashboard)
+_STATIC_FACADES = ()
+_PURE_STATIC_HUBS = ()
 _LAZY_FACADES = (
     (workflow, _workflow_export_manifest),
     (worktrees, _worktrees_export_manifest),
+    (analytics_read, _read_export_manifest),
+    (dashboard, _dashboard_export_manifest),
 )
 
 
@@ -63,11 +68,21 @@ def _target_value(target):
     return getattr(implementation, target.target_name)
 
 
+def _stub_names(module) -> set[str]:
+    stub_path = Path(module.__file__).with_suffix(".pyi")
+    tree = ast.parse(stub_path.read_text(encoding="utf-8"))
+    return {
+        node.target.id
+        for node in tree.body
+        if isinstance(node, ast.AnnAssign)
+        and isinstance(node.target, ast.Name)
+    }
+
+
 class ReexportInventoryTest(unittest.TestCase):
-    # The pure hubs re-export everything they expose, so `__all__` must equal
-    # the re-export set exactly. `workflow` and `dashboard` also define their
-    # own API (the dispatcher / the page entrypoint), so the re-export set is
-    # only required to be a subset of their inventory.
+    # Static pure hubs re-export everything they expose, so `__all__` must
+    # equal the re-export set exactly. Lazy facades are checked against their
+    # immutable manifests below.
     def test_all_is_sorted_and_unique(self) -> None:
         for module in _FACADES:
             with self.subTest(module=module.__name__):
@@ -90,6 +105,13 @@ class ReexportInventoryTest(unittest.TestCase):
                         f"{module.__name__}.__all__ lists {name!r} "
                         "but the module has no such attribute",
                     )
+
+    def test_lazy_facade_stubs_match_runtime_inventory(self) -> None:
+        for module in _STUBBED_FACADES:
+            with self.subTest(module=module.__name__):
+                stub_names = _stub_names(module)
+                stub_names.discard("__all__")
+                self.assertEqual(stub_names, set(module.__all__))
 
     def test_reexports_are_inventoried(self) -> None:
         for module in _STATIC_FACADES:
@@ -122,6 +144,7 @@ class ReexportInventoryTest(unittest.TestCase):
         for module, manifest in _LAZY_FACADES:
             for name, target in _lazy_targets(manifest).items():
                 with self.subTest(module=module.__name__, name=name):
+                    module.__dict__.pop(name, None)
                     expected = _target_value(target)
                     self.assertIs(getattr(module, name), expected)
                     imported = __import__(module.__name__, fromlist=(name,))
