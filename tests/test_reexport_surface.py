@@ -1,26 +1,29 @@
 # Copyright 2026 Geser Dugarov
 # SPDX-License-Identifier: Apache-2.0
-"""The compatibility facades (`workflow`, `worktrees`, `analytics.read`,
-`dashboard`) each carry an explicit `__all__` inventory of the surface they
-re-export. These tests keep that inventory honest so the re-export blocks stay
-auditable: every listed name must resolve, the list must be sorted and
-duplicate-free, and -- for the pure re-export hubs -- it must match the set of
-names actually imported under the `X as X` re-export marker, so a helper added
-to (or dropped from) the import block cannot silently drift out of `__all__`.
-"""
+"""Compatibility-facade inventories, imports, identity, and patch routing."""
 from __future__ import annotations
 
 import ast
+import importlib
 import unittest
 from itertools import chain
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 from orchestrator import dashboard, workflow, worktrees
+from orchestrator import _workflow_export_manifest
+from orchestrator import _worktrees_export_manifest
 from orchestrator.analytics import read as analytics_read
 
 
 _FACADES = (workflow, worktrees, analytics_read, dashboard)
-_PURE_HUBS = (worktrees, analytics_read)
+_STATIC_FACADES = (analytics_read, dashboard)
+_PURE_STATIC_HUBS = (analytics_read,)
+_LAZY_FACADES = (
+    (workflow, _workflow_export_manifest),
+    (worktrees, _worktrees_export_manifest),
+)
 
 
 def _intentional_reexports(node: ast.AST) -> tuple[str, ...]:
@@ -43,6 +46,21 @@ def _reexport_names(module) -> set[str]:
     """
     tree = ast.parse(Path(module.__file__).read_text(encoding="utf-8"))
     return set(chain.from_iterable(map(_intentional_reexports, ast.walk(tree))))
+
+
+def _lazy_targets(manifest) -> dict[str, object]:
+    """Return the unique historical-name mapping declared by a manifest."""
+    targets = {target.export_name: target for target in manifest.EXPORTS}
+    if len(targets) != len(manifest.EXPORTS):
+        raise AssertionError("lazy export manifest contains duplicate names")
+    return targets
+
+
+def _target_value(target):
+    implementation = importlib.import_module(target.module_name)
+    if target.target_name is None:
+        return implementation
+    return getattr(implementation, target.target_name)
 
 
 class ReexportInventoryTest(unittest.TestCase):
@@ -74,7 +92,7 @@ class ReexportInventoryTest(unittest.TestCase):
                     )
 
     def test_reexports_are_inventoried(self) -> None:
-        for module in _FACADES:
+        for module in _STATIC_FACADES:
             with self.subTest(module=module.__name__):
                 reexports = _reexport_names(module)
                 listed = set(module.__all__)
@@ -84,7 +102,7 @@ class ReexportInventoryTest(unittest.TestCase):
                     f"{module.__name__} re-exports {sorted(missing)} but they "
                     "are absent from __all__",
                 )
-                if module in _PURE_HUBS:
+                if module in _PURE_STATIC_HUBS:
                     # A pure hub exposes only what it re-exports, so extras in
                     # __all__ would be dead entries.
                     self.assertEqual(
@@ -92,6 +110,40 @@ class ReexportInventoryTest(unittest.TestCase):
                         f"{module.__name__}.__all__ diverges from its "
                         f"re-export block: extra={sorted(listed - reexports)}",
                     )
+
+    def test_lazy_facade_manifests_cover_star_exports(self) -> None:
+        for module, manifest in _LAZY_FACADES:
+            with self.subTest(module=module.__name__):
+                targets = _lazy_targets(manifest)
+                self.assertEqual(module.__all__, manifest.EXPORTED_NAMES)
+                self.assertEqual(set(module.__all__) - set(targets), set())
+
+    def test_lazy_facade_targets_preserve_identity_and_from_import(self) -> None:
+        for module, manifest in _LAZY_FACADES:
+            for name, target in _lazy_targets(manifest).items():
+                with self.subTest(module=module.__name__, name=name):
+                    expected = _target_value(target)
+                    self.assertIs(getattr(module, name), expected)
+                    imported = __import__(module.__name__, fromlist=(name,))
+                    self.assertIs(getattr(imported, name), expected)
+
+    def test_lazy_facade_wildcard_import_matches_inventory(self) -> None:
+        for module, _manifest in _LAZY_FACADES:
+            with self.subTest(module=module.__name__):
+                namespace: dict[str, object] = {}
+                exec(f"from {module.__name__} import *", namespace)
+                namespace.pop("__builtins__", None)
+                self.assertEqual(set(namespace), set(module.__all__))
+                for name, value in namespace.items():
+                    self.assertIs(value, getattr(module, name))
+
+    def test_workflow_handler_patches_remain_late_bound(self) -> None:
+        issue = SimpleNamespace(number=17)
+        spec = SimpleNamespace(slug="owner/repo")
+        handler = Mock()
+        with patch.object(workflow, "_handle_ready", handler):
+            workflow._route_issue_to_handler(None, spec, issue, "ready")
+        handler.assert_called_once_with(None, spec, issue)
 
 
 if __name__ == "__main__":
