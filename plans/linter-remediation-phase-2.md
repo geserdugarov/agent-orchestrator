@@ -147,7 +147,7 @@ direct-launch command remain covered by tests.
 
 | Stage | Goal | Findings owned | Packages complete | Status |
 |---|---|---:|---:|---:|
-| 1 | Production cleanup | 223 | 0/3 | [ ] |
+| 1 | Production cleanup | 223 | 1/3 | [ ] |
 | 2 | Test cleanup | 1,350 | 0/7 | [ ] |
 | 3 | Final zero-finding validation | 0 | 0/1 | [ ] |
 
@@ -165,16 +165,16 @@ Scope: `orchestrator/__init__.py`, `_repo_config.py`, `agents.py`, `config.py`, 
 Baseline: `WPS110` 2, `WPS201` 3, `WPS202` 7, `WPS211` 1, `WPS214` 2, `WPS410` 1, `WPS412` 1, `WPS501` 1,
 and `WPS602` 4.
 
-- [ ] Move root-package initialization and version exposure behind the compatibility export hook.
-- [ ] Split the seven oversized implementation modules into configuration parsing, process lifecycle, GitHub query,
+- [x] Move root-package initialization and version exposure behind the compatibility export hook.
+- [x] Split the seven oversized implementation modules into configuration parsing, process lifecycle, GitHub query,
   scheduler state, and state-coercion leaves that each satisfy module limits.
-- [ ] Replace `IssueScheduler.submit`'s scheduling controls with a typed submission request plus a legacy keyword
+- [x] Replace `IssueScheduler.submit`'s scheduling controls with a typed submission request plus a legacy keyword
   adapter.
-- [ ] Move GitHub stateless helpers to module functions while preserving class-level access.
-- [ ] Separate coordinating methods from the method-heavy scheduler and GitHub client classes.
-- [ ] Rename the two remaining generic public inputs through compatibility adapters.
-- [ ] Move forced-exit cleanup into an explicit shutdown context.
-- [ ] Run the focused agent/config/GitHub/main/scheduler/state tests and reduce this package's 22 findings to zero.
+- [x] Move GitHub stateless helpers to module functions while preserving class-level access.
+- [x] Separate coordinating methods from the method-heavy scheduler and GitHub client classes.
+- [x] Rename the two remaining generic public inputs through compatibility adapters.
+- [x] Move forced-exit cleanup into an explicit shutdown context.
+- [x] Run the focused agent/config/GitHub/main/scheduler/state tests and reduce this package's 22 findings to zero.
 
 Completion gate: all nine scoped files and every new leaf scan clean; public package/version, scheduler, and GitHub
 compatibility tests pass.
