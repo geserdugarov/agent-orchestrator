@@ -1,41 +1,30 @@
 # Copyright 2026 Geser Dugarov
 # SPDX-License-Identifier: Apache-2.0
-"""Dashboard-facing aggregate readers the daily rollup cannot reconstruct.
+"""Dashboard analytics readers backed by focused query families."""
 
-The chart-shaped breakdowns the redesigned dashboard renders that
-read `analytics_events` / `analytics_agent_runs` directly because
-they need row-level detail or columns the daily rollup does not
-carry: per-review-round development/review buckets (raw
-`review_round`), per-`(agent_role, backend)` skill-trigger rates and
-the per-skill `(repo, agent_role, backend)` trigger matrix (both off
-the `extras` JSONB the rollup omits, the matrix folding in the
-`repo_skill_catalog` records too), per-skill adoption aggregated by
-logical agent session (`get_skill_adoption`, a two-scan combine over
-the same `extras` skill fields), per-`cost_source` coverage,
-per-`(day, backend)` token totals, and the weekday x hour activity
-heatmap (hour-of-day precision the day-keyed rollup loses).
-
-Re-exported unchanged through `orchestrator.analytics.read`; see
-that module's docstring for the connection / URL / error contract
-and the agent-run event-filter short-circuit these helpers share.
-Raw-table overview readers live in `read_raw`; the rollup-backed
-aggregates in `read_rollup`.
-"""
 from __future__ import annotations
 
-import json
-from dataclasses import dataclass, field
-from datetime import datetime
-from typing import Any, Callable, Optional, Sequence
+from typing import Any
 
-from orchestrator.analytics.predicates import (
-    _WindowFilters,
-    _agent_event_excluded,
-    _append_where_condition,
-    _build_view_window_where,
-    _build_window_where,
+from orchestrator.analytics._read_dashboard_breakdowns import (
+    _backend_daily_token_rows,
+    _cost_coverage_rows,
+    _hourly_heatmap_rows,
 )
-from orchestrator.analytics.query import _ReadQuery
+from orchestrator.analytics._read_review_rounds import _review_round_rows
+from orchestrator.analytics._read_row_values import _cost_cell as _cost_cell
+from orchestrator.analytics._read_skill_adoption import (
+    SKILL_ADOPTION_ROW_LIMIT as SKILL_ADOPTION_ROW_LIMIT,
+    _skill_adoption_rows,
+)
+from orchestrator.analytics._read_skill_matrix import (
+    SKILL_MATRIX_ROW_LIMIT as SKILL_MATRIX_ROW_LIMIT,
+    _skill_trigger_matrix_rows,
+)
+from orchestrator.analytics._read_skill_trigger_rates import (
+    _skill_trigger_rate_rows,
+)
+from orchestrator.analytics.predicates import _agent_event_excluded
 from orchestrator.analytics.read_models import (
     BackendDailyTokensRow,
     CostCoverageRow,
@@ -45,1051 +34,166 @@ from orchestrator.analytics.read_models import (
     SkillTriggerMatrixRow,
     SkillTriggerRateRow,
 )
-
-_AGENT_EXIT_CONDITION = "event = 'agent_exit'"
-
-
-def _as_skill_names(raw: Any) -> list[str]:
-    """Coerce a JSONB skill-name array column into a list of strings.
-
-    psycopg adapts a `jsonb` array to a Python list, so the common path
-    is a passthrough; a driver / fixture that hands back the raw JSON
-    text is tolerated too. ``None`` (the absent-key result of
-    ``extras -> 'skills_...'``), a non-list payload, or a non-string
-    element collapses to an empty list / is skipped so a malformed
-    `extras` blob never raises mid-read.
-    """
-    if raw is None:
-        return []
-    if isinstance(raw, str):
-        try:
-            raw = json.loads(raw)
-        except (ValueError, TypeError):
-            return []
-    if not isinstance(raw, (list, tuple)):
-        return []
-    return [name for name in raw if isinstance(name, str)]
-
-
-def _label_or_unknown(raw: Any) -> str:
-    if raw is None:
-        return "unknown"
-    return str(raw)
-
-
-def _row_label(row: Sequence[Any], index: int) -> str:
-    if len(row) <= index:
-        return "unknown"
-    return _label_or_unknown(row[index])
-
-
-def _skill_matrix_order_key(
-    key: tuple[str, str, str, str],
-    *,
-    counts: dict[tuple[str, str, str, str], int],
-    cohort_runs: dict[tuple[str, str, str], int],
-) -> list:
-    """Lexicographic sort key: most-run cohorts first, then name order."""
-    repo, role, backend, skill = key
-    return [
-        -counts.get(key, 0),
-        -cohort_runs.get((repo, role, backend), 0),
-        repo,
-        role,
-        backend,
-        skill,
-    ]
-
-
-def _row_value(row: Sequence[Any], index: int, default: Any = 0) -> Any:
-    if len(row) <= index:
-        return default
-    return row[index]
-
-
-def _cost_cell(row: Sequence[Any], index: int) -> float:
-    """Read a nullable USD cost column as a float, treating null/missing as zero."""
-    return float(_row_value(row, index) or 0)
-
-
-def _day_value(day: Any) -> Any:
-    if isinstance(day, datetime):
-        return day.date()
-    return day
-
-
-_AGENT_CACHE_TOKENS_SQL = (
-    "(COALESCE(cached_tokens, 0) "
-    "+ COALESCE(cache_read_tokens, 0) "
-    "+ COALESCE(cache_write_tokens, 0))"
-)
-_AGENT_ALL_TOKENS_SQL = (
-    "(COALESCE(input_tokens, 0) "
-    "+ COALESCE(output_tokens, 0) "
-    "+ COALESCE(cache_read_tokens, 0) "
-    "+ COALESCE(cache_write_tokens, 0))"
-)
-_AGENT_CACHE_FRACTION_SQL = (
-    f"CASE WHEN {_AGENT_ALL_TOKENS_SQL} = 0 THEN 0 "
-    f"ELSE {_AGENT_CACHE_TOKENS_SQL}::numeric "
-    f"/ {_AGENT_ALL_TOKENS_SQL}::numeric END"
+from orchestrator.analytics.read_request import (
+    FILTERED_READ_SIGNATURE,
+    HEATMAP_SIGNATURE,
+    LIMITED_READ_SIGNATURE,
+    bind_read_request,
+    resolve_read_query,
+    window_filters,
 )
 
 
-# Default cap on the rows `get_skill_trigger_matrix` returns. The
-# dashboard renders the matrix in a fold-out expander; capping keeps an
-# expand from flooding the page when many repos x cohorts x catalog
-# skills multiply out. A non-positive `limit` disables the cap.
-SKILL_MATRIX_ROW_LIMIT = 100
+_COMPATIBILITY_EXPORTS = (
+    _cost_cell,
+    SKILL_ADOPTION_ROW_LIMIT,
+    SKILL_MATRIX_ROW_LIMIT,
+)
 
 
-def _review_round_sql(where: str) -> str:
-    return (
-        "SELECT "
-        "CASE "
-        "WHEN review_round IS NULL "
-        "AND agent_role = 'developer' "
-        "AND stage = 'implementing' THEN '0' "
-        "WHEN review_round IS NULL THEN 'unknown' "
-        "WHEN review_round <= 0 THEN '0' "
-        "WHEN review_round >= 6 THEN '6+' "
-        "ELSE review_round::text "
-        "END AS bucket, "
-        "COUNT(*) AS runs, "
-        "SUM(CASE WHEN failed THEN 1 ELSE 0 END) AS failed_runs, "
-        "COALESCE(SUM(cost_usd), 0) AS bucket_cost_usd, "
-        "SUM(CASE WHEN agent_role = 'developer' THEN 1 ELSE 0 END) "
-        "AS developer_runs, "
-        "SUM(CASE WHEN agent_role = 'reviewer' THEN 1 ELSE 0 END) "
-        "AS reviewer_runs, "
-        "COALESCE(SUM(CASE WHEN agent_role = 'developer' "
-        "THEN cost_usd ELSE 0 END), 0) AS developer_cost_usd, "
-        "COALESCE(SUM(CASE WHEN agent_role = 'reviewer' "
-        "THEN cost_usd ELSE 0 END), 0) AS reviewer_cost_usd, "
-        "COALESCE(SUM(CASE WHEN agent_role = 'developer' "
-        f"THEN COALESCE(cost_usd, 0) * ({_AGENT_CACHE_FRACTION_SQL}) "
-        "ELSE 0 END), 0) AS developer_cache_cost_usd, "
-        "COALESCE(SUM(CASE WHEN agent_role = 'developer' "
-        f"THEN COALESCE(cost_usd, 0) * (1 - ({_AGENT_CACHE_FRACTION_SQL})) "
-        "ELSE 0 END), 0) AS developer_no_cache_cost_usd, "
-        "COALESCE(SUM(CASE WHEN agent_role = 'reviewer' "
-        f"THEN COALESCE(cost_usd, 0) * ({_AGENT_CACHE_FRACTION_SQL}) "
-        "ELSE 0 END), 0) AS reviewer_cache_cost_usd, "
-        "COALESCE(SUM(CASE WHEN agent_role = 'reviewer' "
-        f"THEN COALESCE(cost_usd, 0) * (1 - ({_AGENT_CACHE_FRACTION_SQL})) "
-        "ELSE 0 END), 0) AS reviewer_no_cache_cost_usd "
-        f"FROM analytics_agent_runs{where} "
-        "GROUP BY bucket "
-        "ORDER BY runs DESC, bucket ASC"
-    )
-
-
-def _review_round_from_row(row: Sequence[Any]) -> ReviewRoundBucketRow:
-    return ReviewRoundBucketRow(
-        bucket=str(row[0]),
-        runs=int(row[1] or 0),
-        failed=int(row[2] or 0),
-        total_cost_usd=_cost_cell(row, 3),
-        developer_runs=int(_row_value(row, 4) or 0),
-        reviewer_runs=int(_row_value(row, 5) or 0),
-        developer_cost_usd=_cost_cell(row, 6),
-        reviewer_cost_usd=_cost_cell(row, 7),
-        developer_cache_cost_usd=_cost_cell(row, 8),
-        developer_no_cache_cost_usd=_cost_cell(row, 9),
-        reviewer_cache_cost_usd=_cost_cell(row, 10),
-        reviewer_no_cache_cost_usd=_cost_cell(row, 11),
-    )
-
-
-def _review_round_rows(
-    query: _ReadQuery,
-    filters: _WindowFilters,
-) -> list[ReviewRoundBucketRow]:
-    view_where, view_bindings = _build_view_window_where(filters)
-    view_where = _append_where_condition(
-        view_where,
-        "agent_role IN ('developer', 'reviewer')",
-    )
-    rows = query.select(_review_round_sql(view_where), view_bindings)
-    return [_review_round_from_row(row) for row in rows]
+_REVIEW_ROUND_SIGNATURE = FILTERED_READ_SIGNATURE.replace(
+    return_annotation="list[ReviewRoundBucketRow]",
+)
+_SKILL_TRIGGER_RATE_SIGNATURE = FILTERED_READ_SIGNATURE.replace(
+    return_annotation="list[SkillTriggerRateRow]",
+)
+_SKILL_TRIGGER_MATRIX_SIGNATURE = LIMITED_READ_SIGNATURE.replace(
+    return_annotation="list[SkillTriggerMatrixRow]",
+)
+_SKILL_ADOPTION_SIGNATURE = LIMITED_READ_SIGNATURE.replace(
+    return_annotation="list[SkillAdoptionRow]",
+)
+_COST_COVERAGE_SIGNATURE = FILTERED_READ_SIGNATURE.replace(
+    return_annotation="list[CostCoverageRow]",
+)
+_BACKEND_DAILY_TOKENS_SIGNATURE = FILTERED_READ_SIGNATURE.replace(
+    return_annotation="list[BackendDailyTokensRow]",
+)
+_HOURLY_HEATMAP_SIGNATURE = HEATMAP_SIGNATURE.replace(
+    return_annotation="list[HourlyHeatmapPoint]",
+)
 
 
 def get_review_round_breakdown(
-    *,
-    start: Optional[datetime] = None,
-    end: Optional[datetime] = None,
-    repo: Optional[str] = None,
-    events: Optional[Sequence[str]] = None,
-    stages: Optional[Sequence[str]] = None,
-    issue: Optional[int] = None,
-    db_url: Optional[str] = None,
-    connect: Optional[Callable[[str], Any]] = None,
-    conn: Any = None,
+    *args: Any,
+    **kwargs: Any,
 ) -> list[ReviewRoundBucketRow]:
-    """Per-review-round development/review agent-run counts.
-
-    Reads from `analytics_agent_runs` but derives the bucket from the
-    raw `review_round` column rather than the view's
-    `review_round_bucket`: rounds 0-5 are kept as individual buckets
-    (`0`/`1`/`2`/`3`/`4`/`5`) and only 6+ is grouped, so the chart can
-    show rework round-by-round instead of collapsing 3-5. Only
-    `developer` and `reviewer` agent roles feed this panel; decomposer
-    and question runs are lifecycle costs, not review-cycle costs.
-    Rows with `review_round IS NULL` surface under `"unknown"` if
-    they are still development/review runs. Historical implementing
-    rows that predate fresh-spawn `review_round=0` logging are
-    bucketed as `0`. The `events` filter is honored by
-    short-circuit: if the operator excluded `agent_exit` from the
-    events multiselect (or cleared it), every agent-run aggregate
-    returns empty so the dashboard's "show nothing for this
-    dimension" semantics stays consistent across widgets.
-    """
-    query = _ReadQuery.resolve(db_url, connect, conn)
+    """Return per-review-round development and review cost buckets."""
+    request = bind_read_request(_REVIEW_ROUND_SIGNATURE, args, kwargs)
+    query = resolve_read_query(request)
     if not query.available:
         return []
-    if _agent_event_excluded(events):
+    if _agent_event_excluded(request.filters.events):
         return []
-    filters = _WindowFilters(
-        start=start,
-        end=end,
-        repo=repo,
-        stages=stages,
-        issue=issue,
-    )
-    return _review_round_rows(query, filters)
+    return _review_round_rows(query, window_filters(request))
 
 
-def _skill_trigger_rate_sql(clause: str) -> str:
-    return (
-        "SELECT "
-        "COALESCE(agent_role, 'unknown') AS role_label, "
-        "COALESCE(backend, 'unknown') AS backend_label, "
-        "COUNT(*) AS runs, "
-        "COUNT(*) FILTER "
-        "  (WHERE extras -> 'skills_triggered' IS NOT NULL) AS skill_runs, "
-        "COALESCE(SUM((extras ->> 'skills_triggered_count')::int), 0) "
-        "  AS total_triggers "
-        f"FROM analytics_events{clause} "
-        "GROUP BY role_label, backend_label "
-        "ORDER BY skill_runs DESC, runs DESC, role_label ASC, "
-        "backend_label ASC"
-    )
-
-
-def _skill_trigger_rate_from_row(row: Sequence[Any]) -> SkillTriggerRateRow:
-    return SkillTriggerRateRow(
-        agent_role=_label_or_unknown(row[0]),
-        backend=_label_or_unknown(row[1]),
-        runs=int(row[2] or 0),
-        skill_runs=int(_row_value(row, 3) or 0),
-        total_triggers=int(_row_value(row, 4) or 0),
-    )
-
-
-def _skill_trigger_rate_rows(
-    query: _ReadQuery,
-    filters: _WindowFilters,
-) -> list[SkillTriggerRateRow]:
-    event_where, event_bindings = _build_window_where(filters.without_events())
-    clause = _append_where_condition(event_where, _AGENT_EXIT_CONDITION)
-    rows = query.select(_skill_trigger_rate_sql(clause), event_bindings)
-    return [_skill_trigger_rate_from_row(row) for row in rows]
+get_review_round_breakdown.__signature__ = _REVIEW_ROUND_SIGNATURE
 
 
 def get_skill_trigger_rates(
-    *,
-    start: Optional[datetime] = None,
-    end: Optional[datetime] = None,
-    repo: Optional[str] = None,
-    events: Optional[Sequence[str]] = None,
-    stages: Optional[Sequence[str]] = None,
-    issue: Optional[int] = None,
-    db_url: Optional[str] = None,
-    connect: Optional[Callable[[str], Any]] = None,
-    conn: Any = None,
+    *args: Any,
+    **kwargs: Any,
 ) -> list[SkillTriggerRateRow]:
-    """Per-`(agent_role, backend)` skill-trigger rates over agent runs.
-
-    Reads the base `analytics_events` table rather than the rollup: the
-    skill fields live in `extras` JSONB, which the materialized rollup
-    does not carry, so this widget stays a pure read-side addition with
-    zero DDL. Pins `event = 'agent_exit'` so only tracked agent runs
-    count, and short-circuits to empty when the events multiselect
-    excludes `agent_exit` (the same contract `get_backend_efficiency`
-    honors). A run counts toward `skill_runs` when its `extras` carries
-    a `skills_triggered` key -- `record_agent_exit` writes that key only
-    when `TRACK_SKILL_TRIGGERS` is on *and* a skill fired, so its
-    presence is the firm "a skill triggered" signal. `total_triggers`
-    sums `skills_triggered_count`. NULL `agent_role` / `backend` bucket
-    under `"unknown"`. Rows are ordered skill-active groups first.
-    """
-    query = _ReadQuery.resolve(db_url, connect, conn)
+    """Return skill-trigger rates grouped by agent role and backend."""
+    request = bind_read_request(_SKILL_TRIGGER_RATE_SIGNATURE, args, kwargs)
+    query = resolve_read_query(request)
     if not query.available:
         return []
-    if _agent_event_excluded(events):
+    if _agent_event_excluded(request.filters.events):
         return []
-    filters = _WindowFilters(
-        start=start,
-        end=end,
-        repo=repo,
-        stages=stages,
-        issue=issue,
-    )
-    return _skill_trigger_rate_rows(query, filters)
+    return _skill_trigger_rate_rows(query, window_filters(request))
 
 
-_SkillCohort = tuple[str, str, str]
-_SkillMatrixKey = tuple[str, str, str, str]
-
-
-def _skill_catalog_rows(
-    query: _ReadQuery,
-    filters: _WindowFilters,
-) -> list[tuple]:
-    catalog_where, catalog_bindings = _build_window_where(filters.catalog_scope())
-    clause = _append_where_condition(
-        catalog_where, "event = 'repo_skill_catalog'",
-    )
-    return query.select(
-        "SELECT repo, extras -> 'skills_available' AS skills_available "
-        f"FROM analytics_events{clause}",
-        catalog_bindings,
-    )
-
-
-def _skill_catalog(rows: Sequence[tuple]) -> dict[str, set[str]]:
-    catalog: dict[str, set[str]] = {}
-    for row in rows:
-        if row[0] is None:
-            continue
-        repo = str(row[0])
-        names = _as_skill_names(_row_value(row, 1, None))
-        catalog.setdefault(repo, set()).update(names)
-    return catalog
-
-
-def _skill_run_rows(
-    query: _ReadQuery,
-    filters: _WindowFilters,
-) -> list[tuple]:
-    run_where, run_bindings = _build_window_where(filters.without_events())
-    clause = _append_where_condition(run_where, _AGENT_EXIT_CONDITION)
-    return query.select(
-        "SELECT repo, "
-        "COALESCE(agent_role, 'unknown') AS role_label, "
-        "COALESCE(backend, 'unknown') AS backend_label, "
-        "extras -> 'skills_triggered' AS skills_triggered "
-        f"FROM analytics_events{clause}",
-        run_bindings,
-    )
-
-
-def _skill_cohort(row: Sequence[Any]) -> _SkillCohort:
-    return (
-        _label_or_unknown(row[0]),
-        _row_label(row, 1),
-        _row_label(row, 2),
-    )
-
-
-@dataclass
-class _SkillMatrixCounts:
-    """Run and trigger counts used to assemble the skill matrix."""
-
-    cohort_runs: dict[_SkillCohort, int] = field(default_factory=dict)
-    skill_runs: dict[_SkillMatrixKey, int] = field(default_factory=dict)
-
-    @classmethod
-    def from_rows(cls, rows: Sequence[tuple]) -> _SkillMatrixCounts:
-        counts = cls()
-        for row in rows:
-            cohort = _skill_cohort(row)
-            counts.cohort_runs[cohort] = counts.cohort_runs.get(cohort, 0) + 1
-            for skill in set(_as_skill_names(_row_value(row, 3, None))):
-                key = (*cohort, skill)
-                counts.skill_runs[key] = counts.skill_runs.get(key, 0) + 1
-        return counts
-
-    def matrix_keys(
-        self,
-        catalog: dict[str, set[str]],
-    ) -> set[_SkillMatrixKey]:
-        keys = set(self.skill_runs)
-        for cohort in self.cohort_runs:
-            for skill in catalog.get(cohort[0], ()):
-                keys.add((*cohort, skill))
-        return keys
-
-    def order_key(self, key: _SkillMatrixKey) -> list:
-        return _skill_matrix_order_key(
-            key,
-            counts=self.skill_runs,
-            cohort_runs=self.cohort_runs,
-        )
-
-    def as_row(self, key: _SkillMatrixKey) -> SkillTriggerMatrixRow:
-        repo, role, backend, skill = key
-        return SkillTriggerMatrixRow(
-            repo=repo,
-            skill=skill,
-            agent_role=role,
-            backend=backend,
-            runs=self.cohort_runs.get((repo, role, backend), 0),
-            skill_runs=self.skill_runs.get(key, 0),
-        )
-
-
-def _skill_trigger_matrix_rows(
-    query: _ReadQuery,
-    filters: _WindowFilters,
-    limit: int,
-) -> list[SkillTriggerMatrixRow]:
-    catalog = _skill_catalog(_skill_catalog_rows(query, filters))
-    counts = _SkillMatrixCounts.from_rows(_skill_run_rows(query, filters))
-    keys = sorted(counts.matrix_keys(catalog), key=counts.order_key)
-    if limit > 0:
-        keys = keys[:limit]
-    return [counts.as_row(key) for key in keys]
+get_skill_trigger_rates.__signature__ = _SKILL_TRIGGER_RATE_SIGNATURE
 
 
 def get_skill_trigger_matrix(
-    *,
-    start: Optional[datetime] = None,
-    end: Optional[datetime] = None,
-    repo: Optional[str] = None,
-    events: Optional[Sequence[str]] = None,
-    stages: Optional[Sequence[str]] = None,
-    issue: Optional[int] = None,
-    limit: int = SKILL_MATRIX_ROW_LIMIT,
-    db_url: Optional[str] = None,
-    connect: Optional[Callable[[str], Any]] = None,
-    conn: Any = None,
+    *args: Any,
+    **kwargs: Any,
 ) -> list[SkillTriggerMatrixRow]:
-    """Per-skill x `(repo, agent_role, backend)` trigger-run counts.
-
-    Combines the repo's `repo_skill_catalog` records (the universe of
-    skills a repo offers, via the `skills_available` array) with the
-    filtered `agent_exit` rows (the runs that actually fired a skill,
-    via the `skills_triggered` array) so the dashboard can render a
-    matrix of which skills each cohort reaches for. Both arrays live in
-    `analytics_events.extras` JSONB -- the daily rollup does not carry
-    them -- so the reader scans the base table directly: a pure
-    read-side addition with zero DDL, mirroring `get_skill_trigger_rates`.
-
-    Honors the same `agent_exit` event-filter contract as the other
-    skill / agent-run readers: short-circuits to empty (no DB round
-    trip at all, catalog included) when the events multiselect excludes
-    `agent_exit` or is cleared. The date / repo filters narrow *both*
-    the catalog and the run queries; the stage / issue filters narrow
-    only the runs because catalog records are repo-level (they carry
-    `issue = 0` and a NULL stage, so pushing those predicates down would
-    drop every catalog row).
-
-    Each cell carries two counts. `skill_runs` counts runs *containing*
-    that skill -- one per agent-exit row per distinct name in its
-    `skills_triggered` list -- rather than total invocations, so a run
-    that pulled `develop` three times still weighs one. `runs` is the
-    total agent-exit runs in the cell's `(repo, agent_role, backend)`
-    cohort, so a low `skill_runs` reads against the cohort size. Every
-    catalog skill is zero-padded across the cohorts observed for that
-    repo so the matrix carries explicit `developer / claude / review =
-    0` (`skill_runs == 0`) cells for offered-but-untriggered skills.
-    NULL `agent_role` / `backend` bucket under `"unknown"`. When no
-    catalog records match the window the matrix degrades cleanly to just
-    the observed-trigger cells -- no zero rows are invented.
-
-    Rows are ordered by `skill_runs` DESC, then cohort `runs` DESC, then
-    a stable `(repo, agent_role, backend, skill)` tiebreak, and the list
-    is capped at `limit` rows (default `SKILL_MATRIX_ROW_LIMIT`; a
-    non-positive `limit` disables the cap) so the dashboard's fold-out
-    never floods the page.
-    """
-    query = _ReadQuery.resolve(db_url, connect, conn)
+    """Return per-skill trigger cells for each repository cohort."""
+    request = bind_read_request(_SKILL_TRIGGER_MATRIX_SIGNATURE, args, kwargs)
+    selected_limit = int(request.options.limit or 0)
+    query = resolve_read_query(request)
     if not query.available:
         return []
-    if _agent_event_excluded(events):
+    if _agent_event_excluded(request.filters.events):
         return []
-    filters = _WindowFilters(
-        start=start,
-        end=end,
-        repo=repo,
-        stages=stages,
-        issue=issue,
-    )
-    return _skill_trigger_matrix_rows(query, filters, limit)
-
-
-# Default cap on the rows `get_skill_adoption` returns, mirroring the
-# trigger matrix: the dashboard renders the adoption breakdown in a
-# fold-out, so capping keeps an expand from flooding the page when many
-# repos x cohorts x skills multiply out. A non-positive `limit` disables it.
-SKILL_ADOPTION_ROW_LIMIT = 100
-
-_SkillAdoptionKey = tuple[str, str, str, str]
-
-# Column offsets shared by the two `agent_exit` scans the adoption reader
-# runs; both put the session-identity columns at the same positions so one
-# key builder serves either row.
-_SESSION_RESUME_INDEX = 3
-_SESSION_ID_INDEX = 4
-_SESSION_ROW_INDEX = 5
-
-
-def _skill_session_key(row: Sequence[Any]) -> str:
-    """Identify a row's logical session: resume id, then session id, then row.
-
-    A resumed run continues the session it resumed *from*, so the
-    `resume_session_id` groups a continuation with its origin; a fresh run
-    keys on its own `session_id`. A row carrying neither (an older record,
-    or a CLI hiccup that yielded no id) falls back to its primary key so
-    every ID-less row stays its own session -- never silently merged into a
-    single anonymous bucket. The primary key is stable across the window
-    and history scans, so a shared ID-less row keys the same in both.
-    """
-    resume = _row_value(row, _SESSION_RESUME_INDEX, None)
-    if isinstance(resume, str) and resume:
-        return resume
-    session = _row_value(row, _SESSION_ID_INDEX, None)
-    if isinstance(session, str) and session:
-        return session
-    return f"row:{_row_value(row, _SESSION_ROW_INDEX, None)}"
-
-
-@dataclass
-class _SessionEvidence:
-    """One logical session's availability + load evidence before window end.
-
-    `available` unions every `skills_available` set the session reported;
-    `has_availability_meta` records whether any row carried the
-    `skills_available` *key* at all -- tracked by JSON key presence, not by
-    a non-empty array, so an explicit `skills_available: []` ("scanned,
-    found none") still registers as metadata. `adopted` unions the skills
-    the session loaded across its rows. All three are set-based, so folding
-    the same row twice (a window row is also returned by the history scan)
-    never double-counts.
-    """
-
-    available: set[str] = field(default_factory=set)
-    adopted: set[str] = field(default_factory=set)
-    has_availability_meta: bool = False
-
-    def observe(
-        self,
-        *,
-        available: Sequence[str],
-        available_present: bool,
-        triggered: Sequence[str],
-    ) -> None:
-        # `available_present` is the JSON key presence, kept apart from the
-        # parsed names: an explicit empty `skills_available` is metadata that
-        # blocks the legacy-load fallback, while an absent key is not.
-        if available_present:
-            self.has_availability_meta = True
-        self.available.update(available)
-        self.adopted.update(triggered)
-
-    def resolved_available(self) -> set[str]:
-        """Skills that count toward this session's denominator.
-
-        The reported `skills_available` union when the session carried any
-        availability metadata; otherwise the loaded skills themselves -- a
-        legacy load recorded before availability metadata existed implies
-        the skill was offered, so it still counts in the denominator. An
-        explicit empty `skills_available` is metadata, so it does *not* fall
-        back: a load against a session that reported no offered skills does
-        not fabricate availability.
-        """
-        if self.has_availability_meta:
-            return self.available
-        return set(self.adopted)
-
-
-@dataclass(frozen=True)
-class _SkillWindowRun:
-    """One reporting-window `agent_exit` row's session + skill fields."""
-
-    session_key: str
-    cohort: _SkillCohort
-    triggered: frozenset[str]
-    incidental: frozenset[str]
-
-
-def _skill_window_run(row: Sequence[Any]) -> _SkillWindowRun:
-    return _SkillWindowRun(
-        session_key=_skill_session_key(row),
-        cohort=_skill_cohort(row),
-        triggered=frozenset(_as_skill_names(_row_value(row, 6, None))),
-        incidental=frozenset(_as_skill_names(_row_value(row, 7, None))),
+    return _skill_trigger_matrix_rows(
+        query,
+        window_filters(request),
+        selected_limit,
     )
 
 
-def _skill_window_rows(
-    query: _ReadQuery,
-    filters: _WindowFilters,
-) -> list[_SkillWindowRun]:
-    window_where, window_bindings = _build_window_where(filters.without_events())
-    clause = _append_where_condition(window_where, _AGENT_EXIT_CONDITION)
-    rows = query.select(
-        "SELECT repo, "
-        "COALESCE(agent_role, 'unknown') AS role_label, "
-        "COALESCE(backend, 'unknown') AS backend_label, "
-        "resume_session_id, session_id, id, "
-        "extras -> 'skills_triggered' AS skills_triggered, "
-        "extras -> 'skills_incidental' AS skills_incidental "
-        f"FROM analytics_events{clause}",
-        window_bindings,
-    )
-    return [_skill_window_run(row) for row in rows]
+get_skill_trigger_matrix.__signature__ = _SKILL_TRIGGER_MATRIX_SIGNATURE
 
 
-def _skill_history_rows(
-    query: _ReadQuery,
-    filters: _WindowFilters,
-) -> list[tuple]:
-    history_where, history_bindings = _build_window_where(
-        filters.historical_scope(),
-    )
-    clause = _append_where_condition(history_where, _AGENT_EXIT_CONDITION)
-    return query.select(
-        "SELECT repo, "
-        "COALESCE(agent_role, 'unknown') AS role_label, "
-        "COALESCE(backend, 'unknown') AS backend_label, "
-        "resume_session_id, session_id, id, "
-        "extras -> 'skills_available' AS skills_available, "
-        "(extras -> 'skills_available') IS NOT NULL AS has_skills_available, "
-        "extras -> 'skills_triggered' AS skills_triggered "
-        f"FROM analytics_events{clause}",
-        history_bindings,
-    )
-
-
-def _skill_session_evidence(
-    query: _ReadQuery,
-    filters: _WindowFilters,
-    window_runs: Sequence[_SkillWindowRun],
-) -> dict[str, _SessionEvidence]:
-    """Gather each active session's before-window-end availability + loads.
-
-    Seeds one `_SessionEvidence` per window session (a window row is itself
-    evidence observed before the end) so only sessions active in the window
-    are tracked, then folds in the history scan -- every `agent_exit` row
-    for those sessions before the window end, ignoring the window start and
-    stage filter -- so a load from a prior stage or from before the window
-    stays visible. History rows for sessions not seen in the window are
-    dropped: their evidence must not leak into the aggregate.
-    """
-    evidence: dict[str, _SessionEvidence] = {}
-    for run in window_runs:
-        evidence.setdefault(run.session_key, _SessionEvidence()).observe(
-            available=(), available_present=False, triggered=run.triggered,
-        )
-    for row in _skill_history_rows(query, filters):
-        session = evidence.get(_skill_session_key(row))
-        if session is None:
-            continue
-        session.observe(
-            available=_as_skill_names(_row_value(row, 6, None)),
-            available_present=bool(_row_value(row, 7, False)),
-            triggered=_as_skill_names(_row_value(row, 8, None)),
-        )
-    return evidence
-
-
-@dataclass
-class _SkillAdoption:
-    """Per-`(repo, role, backend, skill)` session counts and window diagnostics.
-
-    `cohort_runs` is the window `agent_exit` invocation count per
-    `(repo, role, backend)` cohort -- every run, whether or not it loaded a
-    skill -- so each skill's adoption reads against the cohort's run volume.
-    `load_rows` / `incidental` count the window runs that loaded /
-    incidentally referenced a given skill.
-    """
-
-    cohort_runs: dict[_SkillCohort, int] = field(default_factory=dict)
-    sessions: dict[_SkillAdoptionKey, int] = field(default_factory=dict)
-    adopted: dict[_SkillAdoptionKey, int] = field(default_factory=dict)
-    load_rows: dict[_SkillAdoptionKey, int] = field(default_factory=dict)
-    incidental: dict[_SkillAdoptionKey, int] = field(default_factory=dict)
-
-    @classmethod
-    def build(
-        cls,
-        window_runs: Sequence[_SkillWindowRun],
-        evidence: dict[str, _SessionEvidence],
-    ) -> _SkillAdoption:
-        counts = cls()
-        session_cohorts: dict[str, set[_SkillCohort]] = {}
-        for run in window_runs:
-            counts._observe_window(run)
-            session_cohorts.setdefault(run.session_key, set()).add(run.cohort)
-        counts._count_sessions(session_cohorts, evidence)
-        return counts
-
-    def keys(self) -> set[_SkillAdoptionKey]:
-        # Every available cell plus any cell that only shows in the window
-        # diagnostics (a purely incidental reference, or a load whose session
-        # reported a different availability set) so no observation is dropped.
-        keys = set(self.sessions)
-        keys.update(self.load_rows)
-        keys.update(self.incidental)
-        return keys
-
-    def order_key(self, key: _SkillAdoptionKey) -> list:
-        repo, role, backend, skill = key
-        return [
-            -self.sessions.get(key, 0),
-            -self.adopted.get(key, 0),
-            -self.cohort_runs.get((repo, role, backend), 0),
-            repo,
-            role,
-            backend,
-            skill,
-        ]
-
-    def as_row(self, key: _SkillAdoptionKey) -> SkillAdoptionRow:
-        repo, role, backend, skill = key
-        return SkillAdoptionRow(
-            repo=repo,
-            skill=skill,
-            agent_role=role,
-            backend=backend,
-            sessions=self.sessions.get(key, 0),
-            adopted=self.adopted.get(key, 0),
-            invocations=self.cohort_runs.get((repo, role, backend), 0),
-            load_rows=self.load_rows.get(key, 0),
-            incidental=self.incidental.get(key, 0),
-        )
-
-    def _observe_window(self, run: _SkillWindowRun) -> None:
-        cohort = run.cohort
-        self.cohort_runs[cohort] = self.cohort_runs.get(cohort, 0) + 1
-        for skill in run.triggered:
-            key = (*cohort, skill)
-            self.load_rows[key] = self.load_rows.get(key, 0) + 1
-        for skill in run.incidental:
-            key = (*cohort, skill)
-            self.incidental[key] = self.incidental.get(key, 0) + 1
-
-    def _count_sessions(
-        self,
-        session_cohorts: dict[str, set[_SkillCohort]],
-        evidence: dict[str, _SessionEvidence],
-    ) -> None:
-        for session_key, cohorts in session_cohorts.items():
-            session = evidence.get(session_key)
-            if session is None:
-                continue
-            self._count_session(cohorts, session)
-
-    def _count_session(
-        self,
-        cohorts: set[_SkillCohort],
-        session: _SessionEvidence,
-    ) -> None:
-        available = session.resolved_available()
-        for cohort in cohorts:
-            for skill in available:
-                key = (*cohort, skill)
-                self.sessions[key] = self.sessions.get(key, 0) + 1
-                if skill in session.adopted:
-                    self.adopted[key] = self.adopted.get(key, 0) + 1
-
-
-def _skill_adoption_rows(
-    query: _ReadQuery,
-    filters: _WindowFilters,
-    limit: int,
-) -> list[SkillAdoptionRow]:
-    window_runs = _skill_window_rows(query, filters)
-    evidence = _skill_session_evidence(query, filters, window_runs)
-    counts = _SkillAdoption.build(window_runs, evidence)
-    keys = sorted(counts.keys(), key=counts.order_key)
-    if limit > 0:
-        keys = keys[:limit]
-    return [counts.as_row(key) for key in keys]
-
-
-def get_skill_adoption(
-    *,
-    start: Optional[datetime] = None,
-    end: Optional[datetime] = None,
-    repo: Optional[str] = None,
-    events: Optional[Sequence[str]] = None,
-    stages: Optional[Sequence[str]] = None,
-    issue: Optional[int] = None,
-    limit: int = SKILL_ADOPTION_ROW_LIMIT,
-    db_url: Optional[str] = None,
-    connect: Optional[Callable[[str], Any]] = None,
-    conn: Any = None,
-) -> list[SkillAdoptionRow]:
-    """Per-skill x `(repo, agent_role, backend)` adoption by logical session.
-
-    Aggregates skill use by *logical agent session* rather than by raw
-    agent run, so a resume chain that pulled `develop` across three ticks
-    counts as one adopting session, not three. A session is identified by
-    `resume_session_id`, then `session_id`, then a per-row fallback (an
-    ID-less row is its own session). The skill fields live in
-    `analytics_events.extras` JSONB -- the daily rollup does not carry them
-    -- so the reader scans the base table directly, a pure read-side
-    addition with zero DDL that mirrors `get_skill_trigger_matrix`.
-
-    Two `agent_exit` scans combine in Python. The first applies the full
-    reporting-window filters (date / repo / stage / issue) and selects the
-    *active* sessions plus the window-scoped diagnostics. The second gathers
-    each active session's evidence from every `agent_exit` row *before the
-    window end*, deliberately dropping the window start and the stage filter
-    (`historical_scope`) so a load from a prior stage or from before the
-    window stays visible; the retained `end` bound keeps a later load from
-    leaking backward. History rows for sessions not active in the window are
-    ignored. Honors the same `agent_exit` event-filter contract as the other
-    skill readers: short-circuits to empty (no DB round trip, history scan
-    included) when the events multiselect excludes `agent_exit` or is cleared.
-
-    `sessions` is the denominator -- sessions in the cohort with the skill
-    available (its `skills_available` listed it, or a legacy load with the
-    `skills_available` key absent implied it; an explicit empty set counts
-    as metadata, so it does not). `adopted` counts the sessions that loaded
-    it, once per session. `invocations` is the cohort's window `agent_exit`
-    run count (every run, so a low `load_rows` reads against it); `load_rows`
-    / `incidental` count the window runs that loaded / incidentally
-    referenced the skill. All three are window-scoped, so a load from before
-    the window counts toward `adopted` but not toward them. NULL `agent_role`
-    / `backend` bucket under `"unknown"`.
-
-    Rows are ordered by `sessions` DESC, then `adopted` DESC, then
-    `invocations` DESC, then a stable `(repo, agent_role, backend, skill)`
-    tiebreak, and the list is capped at `limit` rows (default
-    `SKILL_ADOPTION_ROW_LIMIT`; a non-positive `limit` disables the cap).
-    """
-    query = _ReadQuery.resolve(db_url, connect, conn)
+def get_skill_adoption(*args: Any, **kwargs: Any) -> list[SkillAdoptionRow]:
+    """Return per-session skill adoption cells for each repository cohort."""
+    request = bind_read_request(_SKILL_ADOPTION_SIGNATURE, args, kwargs)
+    selected_limit = int(request.options.limit or 0)
+    query = resolve_read_query(request)
     if not query.available:
         return []
-    if _agent_event_excluded(events):
+    if _agent_event_excluded(request.filters.events):
         return []
-    filters = _WindowFilters(
-        start=start,
-        end=end,
-        repo=repo,
-        stages=stages,
-        issue=issue,
-    )
-    return _skill_adoption_rows(query, filters, limit)
-
-
-def _cost_coverage_from_row(row: Sequence[Any]) -> CostCoverageRow:
-    return CostCoverageRow(
-        cost_source=str(row[0]),
-        runs=int(row[1] or 0),
-        total_tokens=int(_row_value(row, 2) or 0),
+    return _skill_adoption_rows(
+        query,
+        window_filters(request),
+        selected_limit,
     )
 
 
-def _cost_coverage_rows(
-    query: _ReadQuery,
-    filters: _WindowFilters,
-) -> list[CostCoverageRow]:
-    coverage_where, coverage_bindings = _build_view_window_where(filters)
-    rows = query.select(
-        "SELECT "
-        "COALESCE(cost_source, 'unknown') AS source_label, "
-        "COUNT(*) AS runs, "
-        "COALESCE(SUM("
-        "  COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0) + "
-        "  COALESCE(cache_read_tokens, 0) + "
-        "  COALESCE(cache_write_tokens, 0)"
-        "), 0) AS source_total_tokens "
-        f"FROM analytics_agent_runs{coverage_where} "
-        "GROUP BY source_label "
-        "ORDER BY runs DESC, source_label ASC",
-        coverage_bindings,
-    )
-    return [_cost_coverage_from_row(row) for row in rows]
+get_skill_adoption.__signature__ = _SKILL_ADOPTION_SIGNATURE
 
 
-def get_cost_coverage(
-    *,
-    start: Optional[datetime] = None,
-    end: Optional[datetime] = None,
-    repo: Optional[str] = None,
-    events: Optional[Sequence[str]] = None,
-    stages: Optional[Sequence[str]] = None,
-    issue: Optional[int] = None,
-    db_url: Optional[str] = None,
-    connect: Optional[Callable[[str], Any]] = None,
-    conn: Any = None,
-) -> list[CostCoverageRow]:
-    """Per-`cost_source` count of agent runs.
-
-    Reads from `analytics_agent_runs`. The `unknown-price` cohort
-    is exposed verbatim -- never collapsed into a generic "unknown"
-    bucket -- because it is the maintenance signal for the pricing
-    table in `orchestrator.usage`: a growing slice means the table
-    is missing SKUs the parser is seeing in the wild. Rows whose
-    `cost_source` is NULL bucket under `"unknown"` (distinct from
-    the `unknown-price` string the parser writes when the SKU is
-    not priced). The `events` filter is honored by short-circuit
-    against `_agent_event_excluded`.
-    """
-    query = _ReadQuery.resolve(db_url, connect, conn)
+def get_cost_coverage(*args: Any, **kwargs: Any) -> list[CostCoverageRow]:
+    """Return token-volume coverage grouped by cost source."""
+    request = bind_read_request(_COST_COVERAGE_SIGNATURE, args, kwargs)
+    query = resolve_read_query(request)
     if not query.available:
         return []
-    if _agent_event_excluded(events):
+    if _agent_event_excluded(request.filters.events):
         return []
-    filters = _WindowFilters(
-        start=start,
-        end=end,
-        repo=repo,
-        stages=stages,
-        issue=issue,
-    )
-    return _cost_coverage_rows(query, filters)
+    return _cost_coverage_rows(query, window_filters(request))
 
 
-def _backend_daily_tokens_from_row(
-    row: Sequence[Any],
-) -> BackendDailyTokensRow:
-    return BackendDailyTokensRow(
-        day=_day_value(row[0]),
-        backend=str(row[1]),
-        total_tokens=int(row[2] or 0),
-    )
-
-
-def _backend_daily_token_rows(
-    query: _ReadQuery,
-    filters: _WindowFilters,
-) -> list[BackendDailyTokensRow]:
-    daily_where, daily_bindings = _build_view_window_where(filters)
-    rows = query.select(
-        "SELECT "
-        "date_trunc('day', ts)::date AS day, "
-        "COALESCE(backend, 'unknown') AS backend_label, "
-        "COALESCE(SUM("
-        "  COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0) + "
-        "  COALESCE(cache_read_tokens, 0) + "
-        "  COALESCE(cache_write_tokens, 0)"
-        "), 0) AS day_backend_tokens "
-        f"FROM analytics_agent_runs{daily_where} "
-        "GROUP BY day, backend_label "
-        "ORDER BY day ASC, backend_label ASC",
-        daily_bindings,
-    )
-    return [_backend_daily_tokens_from_row(row) for row in rows]
+get_cost_coverage.__signature__ = _COST_COVERAGE_SIGNATURE
 
 
 def get_backend_daily_tokens(
-    *,
-    start: Optional[datetime] = None,
-    end: Optional[datetime] = None,
-    repo: Optional[str] = None,
-    events: Optional[Sequence[str]] = None,
-    stages: Optional[Sequence[str]] = None,
-    issue: Optional[int] = None,
-    db_url: Optional[str] = None,
-    connect: Optional[Callable[[str], Any]] = None,
-    conn: Any = None,
+    *args: Any,
+    **kwargs: Any,
 ) -> list[BackendDailyTokensRow]:
-    """Per-`(day, backend)` token totals from `analytics_agent_runs`.
-
-    Mirrors `get_time_series` shape-wise but split by `backend` rather
-    than `event` and reading from the agent-runs view so token counts
-    cover every agent run in the window. The redesigned dashboard
-    used to derive the "By backend" stacked area from
-    `get_recent_agent_exits`, which silently truncated at its
-    `LIMIT`; this reader removes that cap so the stack stays in
-    lockstep with the cost line and the KPI tiles. Rows whose
-    `backend` is NULL surface under `"unknown"`. The `events` filter
-    is honored by short-circuit against `_agent_event_excluded` --
-    see `get_review_round_breakdown` for the rationale.
-    """
-    query = _ReadQuery.resolve(db_url, connect, conn)
+    """Return daily token totals grouped by backend."""
+    request = bind_read_request(_BACKEND_DAILY_TOKENS_SIGNATURE, args, kwargs)
+    query = resolve_read_query(request)
     if not query.available:
         return []
-    if _agent_event_excluded(events):
+    if _agent_event_excluded(request.filters.events):
         return []
-    filters = _WindowFilters(
-        start=start,
-        end=end,
-        repo=repo,
-        stages=stages,
-        issue=issue,
-    )
-    return _backend_daily_token_rows(query, filters)
+    return _backend_daily_token_rows(query, window_filters(request))
 
 
-def _hourly_heatmap_from_row(row: Sequence[Any]) -> HourlyHeatmapPoint:
-    return HourlyHeatmapPoint(
-        weekday=int(row[0]),
-        hour=int(row[1]),
-        count=int(row[2] or 0),
-        total_tokens=int(_row_value(row, 3) or 0),
-    )
-
-
-def _hourly_heatmap_rows(
-    query: _ReadQuery,
-    filters: _WindowFilters,
-    tz_offset_hours: int,
-) -> list[HourlyHeatmapPoint]:
-    heatmap_where, heatmap_bindings = _build_window_where(filters)
-    offset = int(tz_offset_hours)
-    rows = query.select(
-        "SELECT "
-        "EXTRACT(DOW FROM ((ts AT TIME ZONE 'UTC') "
-        "+ %s * INTERVAL '1 hour'))::int AS weekday, "
-        "EXTRACT(HOUR FROM ((ts AT TIME ZONE 'UTC') "
-        "+ %s * INTERVAL '1 hour'))::int AS hour, "
-        "COUNT(*) AS c, "
-        "COALESCE(SUM("
-        "  COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0) + "
-        "  COALESCE(cache_read_tokens, 0) + "
-        "  COALESCE(cache_write_tokens, 0)"
-        "), 0) AS cell_total_tokens "
-        f"FROM analytics_events{heatmap_where} "
-        "GROUP BY weekday, hour "
-        "ORDER BY weekday ASC, hour ASC",
-        [offset, offset, *heatmap_bindings],
-    )
-    return [_hourly_heatmap_from_row(row) for row in rows]
+get_backend_daily_tokens.__signature__ = _BACKEND_DAILY_TOKENS_SIGNATURE
 
 
 def get_hourly_heatmap(
-    *,
-    start: Optional[datetime] = None,
-    end: Optional[datetime] = None,
-    repo: Optional[str] = None,
-    events: Optional[Sequence[str]] = None,
-    stages: Optional[Sequence[str]] = None,
-    issue: Optional[int] = None,
-    tz_offset_hours: int = 0,
-    db_url: Optional[str] = None,
-    connect: Optional[Callable[[str], Any]] = None,
-    conn: Any = None,
+    *args: Any,
+    **kwargs: Any,
 ) -> list[HourlyHeatmapPoint]:
-    """7x24 weekday-by-hour activity counts from the base table.
-
-    Honors the full event / stage / date / repo / issue filter
-    shape (the chart should narrow with the rest of the dashboard).
-    Cells with zero activity are elided -- the dashboard fills in
-    the rest of the 7x24 grid at render time. `weekday` is the
-    raw `EXTRACT(DOW FROM ts)` value (0 = Sunday) so the chart
-    layer owns the Monday-first re-ordering choice.
-
-    `tz_offset_hours` shifts `ts` by the given integer hours before
-    the `EXTRACT(DOW / HOUR ...)` calls so the operator can view
-    the heatmap in a non-UTC timezone (the orchestrator stores
-    `ts` in UTC). Zero is the historical behavior.
-    """
-    query = _ReadQuery.resolve(db_url, connect, conn)
+    """Return weekday-by-hour activity cells in the requested timezone."""
+    request = bind_read_request(_HOURLY_HEATMAP_SIGNATURE, args, kwargs)
+    query = resolve_read_query(request)
     if not query.available:
         return []
-    filters = _WindowFilters(
-        start=start,
-        end=end,
-        repo=repo,
-        events=events,
-        stages=stages,
-        issue=issue,
+    return _hourly_heatmap_rows(
+        query,
+        window_filters(request),
+        request.options.tz_offset_hours,
     )
-    return _hourly_heatmap_rows(query, filters, tz_offset_hours)
+
+
+get_hourly_heatmap.__signature__ = _HOURLY_HEATMAP_SIGNATURE

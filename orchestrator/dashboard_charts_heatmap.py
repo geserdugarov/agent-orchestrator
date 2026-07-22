@@ -91,7 +91,7 @@ def hour_weekday_heatmap(
     fig = go.Figure(
         go.Heatmap(
             z=_heatmap_matrix(points),
-            x=[f"{hour:02d}" for hour in range(_HOURS_PER_DAY)],
+            x=[format(hour, "02d") for hour in range(_HOURS_PER_DAY)],
             y=list(_WEEKDAY_LABELS),
             colorscale=[
                 [0, theme.CARD_BG],

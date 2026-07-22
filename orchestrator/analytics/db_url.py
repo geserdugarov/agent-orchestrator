@@ -7,6 +7,7 @@ A single indirection so every read helper resolves a caller-supplied
 caller passes `None`) through one function. Kept apart from the
 connection helpers so the URL-source policy has one obvious home.
 """
+
 from __future__ import annotations
 
 from typing import Optional

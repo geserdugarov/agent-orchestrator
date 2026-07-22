@@ -1672,14 +1672,14 @@ class AnalyticsSyncLiveDdlTest(unittest.TestCase):
         return int(row[0]) if row else 0
 
 
-# Every mapping member of record, defined in `_sync_rows`.
-_MAPPING_MEMBERS = (
-    "_build_insert_sql",
-    "_content_hash",
-    "_prepare_record",
-    "_row_values",
-    "_RowProvenance",
-)
+# Every compatibility member and its responsibility-named implementation leaf.
+_MAPPING_MEMBER_MODULES = {
+    "_build_insert_sql": "orchestrator.analytics._sync_row_mapping",
+    "_content_hash": "orchestrator.analytics._sync_row_parse",
+    "_prepare_record": "orchestrator.analytics._sync_row_mapping",
+    "_row_values": "orchestrator.analytics._sync_row_mapping",
+    "_RowProvenance": "orchestrator.analytics._sync_row_mapping",
+}
 
 # The subset the ingest driver imports for its own use, so `sync.<name>`
 # resolves to the same object. `_content_hash` / `_PROMOTED_COLUMNS` are
@@ -1695,18 +1695,17 @@ _SYNC_DRIVEN_MEMBERS = (
 
 class SyncRowMappingExtractionTest(unittest.TestCase):
     """The record -> DB-row mapping (the promoted-column schema, the
-    canonical-JSON content hash, and the per-record validation) lives in
-    `orchestrator.analytics._sync_rows`; the ingest driver
-    `orchestrator.analytics.sync` imports the mapping helpers it drives from
-    there, so both resolve to the same object.
+    canonical-JSON content hash, and per-record validation) lives in focused
+    parsing and mapping leaves. The `_sync_rows` compatibility hub and ingest
+    driver retain the historical objects.
     """
 
-    def test_mapping_members_defined_in_sync_rows(self) -> None:
-        for name in _MAPPING_MEMBERS:
+    def test_mapping_members_live_in_responsibility_named_leaves(self) -> None:
+        for name, module_name in _MAPPING_MEMBER_MODULES.items():
             with self.subTest(name=name):
                 self.assertEqual(
                     getattr(_sync_rows, name).__module__,
-                    "orchestrator.analytics._sync_rows",
+                    module_name,
                 )
 
     def test_sync_reaches_the_sync_rows_objects(self) -> None:
