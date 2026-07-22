@@ -7,8 +7,10 @@ import json
 import os
 import sys
 import tempfile
+import threading
 import unittest
 from datetime import datetime, timedelta, timezone
+from functools import partial
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -57,6 +59,35 @@ _AGENT_TRAJECTORY = "agent_trajectory"
 _CLAUDE_MODEL = "claude-sonnet-4-6"
 _ENCODING = "utf-8"
 
+
+class _PruneAppendRace:
+    def __init__(self, analytics, timestamp: str) -> None:
+        self.analytics = analytics
+        self.timestamp = timestamp
+        self.after_read = threading.Event()
+        self.appender_done = threading.Event()
+        self._real_replace = os.replace
+
+    def replace(self, source, destination):
+        self.after_read.set()
+        self.appender_done.wait(timeout=0.5)
+        return self._real_replace(source, destination)
+
+    def append(self) -> None:
+        self.after_read.wait(timeout=5.0)
+        self.analytics.append_record({
+            "ts": self.timestamp,
+            "repo": _REPO_SHORT,
+            "issue": 99,
+            "event": _STAGE_ENTER,
+        })
+        self.appender_done.set()
+
+    def finish(self, thread: threading.Thread) -> None:
+        self.after_read.set()
+        thread.join(timeout=5.0)
+
+
 # Config knob names, used as both the `_reload` env keys and the module
 # attributes the tests patch / read back.
 _ANALYTICS_LOG_PATH = "ANALYTICS_LOG_PATH"
@@ -101,6 +132,15 @@ def _read_text(path: Path) -> str:
 
 def _read_lines(path: Path) -> list[str]:
     return _read_text(path).splitlines()
+
+
+def _logged_call(test_case, logger, action):
+    with contextlib.ExitStack() as cleanup:
+        captured = cleanup.enter_context(
+            test_case.assertLogs(logger, level="WARNING"),
+        )
+        call_result = action()
+    return call_result, list(captured.output)
 
 
 def _write_json_lines(path: Path, records: list[dict]) -> None:
@@ -618,7 +658,6 @@ class PruneWithRetentionLoggingTest(unittest.TestCase):
         # exactly the window the lock has to close. With the lock in
         # place, the appender blocks until the prune releases it, so
         # its line is preserved.
-        import threading
         with tempfile.TemporaryDirectory(prefix="analytics-race-") as td:
             path = Path(td) / "analytics.jsonl"
             now = PRUNE_NOW
@@ -644,48 +683,15 @@ class PruneWithRetentionLoggingTest(unittest.TestCase):
                 _ANALYTICS_RETENTION_DAYS: _DEFAULT_RETENTION_STR,
             })
 
-            after_read = threading.Event()
-            appender_done = threading.Event()
-            real_replace = os.replace
-
-            def gated_replace(src, dst):
-                # The prune's `os.replace` runs after the kept-records
-                # rewrite. By the time we get here, the prune has read
-                # the original file and built the kept list. Signal
-                # the appender to fire BEFORE the replace lands so
-                # the appender's `open("a")` would race the rewrite
-                # without the lock. The fix is that the appender's
-                # `_FILE_LOCK.acquire()` blocks on the prune's still-
-                # held lock, so this call returns before the appender
-                # actually opens the file.
-                after_read.set()
-                # Wait for the appender to attempt its acquire. The
-                # lock blocks the appender; this event just confirms
-                # the appender has reached the try-acquire point.
-                appender_done.wait(timeout=0.5)
-                return real_replace(src, dst)
-
-            def appender() -> None:
-                # Wait for the prune to finish its read so the race
-                # window is real (without the lock the appender's
-                # write would land on the soon-unlinked inode).
-                after_read.wait(timeout=5.0)
-                analytics.append_record({
-                    "ts": new_ts, "repo": _REPO_SHORT, "issue": 99,
-                    "event": _STAGE_ENTER,
-                })
-                appender_done.set()
-
-            appender_thread = threading.Thread(target=appender)
+            # The replace callback opens the real post-read race window while
+            # the append callback contends on analytics' file lock.
+            race = _PruneAppendRace(analytics, new_ts)
+            appender_thread = threading.Thread(target=race.append)
             appender_thread.start()
-            try:
-                with patch.object(analytics.os, "replace", gated_replace):
+            with contextlib.ExitStack() as cleanup:
+                cleanup.callback(race.finish, appender_thread)
+                with patch.object(analytics.os, "replace", race.replace):
                     removed = analytics.prune_old_records(now=now)
-            finally:
-                # Make sure the appender is unblocked even if the
-                # prune raised; the wait above is bounded.
-                after_read.set()
-                appender_thread.join(timeout=5.0)
 
             self.assertEqual(removed, 1)
             remaining = [
@@ -978,7 +984,7 @@ class RecordAgentExitSkillTest(unittest.TestCase):
             )
         self.assertIsNone(triggered)
 
-    def test_codex_records_inferred_evidence_and_incidental(self) -> None:
+    def test_codex_records_inferred_and_incidental(self) -> None:
         # A codex run that directly reads review/SKILL.md (an inferred load)
         # and runs `git diff` over a changed develop/SKILL.md (an incidental
         # reference) records the load in `skills_triggered` with `inferred`
@@ -1000,7 +1006,7 @@ class RecordAgentExitSkillTest(unittest.TestCase):
         self.assertEqual(rec[_SKILLS_INCIDENTAL], [_DEVELOP])
         self.assertEqual(rec[_SKILLS_INCIDENTAL_COUNT], 1)
 
-    def test_codex_skill_loaded_and_inspected_records_both(self) -> None:
+    def test_codex_loaded_and_inspected_evidence(self) -> None:
         # A skill a codex run both reads and inspects persists in BOTH the
         # triggered / evidence fields and the incidental fields: the buckets
         # are independent, so a loaded skill keeps its incidental count while
@@ -1021,7 +1027,7 @@ class RecordAgentExitSkillTest(unittest.TestCase):
         self.assertEqual(rec[_SKILLS_INCIDENTAL], [_REVIEW])
         self.assertEqual(rec[_SKILLS_INCIDENTAL_COUNT], 1)
 
-    def test_incidental_only_run_keeps_triggered_keys_absent(self) -> None:
+    def test_incidental_run_omits_triggered_keys(self) -> None:
         # A run whose only SKILL.md reference is a `git diff` inspection records
         # the incidental bucket but leaves every triggered / evidence key
         # dropped, so the record cannot masquerade as a load.
@@ -1038,7 +1044,7 @@ class RecordAgentExitSkillTest(unittest.TestCase):
         for key in (_SKILLS_TRIGGERED, _SKILLS_TRIGGERED_COUNT, _SKILLS_EVIDENCE):
             self.assertNotIn(key, rec)
 
-    def test_returns_only_loaded_skills_not_incidental(self) -> None:
+    def test_returns_loaded_skills_not_incidental(self) -> None:
         # The value `record_agent_exit` returns -- the list the `skill_triggered`
         # audit emitter iterates -- carries only loaded skills, so an incidental
         # `git diff` reference never produces an audit event.
@@ -1238,11 +1244,14 @@ class TrajectoryAppendTest(unittest.TestCase):
             )
             path = blocker / "sub" / "trajectory.jsonl"
             _, analytics = _reload({_TRAJECTORY_LOG_PATH: str(path)})
-            with self.assertLogs(analytics.log, level="WARNING") as cm:
-                analytics.append_trajectory_record({"event": "x"})
+            _, log_output = _logged_call(
+                self,
+                analytics.log,
+                partial(analytics.append_trajectory_record, {"event": "x"}),
+            )
             self.assertFalse(path.exists())
             self.assertTrue(
-                any("could not write" in message for message in cm.output)
+                any("could not write" in message for message in log_output)
             )
 
 
@@ -1351,11 +1360,14 @@ class TrajectoryPruneTest(unittest.TestCase):
                 _TRAJECTORY_LOG_PATH: str(path),
                 _TRAJECTORY_RETENTION_DAYS: _DEFAULT_RETENTION_STR,
             })
-            with self.assertLogs(analytics.log, level="WARNING") as cm:
-                removed = analytics.prune_trajectory_records()
+            removed, log_output = _logged_call(
+                self,
+                analytics.log,
+                analytics.prune_trajectory_records,
+            )
             self.assertEqual(removed, 0)
             self.assertTrue(
-                any("prune" in message for message in cm.output)
+                any("prune" in message for message in log_output)
             )
 
 
@@ -1652,18 +1664,20 @@ class RecordAgentExitTrajectoryTest(unittest.TestCase):
         # and `name` / `tool_id` null (text turns carry no tool metadata).
         _, analytics = _reload()
         secret = "sk-ant-TEXTLEAK-0123456789"
-        with tempfile.TemporaryDirectory() as td, \
-                patch.dict(os.environ, {"ANTHROPIC_API_KEY": secret}), \
-                patch.object(
-                    analytics,
-                    "_TRAJECTORY_FIELD_HEAD",
-                    _TRUNCATION_EDGE_CHARS,
-                ), \
-                patch.object(
-                    analytics,
-                    "_TRAJECTORY_FIELD_TAIL",
-                    _TRUNCATION_EDGE_CHARS,
-                ):
+        with (
+            tempfile.TemporaryDirectory() as td,
+            patch.dict(os.environ, {"ANTHROPIC_API_KEY": secret}),
+            patch.object(
+                analytics,
+                "_TRAJECTORY_FIELD_HEAD",
+                _TRUNCATION_EDGE_CHARS,
+            ),
+            patch.object(
+                analytics,
+                "_TRAJECTORY_FIELD_TAIL",
+                _TRUNCATION_EDGE_CHARS,
+            ),
+        ):
             t_path = Path(td) / "trajectory.jsonl"
             frames = [
                 {"type": "system", "subtype": "init", "tools": ["Bash"]},
@@ -1774,17 +1788,19 @@ class RecordAgentExitTrajectoryTest(unittest.TestCase):
         # an elision marker, so a single huge tool output cannot bloat one
         # step. Shrink the caps so the test stays small.
         _, analytics = _reload()
-        with tempfile.TemporaryDirectory() as td, \
-                patch.object(
-                    analytics,
-                    "_TRAJECTORY_FIELD_HEAD",
-                    _TRUNCATION_EDGE_CHARS,
-                ), \
-                patch.object(
-                    analytics,
-                    "_TRAJECTORY_FIELD_TAIL",
-                    _TRUNCATION_EDGE_CHARS,
-                ):
+        with (
+            tempfile.TemporaryDirectory() as td,
+            patch.object(
+                analytics,
+                "_TRAJECTORY_FIELD_HEAD",
+                _TRUNCATION_EDGE_CHARS,
+            ),
+            patch.object(
+                analytics,
+                "_TRAJECTORY_FIELD_TAIL",
+                _TRUNCATION_EDGE_CHARS,
+            ),
+        ):
             t_path = Path(td) / "trajectory.jsonl"
             self._emit(
                 analytics,
@@ -1819,7 +1835,7 @@ class RecordAgentExitTrajectoryTest(unittest.TestCase):
                 analytics,
                 stdout=_claude_multistep_stdout(
                     n_steps=_BUDGET_TOOL_PAIR_COUNT,
-                    result_text="0123456789" * 20,
+                    result_text="ten-chars!" * 20,
                 ),
                 traj_path=t_path,
                 analytics_path=Path(td) / "a.jsonl",
@@ -2135,14 +2151,16 @@ class RecordAgentExitCodexSkillDiscoveryTest(unittest.TestCase):
 
     def test_agent_exit_records_discovered_skills(self) -> None:
         _, analytics = _reload()
-        with tempfile.TemporaryDirectory() as td:
+        with tempfile.TemporaryDirectory() as td, patch.dict(
+            os.environ,
+            {_CODEX_HOME: str(Path(td) / "none")},
+        ):
             cwd = Path(td) / "wt"
             _mk_skill(cwd / ".agents/skills", _DEVELOP)
             _mk_skill(cwd / ".agents/skills", _REVIEW)
-            with patch.dict(os.environ, {_CODEX_HOME: str(Path(td) / "none")}):
-                base, _ = self._emit(
-                    analytics, backend=_CODEX, cwd=cwd, td=td, track=True,
-                )
+            base, _ = self._emit(
+                analytics, backend=_CODEX, cwd=cwd, td=td, track=True,
+            )
         rec = base[0]
         self.assertEqual(rec["event"], _AGENT_EXIT)
         # No SKILL.md read in the stream -> nothing triggered, but the offered
@@ -2152,13 +2170,15 @@ class RecordAgentExitCodexSkillDiscoveryTest(unittest.TestCase):
 
     def test_trajectory_records_discovered_skills(self) -> None:
         _, analytics = _reload()
-        with tempfile.TemporaryDirectory() as td:
+        with tempfile.TemporaryDirectory() as td, patch.dict(
+            os.environ,
+            {_CODEX_HOME: str(Path(td) / "none")},
+        ):
             cwd = Path(td) / "wt"
             _mk_skill(cwd / ".claude/skills", _REVIEW)
-            with patch.dict(os.environ, {_CODEX_HOME: str(Path(td) / "none")}):
-                _, traj = self._emit(
-                    analytics, backend=_CODEX, cwd=cwd, td=td, traj=True,
-                )
+            _, traj = self._emit(
+                analytics, backend=_CODEX, cwd=cwd, td=td, traj=True,
+            )
         rec = traj[0]
         self.assertEqual(rec["event"], _AGENT_TRAJECTORY)
         self.assertEqual(rec[_BACKEND], _CODEX)
@@ -2171,12 +2191,14 @@ class RecordAgentExitCodexSkillDiscoveryTest(unittest.TestCase):
         # No worktree -> no skill discovery; the offered-tools baseline needs
         # no worktree, so the trajectory record still carries `tools`.
         _, analytics = _reload()
-        with tempfile.TemporaryDirectory() as td:
-            with patch.dict(os.environ, {_CODEX_HOME: str(Path(td) / "none")}):
-                base, traj = self._emit(
-                    analytics, backend=_CODEX, cwd=None, td=td,
-                    track=True, traj=True,
-                )
+        with tempfile.TemporaryDirectory() as td, patch.dict(
+            os.environ,
+            {_CODEX_HOME: str(Path(td) / "none")},
+        ):
+            base, traj = self._emit(
+                analytics, backend=_CODEX, cwd=None, td=td,
+                track=True, traj=True,
+            )
         self.assertNotIn(_SKILLS_AVAILABLE, base[0])
         self.assertNotIn(_SKILLS_AVAILABLE, traj[0])
         from orchestrator import skill_catalog
@@ -2187,12 +2209,14 @@ class RecordAgentExitCodexSkillDiscoveryTest(unittest.TestCase):
         # dirs still takes its offered set from the stream (here: none), never
         # from the filesystem, so a stray scan can't invent a claude field.
         _, analytics = _reload()
-        with tempfile.TemporaryDirectory() as td:
+        with tempfile.TemporaryDirectory() as td, patch.dict(
+            os.environ,
+            {_CODEX_HOME: str(Path(td) / "none")},
+        ):
             cwd = Path(td) / "wt"
             _mk_skill(cwd / ".agents/skills", _DEVELOP)
             a_path = Path(td) / "a.jsonl"
-            with patch.dict(os.environ, {_CODEX_HOME: str(Path(td) / "none")}), \
-                    patch.object(analytics, _ANALYTICS_LOG_PATH, a_path), \
+            with patch.object(analytics, _ANALYTICS_LOG_PATH, a_path), \
                     patch.object(analytics, _TRAJECTORY_LOG_PATH, None), \
                     patch.object(analytics, _TRACK_SKILL_TRIGGERS, True):
                 analytics.record_agent_exit(

@@ -14,6 +14,9 @@ from pathlib import Path
 from types import MappingProxyType
 from unittest.mock import MagicMock
 
+from tests import main_scheduler_helpers as _scheduler_helpers
+from tests import main_signal_helpers as _signal_helpers
+
 
 _REPOS_ENV = "REPOS"
 _ALPHA_REPO = "alpha/one"
@@ -32,11 +35,22 @@ _LEGACY_ENV = MappingProxyType({
 })
 _WORKER_WAIT_SECONDS = 5.0
 _FAST_WAIT_SECONDS = 2.0
-_SCHEDULER_POLL_SECONDS = 0.01
 _SHORT_SHUTDOWN_GRACE_SECONDS = 0.05
 _SHUTDOWN_GRACE_SECONDS = 30
 _SIGNAL_EXIT_BASE = 128
 _UNUSED_ISSUE_NUMBER = 999
+
+_BarrierTick = _scheduler_helpers.BarrierTick
+_SchedulerFactory = _scheduler_helpers.SchedulerFactory
+_GlobalCapProbe = _scheduler_helpers.GlobalCapProbe
+_CrossPollProbe = _scheduler_helpers.CrossPollProbe
+_DuplicateActiveProbe = _scheduler_helpers.DuplicateActiveProbe
+_FinishedWorkerProbe = _scheduler_helpers.FinishedWorkerProbe
+_wait_until_inactive = _scheduler_helpers.wait_until_inactive
+_SignalSubmitTick = _signal_helpers.SignalSubmitTick
+_MultiRepoSignalTick = _signal_helpers.MultiRepoSignalTick
+_FirstTickShutdown = _signal_helpers.FirstTickShutdown
+_WaitRecorder = _signal_helpers.WaitRecorder
 
 
 class _ClientFactory:

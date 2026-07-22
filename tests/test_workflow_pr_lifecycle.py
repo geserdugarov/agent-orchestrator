@@ -40,6 +40,7 @@ EVENT_PARK_AWAITING_HUMAN = "park_awaiting_human"
 EVENT_PR_OPENED = "pr_opened"
 EVENT_REVIEW_VERDICT = "review_verdict"
 EVENT_CONFLICT_ROUND = "conflict_round"
+VALIDATION_HEAD_PROBE_COUNT = 6
 
 KEY_CONFLICT_ROUND = EVENT_CONFLICT_ROUND
 KEY_EVENT = "event"
@@ -92,7 +93,10 @@ def _run_verdict(case, gh, issue, pr, last_message: str) -> None:
                 session_id="sess-review",
                 last_message=last_message,
             ),
-            head_shas=[pr.head.sha] * 6,
+            head_shas=[
+                pr.head.sha
+                for _probe_index in range(VALIDATION_HEAD_PROBE_COUNT)
+            ],
         )
 
 

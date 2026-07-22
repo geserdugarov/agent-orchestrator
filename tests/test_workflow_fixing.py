@@ -542,6 +542,7 @@ class FixingDebounceAndAckTest(unittest.TestCase, _FixingFixtureMixin):
 
     # --- newer comments extend the debounce window ------------------------
 
+
 class FixingFeedbackRoutingTest(unittest.TestCase, _FixingFixtureMixin):
     def test_newer_comment_extends_debounce_window(self) -> None:
         # First tick: an older triggering comment is past the window but a
@@ -752,6 +753,7 @@ class FixingFeedbackRoutingTest(unittest.TestCase, _FixingFixtureMixin):
         self.assertIn("add a test for this branch", prompt)
         self.assertIn("please update the doc string", prompt)
 
+
 class FixingContentHashAndConcurrencyTest(
     unittest.TestCase, _FixingFixtureMixin,
 ):
@@ -870,10 +872,14 @@ class FixingContentHashAndConcurrencyTest(
             workflow._handle_dev_fix_result, issue, concurrent,
         )
 
-        with patch.object(config, DEBOUNCE_CONFIG, DEBOUNCE_SECONDS), \
-             patch.object(
-                 workflow, "_handle_dev_fix_result", fix_and_inject,
-             ):
+        with (
+            patch.object(config, DEBOUNCE_CONFIG, DEBOUNCE_SECONDS),
+            patch.object(
+                workflow,
+                "_handle_dev_fix_result",
+                fix_and_inject,
+            ),
+        ):
             self._run_fixing(
                 gh, issue,
                 run_agent=_agent(
@@ -920,10 +926,14 @@ class FixingContentHashAndConcurrencyTest(
             workflow._handle_dev_fix_result, issue, concurrent,
         )
 
-        with patch.object(config, DEBOUNCE_CONFIG, DEBOUNCE_SECONDS), \
-             patch.object(
-                 workflow, "_handle_dev_fix_result", fail_and_inject,
-             ):
+        with (
+            patch.object(config, DEBOUNCE_CONFIG, DEBOUNCE_SECONDS),
+            patch.object(
+                workflow,
+                "_handle_dev_fix_result",
+                fail_and_inject,
+            ),
+        ):
             self._run_fixing(
                 gh, issue,
                 run_agent=_agent(timed_out=True),
@@ -959,6 +969,7 @@ class FixingContentHashAndConcurrencyTest(
         self.assertIn("actually also rename helper", prompt)
 
     # --- awaiting-human gate (parked from prior failed resume) ----------
+
 
 class FixingAwaitingHumanResumeTest(unittest.TestCase, _FixingFixtureMixin):
     def test_no_new_feedback_is_noop(self) -> None:
@@ -1074,6 +1085,7 @@ class FixingAwaitingHumanResumeTest(unittest.TestCase, _FixingFixtureMixin):
         self.assertEqual(pinned_data.get(REVIEW_ROUND), 3)
         # Flipped back to validating so the reviewer re-evaluates next tick.
         self.assertIn((ISSUE, VALIDATING), gh.label_history)
+
 
 class FixingTransientParkRecoveryTest(
     unittest.TestCase, _FixingFixtureMixin,
@@ -1247,6 +1259,7 @@ class FixingTransientParkRecoveryTest(
         self.assertEqual(pinned_data.get(REVIEW_ROUND), 2)
         self.assertIn((ISSUE, VALIDATING), gh.label_history)
 
+
 class FixingParkIsolationTest(unittest.TestCase, _FixingFixtureMixin):
     def test_review_timeout_park_not_recovered(
         self,
@@ -1382,6 +1395,7 @@ class FixingParkIsolationTest(unittest.TestCase, _FixingFixtureMixin):
         self.assertEqual(pinned_data.get(PARK_REASON), PARK_AGENT_QUESTION)
         self.assertEqual(pinned_data.get(REVIEW_ROUND), 1)
         self.assertNotIn((ISSUE, VALIDATING), gh.label_history)
+
 
 class FixingPostFeedbackRoutingTest(unittest.TestCase, _FixingFixtureMixin):
     def test_review_fix_resets_round_to_zero(self) -> None:
@@ -1568,6 +1582,7 @@ class FixingPostFeedbackRoutingTest(unittest.TestCase, _FixingFixtureMixin):
 
     # --- crash/restart and failure-path coverage ------------------------
 
+
 class FixingFailureDispositionTest(unittest.TestCase, _FixingFixtureMixin):
     def test_missing_dev_session_spawns_fresh(self) -> None:
         # `dev_session_id` may be absent on a `fixing` issue whose prior
@@ -1714,6 +1729,7 @@ class FixingFailureDispositionTest(unittest.TestCase, _FixingFixtureMixin):
 
     # --- stranded-fix deferred publish -----------------------------------
 
+
 class _StrandedFixingFixtureMixin(_FixingFixtureMixin):
     def _seed_stranded(self, *, reply_id: int = HUMAN_REPLY_ID):
         # Validating-route park (`pending_fix_at` unset) with a human
@@ -1738,6 +1754,7 @@ class _StrandedFixingFixtureMixin(_FixingFixtureMixin):
             },
         )
         return gh, issue
+
 
 class StrandedFixRecoveryTest(
     unittest.TestCase, _StrandedFixingFixtureMixin,
@@ -1927,6 +1944,7 @@ class StrandedFixRecoveryTest(
         self.assertIn((ISSUE, IN_REVIEW), gh.label_history)
         self.assertNotIn((ISSUE, VALIDATING), gh.label_history)
         self.assertFalse(gh.pinned_data(ISSUE).get(AWAITING_HUMAN))
+
 
 class FixingSilentSessionRecoveryTest(
     unittest.TestCase, _StrandedFixingFixtureMixin,
@@ -2174,6 +2192,7 @@ class _PendingFixBatchFixtureMixin:
         gh.add_pr(pr)
         return gh, issue, pr
 
+
 class ReconstructPendingFixBatchTest(
     unittest.TestCase, _PendingFixBatchFixtureMixin,
 ):
@@ -2300,6 +2319,7 @@ class ReconstructPendingFixBatchTest(
         self.assertIn("trusted issue ask", prompt)
         self.assertNotIn(malicious_url, prompt)
 
+
 class _ReviewerAnchorFixtureMixin:
     def _pr_with_reviewer_anchor(
         self, *, anchor_id: int = BATCH_PR_CONVERSATION_ID,
@@ -2327,6 +2347,7 @@ class _ReviewerAnchorFixtureMixin:
         gh.add_issue(issue)
         gh.add_pr(pr)
         return gh, issue, pr
+
 
 class ReviewerAnchorReconstructionTest(
     unittest.TestCase, _ReviewerAnchorFixtureMixin,
@@ -2546,6 +2567,7 @@ class _ContinueCommandFixtureMixin(_PatchedWorkflowMixin):
         gh.seed_state(ISSUE, **state)
         return gh, issue, pr
 
+
 class OrchestratorContinueCommandTest(
     unittest.TestCase, _ContinueCommandFixtureMixin,
 ):
@@ -2702,6 +2724,7 @@ class OrchestratorContinueCommandTest(
                     NO_PRESERVED_MESSAGE in body for _, body in gh.posted_comments
                 ))
 
+
 class _ValidatingContinueFixtureMixin(_ContinueCommandFixtureMixin):
     def _seed_validating_route_anchored_park(
         self,
@@ -2761,6 +2784,7 @@ class _ValidatingContinueFixtureMixin(_ContinueCommandFixtureMixin):
             },
         )
         return gh, issue, pr
+
 
 class ValidatingContinueCommandTest(
     unittest.TestCase, _ValidatingContinueFixtureMixin,
@@ -2946,6 +2970,7 @@ class _FixingAllowlistFixtureMixin(_PatchedWorkflowMixin):
             pending_fix_at=PENDING_FIX_AT_TS,
         )
         return gh, issue
+
 
 class FixingAllowlistFeedbackFilterTest(
     unittest.TestCase, _FixingAllowlistFixtureMixin,

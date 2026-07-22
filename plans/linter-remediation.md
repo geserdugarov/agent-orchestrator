@@ -45,7 +45,7 @@ Do not mark a stage complete until its completion gate is satisfied.
 | 4 | Remaining production style and structure | 5/5 | [x] |
 | 5 | Test structure and complexity | 7/7 | [x] |
 | 6 | Test literals and naming | 7/7 | [x] |
-| 7 | Long-tail cleanup and final verification | 2/5 | [ ] |
+| 7 | Long-tail cleanup and final verification | 3/5 | [ ] |
 
 ## Finding-count progress
 
@@ -54,12 +54,12 @@ signal between scans.
 
 | Metric | Initial | Current | Target |
 |---|---:|---:|---:|
-| Parsed findings | 7,683 | 1,844 | 0 |
-| Unique findings | 7,660 | 1,819 | 0 |
+| Parsed findings | 7,683 | 1,573 | 0 |
+| Unique findings | 7,660 | 1,573 | 0 |
 | Production findings | 1,468 | 223 | 0 |
-| Test findings | 6,215 | 1,621 | 0 |
-| Affected files | 172 | 166 | 0 |
-| Standard `E...` findings | 29 | 50 | 0 |
+| Test findings | 6,215 | 1,350 | 0 |
+| Affected files | 172 | 163 | 0 |
+| Standard `E...` findings | 29 | 0 | 0 |
 
 Minimum acceptable fallback: reduce the total by at least 90%, leave no production correctness or formatting
 findings, and explain every retained finding in the accepted-remainder register.
@@ -434,9 +434,9 @@ packages and accepted-remainder review.
 
 ### Package 7.3 — Clear test remainder
 
-- [ ] Resolve remaining test findings file by file.
-- [ ] Recheck that cleanup did not merge tests with materially different behavior.
-- [ ] Resolve the refreshed test formatting and naming findings: `E124` (3), `E127` (4), `E128` (4), `E203` (2),
+- [x] Resolve remaining test findings file by file.
+- [x] Recheck that cleanup did not merge tests with materially different behavior.
+- [x] Resolve the refreshed test formatting and naming findings: `E124` (3), `E127` (4), `E128` (4), `E203` (2),
   `E302` (34), `E303` (3), and `WPS118` (17).
 
 ### Package 7.4 — Review accepted remainder
@@ -987,6 +987,61 @@ considered.
 - Protected by: the usage, analytics-read/sync, dashboard/chart/theme, and trajectory suites.
 - Reviewed: [ ]
 
+### Analytics, dashboard, and trajectory test scenario density
+
+- File and symbols: scenarios across `tests/test_analytics*.py`, `tests/test_dashboard*.py`, and
+  `tests/test_trajectory*.py`.
+- Rule: `WPS204`, `WPS210`, and `WPS213`.
+- Reason: Shared reload, sink, connection, projection, and script-launch helpers remove the repeated setup. The
+  remaining expressions and locals are independent record fields, query columns, chart values, concurrency gates, or
+  per-field assertions. Further extraction would hide which field or boundary a scenario checks, while collapsing the
+  assertions would merge materially different behavior.
+- Protected by: the analytics recording/read/sync, dashboard/chart, and trajectory suites.
+- Reviewed: [x]
+
+### Cohesive analytics, dashboard, and trajectory test shapes
+
+- File and symbols: the analytics, dashboard, and trajectory test modules, their behavior-focused test classes, the
+  analytics-sync connection fake, and keyword-driven fixture builders.
+- Rule: `WPS201`, `WPS202`, `WPS211`, `WPS214`, and `WPS230`.
+- Reason: The modules and classes are already divided by behavior, while fixture-builder arguments and fake connection
+  attributes are the explicit seams each scenario controls or asserts. Splitting at the plugin's low count thresholds
+  would duplicate reload/setup context or scatter one read/render contract across artificial files and classes.
+- Protected by: the analytics recording/read/sync, dashboard/chart, and trajectory suites.
+- Reviewed: [x]
+
+### Agent, usage, main, and configuration test scenario density
+
+- File and symbols: scenarios in `tests/test_agents.py`, `tests/test_usage.py`, `tests/test_main.py`, and
+  `tests/test_config.py`.
+- Rule: `WPS204`, `WPS210`, and `WPS213`.
+- Reason: Process registration, polling-loop concurrency, configuration reloads, and parser round-trips now use named
+  probes and shared builders. The remaining locals and expressions expose distinct process signals, scheduler gates,
+  environment values, pricing inputs, or serialized fields; generic runners would hide those scenario boundaries.
+- Protected by: the agent-runner, usage-parser, polling-loop, and configuration suites.
+- Reviewed: [x]
+
+### Cohesive agent, usage, main, and configuration test shapes
+
+- File and symbols: `tests/test_agents.py`, `tests/test_usage.py`, `tests/test_main.py`, and `tests/test_config.py`,
+  including their behavior-focused classes and direct production-symbol imports.
+- Rule: `WPS201`, `WPS202`, `WPS211`, `WPS214`, and `WPS235`.
+- Reason: The remaining files and classes group one production surface apiece. Their fixture knobs and direct symbol
+  imports make backend, pricing, signal, and configuration contracts visible at use sites; options mappings, mixins,
+  or threshold-driven file splits would add indirection without removing behavior.
+- Protected by: the agent-runner, usage-parser, polling-loop, and configuration suites.
+- Reviewed: [x]
+
+### External API test-double names
+
+- File and symbols: `tests/fakes.py: FakeIssue.get_comments` and
+  `tests/test_dashboard.py: _SkillPanelStreamlit.info`.
+- Rule: `WPS615` and `WPS110`.
+- Reason: These methods mirror the PyGithub issue and Streamlit message APIs invoked by production code. Renaming either
+  would make the double stop satisfying the contract or force an adapter branch that exists only for tests.
+- Protected by: workflow comment-reading scenarios and `SkillAdoptionRenderTest`.
+- Reviewed: [x]
+
 ### Per-test module-reload idiom
 
 - File and symbols: the `_reload` helpers in `tests/test_analytics.py` (93 call sites) and the
@@ -1020,13 +1075,23 @@ considered.
 - Protected by: `tests/test_analytics.py`, `tests/test_agents.py`, and `tests/test_usage.py`.
 - Reviewed: [x]
 
+### Persisted and rendered test-contract strings
+
+- File and symbols: row, filter, and HTML fixtures in `tests/test_dashboard.py` and
+  `tests/test_analytics_read_skill_adoption.py`.
+- Rule: `WPS226`.
+- Reason: The repeated keys and fragments are the exact analytics row schema, query values, and rendered markup under
+  test. Constants would make the fixtures harder to compare with their expected payloads and could falsely couple
+  coincidentally equal values from independent scenarios; domain strings shared for one reason are already named.
+- Protected by: dashboard filtering/rendering and skill-adoption read scenarios.
+- Reviewed: [x]
+
 ### Single-use fixture-payload magic numbers and float-zeros in test data
 
 - File and symbols: per-fixture cost / token / count / duration literals used once or twice across
-  `tests/test_dashboard_charts.py`, `tests/test_analytics_read_tables.py`,
-  `tests/test_analytics_read_breakdowns.py`, `tests/test_analytics.py`, `tests/test_usage.py`, and the trajectory
-  tests, plus the genuine float-typed `0.0` cost / rate defaults (`total_cost_usd`, per-backend cost cells,
-  expected-value arrays).
+  `tests/test_dashboard*.py`, `tests/test_analytics_read_*.py`, `tests/test_analytics.py`, `tests/test_usage.py`, and
+  the trajectory tests, plus the genuine float-typed `0.0` cost / rate defaults (`total_cost_usd`, per-backend cost
+  cells, expected-value arrays).
 - Rule: `WPS432` (magic number) and `WPS358` (float zero).
 - Reason: Each such literal is a single scenario's expected value. Naming it produces a single-use constant
   that adds no meaning, and the recurring numeric values are coincidental collisions across unrelated fixture
@@ -1037,7 +1102,7 @@ considered.
   values that recur with one domain meaning (issue / PR numbers, retry limits, the fixture year, cumulative token
   totals, shared reported costs) were named. This mirrors the production single-use `WPS432` and `WPS358`
   remainders already registered above.
-- Protected by: `tests/test_dashboard_charts.py`, `tests/test_analytics_read_*.py`, `tests/test_analytics.py`,
+- Protected by: `tests/test_dashboard*.py`, `tests/test_analytics_read_*.py`, `tests/test_analytics.py`,
   `tests/test_usage.py`, and the trajectory tests.
 - Reviewed: [x]
 
@@ -1332,6 +1397,30 @@ Add one row for every implementation session, including partial sessions.
 | 2026-07-21 | 6.7 | Complete | WPS 650->138; target 508->0; 353f; 2204p/3s | None | Start 7.1 |
 | 2026-07-21 | 7.1 | Complete | Scan 1968/1943; Ruff/diff; tracked gate 2204p/3s | Not committed | Start 7.2 |
 | 2026-07-21 | 7.2 | Complete | Prod 347->223; 1190 focused; Ruff/diff; tracked 2204p/3s | Not committed | Start 7.3 |
+| 2026-07-21 | 7.3 | Complete | Tests 1621->1350; Ruff/diff; tracked gate 2204p/3s | Not committed | Start 7.4 |
+
+Package 7.3 is **complete**. The test scan fell from 1,621 to 1,350 findings. The 67 refreshed findings assigned to
+this package are cleared: `E124` (3), `E127` (4), `E128` (4), `E203` (2), `E302` (34), `E303` (3), and `WPS118`
+(17). The file-by-file pass removed another 204 findings: `WPS110` (1), `WPS111` (1), `WPS203` (1), `WPS204` (1),
+`WPS210` (1), `WPS213` (5), `WPS220` (1), `WPS221` (13), `WPS227` (2), `WPS229` (1), `WPS231` (1),
+`WPS236` (2), `WPS237` (5), `WPS300` (1), `WPS301` (4), `WPS335` (4), `WPS336` (17), `WPS338` (2),
+`WPS339` (10), `WPS342` (6), `WPS345` (4), `WPS362` (2), `WPS363` (1), `WPS407` (1), `WPS414` (6),
+`WPS420` (2), `WPS430` (22), `WPS435` (1), `WPS441` (36), `WPS447` (1), `WPS458` (24), `WPS478` (2),
+`WPS501` (9), `WPS504` (8), `WPS505` (1), `WPS509` (2), and `WPS527` (3).
+
+The cleanup uses callable probes for process registration, analytics projection, configuration diagnostics, signal
+handling, scheduler races, and polling-loop concurrency. The polling probes are split into focused scheduler and
+signal helper modules so the extraction does not introduce a new module-magnitude finding. Formatting, import,
+capture-lifetime, cleanup, literal-container, and objective naming fixes preserve the operation and assertion inside
+each original scenario. No test was deleted or merged: tracked collection remains 2,207 tests, and the complete gate
+passes with 2,204 tests plus the same three live-Postgres skips.
+
+The remaining 1,350 test findings are the reviewed contract and scenario-density families registered above:
+`WPS110` (1), `WPS201` (11), `WPS202` (37), `WPS204` (269), `WPS210` (318), `WPS211` (16), `WPS213` (130),
+`WPS214` (31), `WPS226` (99), `WPS230` (3), `WPS235` (13), `WPS301` (2), `WPS358` (43), `WPS430` (1),
+`WPS432` (317), `WPS441` (49), `WPS501` (2), `WPS602` (7), and `WPS615` (1). Repository-wide Ruff and both
+working-tree and committed-range diff checks pass. The refreshed full scan is 1,573 parsed / 1,573 unique findings
+across 163 files: production 223, tests 1,350, and no standard `E...` findings.
 
 Package 7.2 is **complete**. The production scan fell from 347 to 223 findings. All 124 removals preserve public
 facades and call shapes: `E302` (3), `F401` (43), `WPS210` (3), `WPS212` (1), `WPS220` (1), `WPS221` (4),

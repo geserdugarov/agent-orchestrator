@@ -44,11 +44,11 @@ def _write_fake_git(fake_bin: Path) -> None:
     # `branch --show-current` echoes $GIT_BRANCH, `pull` exits $GIT_PULL_RC.
     _write_executable(
         fake_bin / "git",
-        """
+        r"""
         #!/usr/bin/env bash
         echo "$*" >> "$GIT_CALLS"
         if [ "$1" = "branch" ]; then
-            printf '%s\\n' "${GIT_BRANCH:-main}"
+            printf '%s\n' "${GIT_BRANCH:-main}"
             exit 0
         fi
         if [ "$1" = "pull" ]; then

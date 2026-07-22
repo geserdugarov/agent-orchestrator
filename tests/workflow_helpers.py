@@ -160,10 +160,13 @@ def _agent(
     stderr: str = "",
     exit_code: Optional[int] = None,
 ) -> AgentResult:
+    resolved_exit_code = exit_code
+    if resolved_exit_code is None:
+        resolved_exit_code = -1 if timed_out else 0
     return AgentResult(
         session_id=session_id,
         last_message=last_message,
-        exit_code=exit_code if exit_code is not None else (-1 if timed_out else 0),
+        exit_code=resolved_exit_code,
         timed_out=timed_out,
         stdout="",
         stderr=stderr,
@@ -279,10 +282,10 @@ class _PatchedWorkflowMixin:
         rc_mock = _as_mock(run_agent)
         hnc_seq = has_new_commits if isinstance(has_new_commits, (list, tuple)) else None
         hnc_mock = MagicMock()
-        if hnc_seq is not None:
-            hnc_mock.side_effect = list(hnc_seq)
-        else:
+        if hnc_seq is None:
             hnc_mock.return_value = bool(has_new_commits)
+        else:
+            hnc_mock.side_effect = list(hnc_seq)
 
         df_mock = MagicMock(return_value=list(dirty_files))
         push_mock = MagicMock(return_value=bool(push_branch))
@@ -298,13 +301,10 @@ class _PatchedWorkflowMixin:
         # to exercise the fetch-failure park branch pass an explicit
         # `authed_fetch_result` (e.g. `MagicMock(returncode=1,
         # stderr="...")`) to drive that path.
-        authed_fetch_ok = MagicMock(
-            return_value=(
-                authed_fetch_result
-                if authed_fetch_result is not None
-                else MagicMock(returncode=0, stdout="", stderr="")
-            )
-        )
+        resolved_fetch_result = authed_fetch_result
+        if resolved_fetch_result is None:
+            resolved_fetch_result = MagicMock(returncode=0, stdout="", stderr="")
+        authed_fetch_ok = MagicMock(return_value=resolved_fetch_result)
         # `_branch_ahead_behind` runs `git rev-list` in the worktree;
         # default to (0, 0) ("in sync") so existing tests don't have to
         # opt into the SHA-alignment recovery path. Tests that DO want
@@ -339,10 +339,10 @@ class _PatchedWorkflowMixin:
         # default reproduces the no-history `fix`/`feat` fallback; tests
         # that exercise repo-local prefix inference pass an explicit
         # `fallback_prefix` (e.g. "event") to drive the synthesized title.
-        if fallback_prefix is not None:
-            infer_prefix_mock = MagicMock(return_value=fallback_prefix)
-        else:
+        if fallback_prefix is None:
             infer_prefix_mock = MagicMock(side_effect=_default_infer_subject_prefix)
+        else:
+            infer_prefix_mock = MagicMock(return_value=fallback_prefix)
         cleanup_terminal_mock = MagicMock()
         # Squash helper would otherwise shell out to `git merge-base` etc.
         # against `_FAKE_WT`. Default: success-no-op.
@@ -355,10 +355,10 @@ class _PatchedWorkflowMixin:
         # the mock is in place so a test that sets VERIFY_COMMANDS does
         # not accidentally shell out.
         from orchestrator.worktrees import VerifyResult
-        verify_mock = MagicMock(
-            return_value=verify_result if verify_result is not None
-            else VerifyResult(status="ok")
-        )
+        resolved_verify_result = verify_result
+        if resolved_verify_result is None:
+            resolved_verify_result = VerifyResult(status="ok")
+        verify_mock = MagicMock(return_value=resolved_verify_result)
 
         # One mock per `workflow` attribute the stage handlers reach. Driven
         # through an ExitStack rather than a stacked `with` so adding a new

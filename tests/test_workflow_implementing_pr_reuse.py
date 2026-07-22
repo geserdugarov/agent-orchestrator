@@ -275,16 +275,19 @@ class FormatPrAgentMessageTest(unittest.TestCase):
         # A single unbroken run with one space near the cap: the cut must
         # fall back to the word boundary rather than slicing mid-token.
         head = "a" * (implementing._PR_BODY_AGENT_MESSAGE_CAP - 5)
-        msg = head + " " + "b" * TOKEN_TAIL_LENGTH
+        tail = "b" * TOKEN_TAIL_LENGTH
+        msg = f"{head} {tail}"
         out = implementing._format_pr_agent_message(msg)
-        kept = out.split("\n\n" + implementing._PR_BODY_TRUNCATION_MARKER)[0]
+        marker = implementing._PR_BODY_TRUNCATION_MARKER
+        kept = out.split(f"\n\n{marker}")[0]
         # Cut at the space: no stray `b` characters leaked past the boundary.
         self.assertEqual(kept, head)
 
     def test_dangling_code_fence_is_closed(self) -> None:
         # Force the cut to land inside an open code fence and assert it gets
         # closed so the marker renders outside the block.
-        msg = "intro\n\n```python\n" + "x = 1\n" * CODE_FENCE_LINE_COUNT
+        code_lines = "x = 1\n" * CODE_FENCE_LINE_COUNT
+        msg = f"intro\n\n```python\n{code_lines}"
         out = implementing._format_pr_agent_message(msg)
         self.assertEqual(out.count("```") % 2, 0)
         self.assertIn(implementing._PR_BODY_TRUNCATION_MARKER, out)

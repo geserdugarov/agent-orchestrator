@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 from __future__ import annotations
 
+import importlib
 import os
 import sys
 import tempfile
@@ -51,9 +52,9 @@ _DOTENV_OWNED_KEYS = (
 def _load_config(env: dict[str, str] | None = None):
     """Reload `orchestrator.config` with `env` layered over a minimal base
     (dotenv skipped, token file absent) so module-level parsing sees the test
-    values. The dotted `import orchestrator.config as config` after popping the
-    cached module is required: `from orchestrator import config` would rebind
-    the stale package attribute and skip the reload.
+    values. `import_module` after popping the cached module is required:
+    `from orchestrator import config` would rebind the stale package attribute
+    and skip the reload.
     """
     full_env = {
         _SKIP_DOTENV_ENV: _ENABLED_ENV,
@@ -63,7 +64,7 @@ def _load_config(env: dict[str, str] | None = None):
         full_env.update(env)
     with patch.dict(os.environ, full_env, clear=True):
         sys.modules.pop(_CONFIG_MODULE, None)
-        import orchestrator.config as config
+        config = importlib.import_module(_CONFIG_MODULE)
 
         return config
 
@@ -80,6 +81,19 @@ def _only_repo_spec(specs):
     if len(specs) != 1:
         raise AssertionError(f"expected one repo spec, got {len(specs)}")
     return specs[0]
+
+
+def _exit_with_config_error(message: str) -> None:
+    sys.exit(message)
+
+
+class _ConfigErrorRecorder:
+    def __init__(self, errors: list[str]) -> None:
+        self._errors = errors
+
+    def __call__(self, message: str) -> None:
+        self._errors.append(message)
+        sys.exit(message)
 
 
 class HitlHandleConfigTest(unittest.TestCase):
@@ -280,7 +294,7 @@ class DotenvQuoteStrippingTest(unittest.TestCase):
     segments inside the value survive verbatim.
     """
 
-    def _reload_with_dotenv(
+    def load_config_from_dotenv(
         self, dotenv_body: str, *, extra_env: dict[str, str] | None = None
     ):
         """Reload config hermetically against an isolated temp REPO_ROOT
@@ -319,7 +333,7 @@ class DotenvQuoteStrippingTest(unittest.TestCase):
                 # constants get their default values; the fixture
                 # rebinds them below from the temp dotenv.
                 sys.modules.pop(_CONFIG_MODULE, None)
-                import orchestrator.config as config
+                config = importlib.import_module(_CONFIG_MODULE)
 
                 # Drop the skip flag and any owned keys we want the
                 # tmp .env to populate. `_load_dotenv`'s `setdefault`
@@ -332,14 +346,18 @@ class DotenvQuoteStrippingTest(unittest.TestCase):
                 with patch.object(config, "REPO_ROOT", Path(td)):
                     config._load_dotenv()
 
-                config.DEV_AGENT, config.DEV_AGENT_ARGS = config._parse_agent_spec(
+                dev_agent, dev_agent_args = config._parse_agent_spec(
                     _DEV_AGENT_ENV,
                     os.environ.get(_DEV_AGENT_ENV, _CLAUDE),
                 )
-                config.REVIEW_AGENT, config.REVIEW_AGENT_ARGS = config._parse_agent_spec(
+                config.DEV_AGENT = dev_agent
+                config.DEV_AGENT_ARGS = dev_agent_args
+                review_agent, review_agent_args = config._parse_agent_spec(
                     _REVIEW_AGENT_ENV,
                     os.environ.get(_REVIEW_AGENT_ENV, _CODEX),
                 )
+                config.REVIEW_AGENT = review_agent
+                config.REVIEW_AGENT_ARGS = review_agent_args
                 return config
 
     def test_keeps_inner_quote_pairs(self) -> None:
@@ -381,7 +399,7 @@ class DotenvQuoteStrippingTest(unittest.TestCase):
         body = (
             "DEV_AGENT=codex -m gpt-5.5 -c 'model_reasoning_effort=\"xhigh\"'\n"
         )
-        config = self._reload_with_dotenv(body)
+        config = self.load_config_from_dotenv(body)
         self.assertEqual(config.DEV_AGENT, _CODEX)
         self.assertEqual(
             config.DEV_AGENT_ARGS,
@@ -392,7 +410,7 @@ class DotenvQuoteStrippingTest(unittest.TestCase):
         # Backward-compat for operators who wrap their values in outer
         # double quotes (a common dotenv convention).
         body = 'REVIEW_AGENT="claude --model claude-opus-4-7"\n'
-        config = self._reload_with_dotenv(body)
+        config = self.load_config_from_dotenv(body)
         self.assertEqual(config.REVIEW_AGENT, _CLAUDE)
         self.assertEqual(
             config.REVIEW_AGENT_ARGS, ("--model", "claude-opus-4-7"),
@@ -918,12 +936,13 @@ class ConfigDiagnosticsTest(unittest.TestCase):
     def test_config_error_carries_message_and_code(self) -> None:
         from orchestrator.config import _config_error
 
-        with self.assertRaises(SystemExit) as cm:
+        error_context = self.assertRaises(SystemExit)
+        with error_context:
             _config_error("orchestrator: bad config")
         # `str(exc)` is what the import-time validation tests assert on; a
         # string code exits the process with status 1.
-        self.assertEqual(str(cm.exception), "orchestrator: bad config")
-        self.assertEqual(cm.exception.code, "orchestrator: bad config")
+        self.assertEqual(str(error_context.exception), "orchestrator: bad config")
+        self.assertEqual(error_context.exception.code, "orchestrator: bad config")
 
     def test_config_warning_writes_to_stderr_only(self) -> None:
         import io
@@ -947,7 +966,7 @@ class RepositoryConfigModuleTest(unittest.TestCase):
     """
 
     def test_repospec_reexported_from_private_module(self) -> None:
-        import orchestrator.config as config
+        config = importlib.import_module(_CONFIG_MODULE)
         from orchestrator import _repo_config
 
         self.assertIs(config.RepoSpec, _repo_config.RepoSpec)
@@ -956,7 +975,7 @@ class RepositoryConfigModuleTest(unittest.TestCase):
         )
 
     def test_compat_wrappers_stay_on_config(self) -> None:
-        import orchestrator.config as config
+        config = importlib.import_module(_CONFIG_MODULE)
 
         # `config._parse_repos_env` / `config.default_repo_specs` are the
         # narrow wrappers; their module of record is `orchestrator.config`
@@ -975,15 +994,11 @@ class RepositoryConfigModuleTest(unittest.TestCase):
         errors: list[str] = []
         warnings: list[str] = []
 
-        def fail(message: str):
-            errors.append(message)
-            raise SystemExit(message)
-
         with tempfile.TemporaryDirectory() as td:
             specs = _repo_config.parse_repos_env(
                 f"{_ALPHA_REPO}|{td}|main|{_ORIGIN_REMOTE}|4",
                 default_parallel_limit=2,
-                config_error=fail,
+                config_error=_ConfigErrorRecorder(errors),
                 config_warning=warnings.append,
             )
         spec = _only_repo_spec(specs)
@@ -1000,9 +1015,7 @@ class RepositoryConfigModuleTest(unittest.TestCase):
             specs = _repo_config.parse_repos_env(
                 f"{_ALPHA_REPO}|{td}|main",
                 default_parallel_limit=7,
-                config_error=lambda message: (_ for _ in ()).throw(
-                    SystemExit(message)
-                ),
+                config_error=_exit_with_config_error,
                 config_warning=lambda _message: None,
             )
         spec = _only_repo_spec(specs)
@@ -1023,9 +1036,7 @@ class RepositoryConfigModuleTest(unittest.TestCase):
         specs = _repo_config.build_repo_specs(
             "   ",
             default_spec=default_spec,
-            config_error=lambda message: (_ for _ in ()).throw(
-                SystemExit(message)
-            ),
+            config_error=_exit_with_config_error,
             config_warning=lambda _message: None,
         )
         self.assertEqual(specs, [default_spec])

@@ -456,16 +456,12 @@ class ReadTrajectoriesTest(unittest.TestCase):
         # `_trajectory_records` leaf, so an operator's log filter keyed on
         # that name still sees it.
         with tempfile.TemporaryDirectory() as tmp_dir:
-            with self.assertLogs(
-                _READER_MODULE, level="WARNING"
-            ) as captured:
+            with self.assertLogs(_READER_MODULE, level="WARNING") as captured:
                 runs = tr.read_trajectories(path=Path(tmp_dir))
-        self.assertEqual(runs, [])
-        self.assertEqual(len(captured.records), 1)
-        self.assertEqual(
-            captured.records[0].name, _READER_MODULE
-        )
-        self.assertIn("could not read trajectory log", captured.output[0])
+                self.assertEqual(runs, [])
+                self.assertEqual(len(captured.records), 1)
+                self.assertEqual(captured.records[0].name, _READER_MODULE)
+                self.assertIn("could not read trajectory log", captured.output[0])
 
     def _read_from(self, lines):
         with tempfile.TemporaryDirectory() as tmp_dir:

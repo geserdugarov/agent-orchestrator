@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 from __future__ import annotations
 
+import importlib
 import json
 import unittest
 from types import MappingProxyType
@@ -10,7 +11,6 @@ from orchestrator import (
     _usage_metrics,
     _usage_skills,
     _usage_trajectory,
-    usage,
 )
 from orchestrator.usage import (
     AgentTrajectory,
@@ -28,6 +28,8 @@ from orchestrator.usage import (
     parse_codex_trajectory,
     parse_codex_usage,
 )
+
+usage = importlib.import_module("orchestrator.usage")
 
 
 def _jsonl(*events: dict) -> str:
@@ -268,7 +270,7 @@ class ClaudeStreamJsonTest(unittest.TestCase):
         expected = (
             CLAUDE_FINAL_INPUT_TOKENS * 3
             + CLAUDE_FINAL_CACHE_WRITE_TOKENS * 3.75
-            + CLAUDE_FINAL_CACHE_READ_TOKENS * 0.30
+            + CLAUDE_FINAL_CACHE_READ_TOKENS * .3
             + CLAUDE_FINAL_OUTPUT_TOKENS * 15
         ) / TOKENS_PER_MILLION
         self.assertEqual(metrics.cost_source, ESTIMATED_COST_SOURCE)
@@ -290,10 +292,8 @@ class ClaudeStreamJsonTest(unittest.TestCase):
         metrics = parse_claude_usage(stdout)
         # opus-4-7 rates: input=5, cw5m=6.25, cw1h=10, cr=0.50, output=25
         expected = (
-            0 * 5
-            + CLAUDE_FIVE_MINUTE_CACHE_TOKENS * 6.25
+            CLAUDE_FIVE_MINUTE_CACHE_TOKENS * 6.25
             + CLAUDE_ONE_HOUR_CACHE_TOKENS * 10
-            + 0 * 0.50
             + 100 * 25
         ) / TOKENS_PER_MILLION
         self.assertEqual(
@@ -380,9 +380,9 @@ class ClaudeStreamJsonTest(unittest.TestCase):
         self.assertEqual(metrics.output_tokens, 150)
         self.assertEqual(metrics.cost_source, ESTIMATED_COST_SOURCE)
         # sonnet: input=3, output=15; haiku-3-5: input=0.80, output=4
-        expected = (
-            (100 * 3 + 50 * 15) + (200 * 0.80 + 100 * 4)
-        ) / TOKENS_PER_MILLION
+        sonnet_cost = 100 * 3 + 50 * 15
+        haiku_cost = 200 * .8 + 100 * 4
+        expected = (sonnet_cost + haiku_cost) / TOKENS_PER_MILLION
         assert metrics.cost_usd is not None
         self.assertAlmostEqual(metrics.cost_usd, expected, places=9)
 
@@ -450,7 +450,7 @@ class CodexJsonTest(unittest.TestCase):
         self.assertEqual(metrics.output_tokens, 100)
         self.assertEqual(metrics.turns, 7)
         # gpt-5-mini rates: input=0.25, cached=0.025, output=2
-        expected = (800 * 0.25 + 0 + 100 * 2) / TOKENS_PER_MILLION
+        expected = (800 * 0.25 + 100 * 2) / TOKENS_PER_MILLION
         assert metrics.cost_usd is not None
         self.assertAlmostEqual(metrics.cost_usd, expected, places=9)
 
@@ -487,7 +487,7 @@ class CodexJsonTest(unittest.TestCase):
         # the fallback only feeds the price lookup.
         self.assertEqual(metrics.models, (GPT_FIVE_CODEX,))
         assert metrics.cost_usd is not None
-        expected = (100 * 1.25 + 0 + 50 * 10) / TOKENS_PER_MILLION
+        expected = (100 * 1.25 + 50 * 10) / TOKENS_PER_MILLION
         self.assertAlmostEqual(metrics.cost_usd, expected, places=9)
 
     def test_no_cached_rate_blocks_cost_estimate(self) -> None:
@@ -518,7 +518,7 @@ class CodexJsonTest(unittest.TestCase):
         # gpt-5.5 rates: input=5, cached=0.50, output=30 (per 1M)
         uncached = 1000 - 200
         expected = (
-            uncached * 5 + 200 * 0.50 + 400 * 30
+            uncached * 5 + 200 * .5 + 400 * 30
         ) / TOKENS_PER_MILLION
         assert metrics.cost_usd is not None
         self.assertAlmostEqual(metrics.cost_usd, expected, places=9)
@@ -634,7 +634,7 @@ class CodexJsonTest(unittest.TestCase):
         self.assertEqual(metrics.cost_source, ESTIMATED_COST_SOURCE)
         # gpt-5.4 rates: input=2.50, output=15; long-context 2x / 1.5x.
         expected = (
-            LONG_CONTEXT_INPUT_TOKENS * 2.50 * 2.0
+            LONG_CONTEXT_INPUT_TOKENS * 2.5 * 2.0
             + CODEX_PRICING_OUTPUT_TOKENS * 15 * 1.5
         ) / TOKENS_PER_MILLION
         assert metrics.cost_usd is not None
@@ -665,8 +665,8 @@ class CodexJsonTest(unittest.TestCase):
         # flat pricing; pin the contract so a future copy-paste edit
         # does not over-tier them and silently overcharge.
         for model, rates in (
-            ("gpt-5.4-mini", {"input": 0.75, "output": 4.50}),
-            ("gpt-5.4-nano", {"input": 0.20, "output": 1.25}),
+            ("gpt-5.4-mini", {"input": 0.75, "output": 4.5}),
+            ("gpt-5.4-nano", {"input": .2, "output": 1.25}),
         ):
             with self.subTest(model=model):
                 stdout = _jsonl(
@@ -780,7 +780,7 @@ class CodexJsonTest(unittest.TestCase):
         uncached = LONG_CONTEXT_INPUT_TOKENS - LONG_CONTEXT_CACHED_INPUT_TOKENS
         expected = (
             uncached * 5 * 2.0
-            + LONG_CONTEXT_CACHED_INPUT_TOKENS * 0.50 * 2.0
+            + LONG_CONTEXT_CACHED_INPUT_TOKENS * .5 * 2.0
             + CODEX_PRICING_OUTPUT_TOKENS * 30 * 1.5
         ) / TOKENS_PER_MILLION
         assert metrics.cost_usd is not None
@@ -1124,8 +1124,13 @@ class CodexSkillTriggerTest(unittest.TestCase):
             {"type": "turn.started"},
             _codex_cmd("item_1", cmd, started=True, status=IN_PROGRESS_STATUS),
             _codex_cmd("item_1", cmd, status=COMPLETED_STATUS, exit_code=0),
-            {"type": TURN_COMPLETED_EVENT, "usage": {"input_tokens": 10,
-                                                 "output_tokens": 5}},
+            {
+                "type": TURN_COMPLETED_EVENT,
+                "usage": {
+                    "input_tokens": 10,
+                    "output_tokens": 5,
+                },
+            },
         )
         skills = parse_codex_skills(stdout)
         self.assertEqual(skills.triggered, (REVIEW,))
@@ -1198,9 +1203,14 @@ class CodexSkillTriggerTest(unittest.TestCase):
             {"type": "turn.started"},
             _codex_cmd("item_1", "/bin/bash -lc 'git diff -- calc.py'"),
             _agent_message("item_2", APPROVAL_MESSAGE),
-            {"type": TURN_COMPLETED_EVENT, "usage": {"input_tokens": 100,
-                                                 "cached_input_tokens": 0,
-                                                 "output_tokens": 50}},
+            {
+                "type": TURN_COMPLETED_EVENT,
+                "usage": {
+                    "input_tokens": 100,
+                    "cached_input_tokens": 0,
+                    "output_tokens": 50,
+                },
+            },
         )
         self.assertEqual(parse_codex_skills(stdout), SkillTriggers())
 
@@ -1313,8 +1323,7 @@ class CodexSkillTriggerTest(unittest.TestCase):
         # runs, so the `|` inside `rg "foo|cat …/SKILL.md"` stays quoted and the
         # search stays one `rg` command -- `develop` is an incidental reference,
         # not a bogus `cat` reader load and audit event.
-        cmd = ('/bin/bash -lc "rg \\"foo|cat '
-               'skills/develop/SKILL.md\\" README.md"')
+        cmd = r'/bin/bash -lc "rg \"foo|cat skills/develop/SKILL.md\" README.md"'
         skills = parse_codex_skills(_jsonl(_codex_cmd("item_1", cmd)))
         self.assertEqual(skills.triggered, ())
         self.assertEqual(skills.evidence, {})
@@ -1618,11 +1627,15 @@ class ClaudeTurnUsageTest(unittest.TestCase):
                 _tool_result("t1", "o1"),
                 _tool_result("t2", "o2"),
             ]),
-            _assistant(id="msg_1", model=HAIKU, content_blocks=[_text("done")],
-                       usage=_claude_usage(
-                           input=HAIKU_TURN_INPUT_TOKENS,
-                           output=HAIKU_TURN_OUTPUT_TOKENS,
-                       )),
+            _assistant(
+                id="msg_1",
+                model=HAIKU,
+                content_blocks=[_text("done")],
+                usage=_claude_usage(
+                    input=HAIKU_TURN_INPUT_TOKENS,
+                    output=HAIKU_TURN_OUTPUT_TOKENS,
+                ),
+            ),
             _terminal_result(result="ok", num_turns=2),
         )
         trajectory = parse_claude_trajectory(stdout)
@@ -1638,7 +1651,7 @@ class ClaudeTurnUsageTest(unittest.TestCase):
         expected0 = (
             CLAUDE_TURN_INPUT_TOKENS * 3
             + CLAUDE_TURN_CACHE_WRITE_TOKENS * 3.75
-            + CLAUDE_TURN_CACHE_READ_TOKENS * 0.30
+            + CLAUDE_TURN_CACHE_READ_TOKENS * .3
             + CLAUDE_TURN_OUTPUT_TOKENS * 15
         ) / TOKENS_PER_MILLION
         self.assertEqual(
@@ -1666,7 +1679,7 @@ class ClaudeTurnUsageTest(unittest.TestCase):
         self.assertEqual(turn1.cache_read_tokens, 0)
         self.assertEqual(turn1.cache_write_tokens, 0)
         expected1 = (
-            HAIKU_TURN_INPUT_TOKENS * 0.80
+            HAIKU_TURN_INPUT_TOKENS * .8
             + HAIKU_TURN_OUTPUT_TOKENS * 4
         ) / TOKENS_PER_MILLION
         assert turn1.cost_usd is not None
@@ -1680,13 +1693,17 @@ class ClaudeTurnUsageTest(unittest.TestCase):
         # The structured 5m/1h cache-creation form sums into a single per-turn
         # cache_write_tokens while both still price at their own rate.
         stdout = _jsonl(
-            _assistant(id="msg_0", model=OPUS_FOUR_SEVEN, content_blocks=[_text("hi")],
-                       usage=_claude_usage(
-                           input=0,
-                           cache_five_minute=CLAUDE_FIVE_MINUTE_CACHE_TOKENS,
-                           cache_one_hour=CLAUDE_ONE_HOUR_CACHE_TOKENS,
-                           output=100,
-                       )),
+            _assistant(
+                id="msg_0",
+                model=OPUS_FOUR_SEVEN,
+                content_blocks=[_text("hi")],
+                usage=_claude_usage(
+                    input=0,
+                    cache_five_minute=CLAUDE_FIVE_MINUTE_CACHE_TOKENS,
+                    cache_one_hour=CLAUDE_ONE_HOUR_CACHE_TOKENS,
+                    output=100,
+                ),
+            ),
         )
         turn0 = parse_claude_trajectory(stdout).turns[0]
         self.assertEqual(
@@ -1711,15 +1728,24 @@ class ClaudeTurnUsageTest(unittest.TestCase):
         # authoritative (claude streams partial usage on intermediate frames).
         # Both frames' steps carry the single turn 0.
         stdout = _jsonl(
-            _assistant(id="msg_0", model=OPUS_FOUR_SEVEN, content_blocks=[_text("partial")],
-                       usage=_claude_usage(input=5, output=10, cache_read=100)),
-            _assistant(id="msg_0", model=OPUS_FOUR_SEVEN, content_blocks=[
-                _tool_use(BASH_TOOL, {COMMAND_FIELD: LIST_COMMAND}, id="t1")],
-                       usage=_claude_usage(
-                           input=8,
-                           output=PARTIAL_TURN_OUTPUT_TOKENS,
-                           cache_read=PARTIAL_TURN_CACHE_READ_TOKENS,
-                       )),
+            _assistant(
+                id="msg_0",
+                model=OPUS_FOUR_SEVEN,
+                content_blocks=[_text("partial")],
+                usage=_claude_usage(input=5, output=10, cache_read=100),
+            ),
+            _assistant(
+                id="msg_0",
+                model=OPUS_FOUR_SEVEN,
+                content_blocks=[
+                    _tool_use(BASH_TOOL, {COMMAND_FIELD: LIST_COMMAND}, id="t1"),
+                ],
+                usage=_claude_usage(
+                    input=8,
+                    output=PARTIAL_TURN_OUTPUT_TOKENS,
+                    cache_read=PARTIAL_TURN_CACHE_READ_TOKENS,
+                ),
+            ),
         )
         trajectory = parse_claude_trajectory(stdout)
         self.assertEqual([step.turn for step in trajectory.steps], [0, 0])
@@ -1969,8 +1995,13 @@ class CodexTrajectoryTest(unittest.TestCase):
             _codex_cmd("item_1", SHELL_LIST_COMMAND, status=COMPLETED_STATUS,
                        aggregated_output="out\n"),
             _agent_message("a1", "done"),
-            {"type": TURN_COMPLETED_EVENT, "usage": {"input_tokens": 10,
-                                                 "output_tokens": 5}},
+            {
+                "type": TURN_COMPLETED_EVENT,
+                "usage": {
+                    "input_tokens": 10,
+                    "output_tokens": 5,
+                },
+            },
         )
         trajectory = parse_codex_trajectory(stdout)
         self.assertEqual(trajectory.turns, ())

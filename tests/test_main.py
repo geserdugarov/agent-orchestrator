@@ -19,7 +19,7 @@ import tempfile
 import threading
 import time
 import unittest
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from unittest.mock import MagicMock, patch
 
 from tests import main_helpers as _helpers
@@ -150,28 +150,16 @@ class PollingLoopFanOutTest(unittest.TestCase):
                 f"gamma/three|{td}|main"
             ),
         }) as main_mod:
-            barrier = threading.Barrier(3, timeout=_helpers._WORKER_WAIT_SECONDS)
-            completed: list[str] = []
-            completed_lock = threading.Lock()
+            tick_probe = _helpers._BarrierTick(3)
             clients = _helpers._ClientFactory()
 
-            def fake_tick(gh, spec, *, scheduler=None):
-                # If ticks ran sequentially, the first arrival would wait
-                # forever for the second / third and the barrier would
-                # time out (BrokenBarrierError surfaces as test failure).
-                # Recording only AFTER the barrier is what makes a
-                # sequential regression leave `completed` short.
-                barrier.wait()
-                with completed_lock:
-                    completed.append(spec.slug)
-
             with patch.object(main_mod, _helpers._GITHUB_CLIENT_ATTR, side_effect=clients), \
-                 patch.object(main_mod.workflow, _helpers._TICK_ATTR, side_effect=fake_tick):
+                 patch.object(main_mod.workflow, _helpers._TICK_ATTR, side_effect=tick_probe):
                 rc = main_mod.main(_helpers._ONCE_ARGS)
 
             self.assertEqual(rc, 0)
             self.assertEqual(
-                set(completed),
+                set(tick_probe.completed),
                 {_helpers._ALPHA_REPO, _helpers._BETA_REPO, "gamma/three"},
             )
 
@@ -273,21 +261,16 @@ class SchedulerWiringTest(unittest.TestCase):
         with _reload_main(_helpers._LEGACY_ENV) as main_mod:
             clients = _helpers._ClientFactory()
             recorder = _helpers._TickRecorder()
-            real_scheduler_init = main_mod.IssueScheduler.__init__
-            built: list[object] = []
+            scheduler_factory = _helpers._SchedulerFactory(main_mod.IssueScheduler)
 
-            def tracking_init(self, *args, **kwargs):
-                real_scheduler_init(self, *args, **kwargs)
-                built.append(self)
-
-            with patch.object(main_mod.IssueScheduler, "__init__", tracking_init), \
+            with patch.object(main_mod, "IssueScheduler", scheduler_factory), \
                  patch.object(main_mod, _helpers._GITHUB_CLIENT_ATTR, side_effect=clients), \
                  patch.object(main_mod.workflow, _helpers._TICK_ATTR, side_effect=recorder):
                 rc = main_mod.main(_helpers._ONCE_ARGS)
 
             self.assertEqual(rc, 0)
-            self.assertEqual(len(built), 1)
-            sched = built[0]
+            self.assertEqual(len(scheduler_factory.built), 1)
+            sched = scheduler_factory.built[0]
             self.assertIs(recorder.schedulers[0], sched)
             # After main() returns, a follow-up submit must be rejected
             # because the scheduler has been closed.
@@ -307,22 +290,21 @@ class SchedulerWiringTest(unittest.TestCase):
                     signal.SIGINT, None,
                 ),
             )
-            built: list[object] = []
-            real_scheduler_init = main_mod.IssueScheduler.__init__
+            scheduler_factory = _helpers._SchedulerFactory(main_mod.IssueScheduler)
 
-            def tracking_init(self, *args, **kwargs):
-                real_scheduler_init(self, *args, **kwargs)
-                built.append(self)
-
-            with patch.object(main_mod.IssueScheduler, "__init__", tracking_init), \
+            with patch.object(main_mod, "IssueScheduler", scheduler_factory), \
                  patch.object(main_mod, _helpers._GITHUB_CLIENT_ATTR, side_effect=clients), \
                  patch.object(main_mod.workflow, _helpers._TICK_ATTR, side_effect=recorder):
                 rc = main_mod.main(_helpers._ONCE_ARGS)
 
             self.assertEqual(rc, _helpers._SIGNAL_EXIT_BASE + signal.SIGINT)
-            self.assertEqual(len(built), 1)
+            self.assertEqual(len(scheduler_factory.built), 1)
             self.assertFalse(
-                built[0].submit(_helpers._LEGACY_REPO, _helpers._UNUSED_ISSUE_NUMBER, lambda: None),
+                scheduler_factory.built[0].submit(
+                    _helpers._LEGACY_REPO,
+                    _helpers._UNUSED_ISSUE_NUMBER,
+                    lambda: None,
+                ),
                 "scheduler not shut down on signal-induced exit",
             )
 
@@ -340,39 +322,19 @@ class SchedulerWiringTest(unittest.TestCase):
         # already started.
         with _reload_main(_helpers._LEGACY_ENV) as main_mod:
             clients = _helpers._ClientFactory()
-            submit_results: list[bool] = []
-
-            def fake_tick(gh, spec, *, scheduler=None):
-                # Pre-signal submit lands normally.
-                submit_results.append(
-                    scheduler.submit(spec.slug, 1, lambda: None)
-                )
-                # SIGINT arrives WHILE the tick is still iterating.
-                main_mod._shutdown(signal.SIGINT, None)
-                # The next submit in the same tick MUST be rejected
-                # because the signal handler closed the scheduler's
-                # submit path. Without the fix the lambda would
-                # actually run -- the assertion below is the canary.
-                submit_results.append(
-                    scheduler.submit(
-                        spec.slug, 2,
-                        lambda: self.fail(
-                            "post-signal submit must not dispatch",
-                        ),
-                    )
-                )
+            tick_probe = _helpers._SignalSubmitTick(main_mod)
 
             with patch.object(
                 main_mod, _helpers._GITHUB_CLIENT_ATTR, side_effect=clients,
             ), patch.object(
-                main_mod.workflow, _helpers._TICK_ATTR, side_effect=fake_tick,
+                main_mod.workflow, _helpers._TICK_ATTR, side_effect=tick_probe,
             ):
                 rc = main_mod.main(_helpers._ONCE_ARGS)
 
             # Signal exit code propagated AND the second mid-tick
             # submit was rejected.
             self.assertEqual(rc, _helpers._SIGNAL_EXIT_BASE + signal.SIGINT)
-            self.assertEqual(submit_results, [True, False])
+            self.assertEqual(tick_probe.submit_results, [True, False])
 
     def test_signal_closes_multi_repo_submit(
         self,
@@ -391,46 +353,18 @@ class SchedulerWiringTest(unittest.TestCase):
                 f"beta/two|{td}|develop"
             ),
         }) as main_mod:
-            both_inside = threading.Barrier(2, timeout=_helpers._WORKER_WAIT_SECONDS)
-            signal_fired = threading.Event()
-            beta_submit_after_signal: list[bool] = []
-            beta_lock = threading.Lock()
+            tick_probe = _helpers._MultiRepoSignalTick(main_mod)
             clients = _helpers._ClientFactory()
-
-            def fake_tick(gh, spec, *, scheduler=None):
-                # Wait until both repos are iterating concurrently so a
-                # signal arriving now cannot be deflected by the
-                # `_tick_one` "shutdown before tick start" guard for
-                # beta -- beta is already past it.
-                both_inside.wait()
-                if spec.slug == _helpers._ALPHA_REPO:
-                    main_mod._shutdown(signal.SIGINT, None)
-                    signal_fired.set()
-                    return
-                # beta waits for the signal handler to actually fire,
-                # then tries to submit; with the fix the scheduler is
-                # already closed and the submit is rejected.
-                self.assertTrue(
-                    signal_fired.wait(timeout=_helpers._WORKER_WAIT_SECONDS),
-                )
-                submission_accepted = scheduler.submit(
-                    spec.slug, 7,
-                    lambda: self.fail(
-                        "post-signal submit must not dispatch",
-                    ),
-                )
-                with beta_lock:
-                    beta_submit_after_signal.append(submission_accepted)
 
             with patch.object(
                 main_mod, _helpers._GITHUB_CLIENT_ATTR, side_effect=clients,
             ), patch.object(
-                main_mod.workflow, _helpers._TICK_ATTR, side_effect=fake_tick,
+                main_mod.workflow, _helpers._TICK_ATTR, side_effect=tick_probe,
             ):
                 rc = main_mod.main(_helpers._ONCE_ARGS)
 
             self.assertEqual(rc, _helpers._SIGNAL_EXIT_BASE + signal.SIGINT)
-            self.assertEqual(beta_submit_after_signal, [False])
+            self.assertEqual(tick_probe.beta_results, [False])
 
     def test_global_cap_bounds_cross_repo_workers(
         self,
@@ -449,60 +383,23 @@ class SchedulerWiringTest(unittest.TestCase):
             ),
             "MAX_PARALLEL_ISSUES_GLOBAL": "2",
         }) as main_mod:
-            received: list[object] = []
-            received_lock = threading.Lock()
-            in_flight = 0
-            max_in_flight = 0
-            counter_lock = threading.Lock()
-            admitted = threading.Semaphore(0)
-            release = threading.Event()
+            cap_probe = _helpers._GlobalCapProbe()
             clients = _helpers._ClientFactory()
-
-            def _worker() -> None:
-                nonlocal in_flight, max_in_flight
-                with counter_lock:
-                    in_flight += 1
-                    max_in_flight = max(max_in_flight, in_flight)
-                admitted.release()
-                release.wait(timeout=_helpers._WORKER_WAIT_SECONDS)
-                with counter_lock:
-                    in_flight -= 1
-
-            def fake_tick(gh, spec, *, scheduler=None):
-                # Submit a worker to the production scheduler; the
-                # scheduler's global_cap enforces the cross-repo cap.
-                with received_lock:
-                    received.append(scheduler)
-                # Try repeatedly to land within this repo's chance
-                # (the global cap may reject the third submitter).
-                scheduler.submit(spec.slug, 1, _worker)
-
-            def release_when_two_admitted() -> None:
-                for _ in range(2):
-                    self.assertTrue(
-                        admitted.acquire(timeout=_helpers._WORKER_WAIT_SECONDS),
-                        "fewer than 2 workers admitted within timeout",
-                    )
-                time.sleep(0.1)
-                release.set()
-
-            releaser = threading.Thread(target=release_when_two_admitted)
+            releaser = threading.Thread(target=cap_probe.release_when_two_admitted)
             releaser.start()
-            try:
+            with ExitStack() as cleanup:
+                cleanup.callback(cap_probe.finish, releaser)
                 with patch.object(main_mod, _helpers._GITHUB_CLIENT_ATTR, side_effect=clients), \
-                     patch.object(main_mod.workflow, _helpers._TICK_ATTR, side_effect=fake_tick):
+                     patch.object(main_mod.workflow, _helpers._TICK_ATTR, side_effect=cap_probe.tick):
                     rc = main_mod.main(_helpers._ONCE_ARGS)
-            finally:
-                release.set()
-                releaser.join(timeout=_helpers._WORKER_WAIT_SECONDS)
 
             self.assertEqual(rc, 0)
             # All three repos saw the SAME scheduler instance.
-            self.assertEqual(len(received), 3)
-            self.assertEqual(len({id(sched) for sched in received}), 1)
+            self.assertEqual(len(cap_probe.received), 3)
+            self.assertEqual(len({id(sched) for sched in cap_probe.received}), 1)
             # Cap is 2: even though three repos submitted, never more
             # than 2 workers ran concurrently.
-            self.assertEqual(max_in_flight, 2)
+            self.assertEqual(cap_probe.max_in_flight, 2)
 
 
 class SignalHandlingTest(unittest.TestCase):
@@ -525,19 +422,11 @@ class SignalHandlingTest(unittest.TestCase):
                 f"beta/two|{td}|develop"
             ),
         }) as main_mod:
-            shutdown_done = threading.Event()
+            tick_probe = _helpers._FirstTickShutdown(main_mod, signal.SIGINT)
             clients = _helpers._ClientFactory()
 
-            def fake_tick(gh, spec, *, scheduler=None):
-                # The first arrival simulates the user pressing Ctrl+C
-                # mid-tick. Subsequent arrivals are no-ops; the
-                # `_shutdown` handler is itself idempotent.
-                if not shutdown_done.is_set():
-                    shutdown_done.set()
-                    main_mod._shutdown(signal.SIGINT, None)
-
             with patch.object(main_mod, _helpers._GITHUB_CLIENT_ATTR, side_effect=clients), \
-                 patch.object(main_mod.workflow, _helpers._TICK_ATTR, side_effect=fake_tick):
+                 patch.object(main_mod.workflow, _helpers._TICK_ATTR, side_effect=tick_probe):
                 rc = main_mod.main(_helpers._ONCE_ARGS)
 
             # 128 + SIGINT(2) = 130. run.sh keys on this to skip restart.
@@ -597,15 +486,18 @@ class AnalyticsRetentionLoopWiringTest(unittest.TestCase):
         with _reload_main(_helpers._LEGACY_ENV) as main_mod:
             clients = _helpers._ClientFactory()
 
-            with patch.object(main_mod, _helpers._GITHUB_CLIENT_ATTR, side_effect=clients), \
-                 patch.object(main_mod.workflow, _helpers._TICK_ATTR), \
-                 patch.object(
-                     main_mod.analytics, "prune_with_retention_logging",
-                 ) as prune:
+            with (
+                patch.object(main_mod, _helpers._GITHUB_CLIENT_ATTR, side_effect=clients),
+                patch.object(main_mod.workflow, _helpers._TICK_ATTR),
+                patch.object(
+                    main_mod.analytics,
+                    "prune_with_retention_logging",
+                ) as prune,
+            ):
                 rc = main_mod.main(_helpers._ONCE_ARGS)
+                prune.assert_called_once_with()
 
             self.assertEqual(rc, 0)
-            prune.assert_called_once_with()
 
     def test_multi_repo_prunes_once_per_tick(self) -> None:
         # The multi-repo path fans repo ticks out across a thread pool;
@@ -620,15 +512,18 @@ class AnalyticsRetentionLoopWiringTest(unittest.TestCase):
         }) as main_mod:
             clients = _helpers._ClientFactory()
 
-            with patch.object(main_mod, _helpers._GITHUB_CLIENT_ATTR, side_effect=clients), \
-                 patch.object(main_mod.workflow, _helpers._TICK_ATTR), \
-                 patch.object(
-                     main_mod.analytics, "prune_with_retention_logging",
-                 ) as prune:
+            with (
+                patch.object(main_mod, _helpers._GITHUB_CLIENT_ATTR, side_effect=clients),
+                patch.object(main_mod.workflow, _helpers._TICK_ATTR),
+                patch.object(
+                    main_mod.analytics,
+                    "prune_with_retention_logging",
+                ) as prune,
+            ):
                 rc = main_mod.main(_helpers._ONCE_ARGS)
+                prune.assert_called_once_with()
 
             self.assertEqual(rc, 0)
-            prune.assert_called_once_with()
 
 
 class AsyncPollingDispatchTest(unittest.TestCase):
@@ -661,46 +556,22 @@ class AsyncPollingDispatchTest(unittest.TestCase):
                 global_cap=4, per_repo_cap=4,
             )
             self.addCleanup(sched.shutdown)
-            clients = _helpers._build_clients([_helpers._ALPHA_REPO, _helpers._BETA_REPO],
+            clients = _helpers._build_clients(
+                [_helpers._ALPHA_REPO, _helpers._BETA_REPO],
             )
 
-            alpha_started = threading.Event()
-            alpha_release = threading.Event()
-            beta_done = threading.Event()
-            current_pass = {_helpers._COUNT_FIELD: 0}
-
-            def slow_alpha() -> None:
-                alpha_started.set()
-                alpha_release.wait(timeout=_helpers._WORKER_WAIT_SECONDS)
-
-            def quick_beta() -> None:
-                beta_done.set()
-
-            def fake_tick(gh, spec, *, scheduler=None):
-                # Pass 1: only alpha submits a worker. Pass 2: only
-                # beta submits one. The contract under test is that
-                # pass 2 runs at all while alpha's worker is blocked.
-                if (
-                    current_pass[_helpers._COUNT_FIELD] == 1
-                    and spec.slug == _helpers._ALPHA_REPO
-                ):
-                    scheduler.submit(spec.slug, 1, slow_alpha)
-                elif (
-                    current_pass[_helpers._COUNT_FIELD] == 2
-                    and spec.slug == _helpers._BETA_REPO
-                ):
-                    scheduler.submit(spec.slug, 2, quick_beta)
-
-            try:
+            poll_probe = _helpers._CrossPollProbe()
+            with ExitStack() as cleanup:
+                cleanup.callback(poll_probe.alpha_release.set)
                 with patch.object(
-                    main_mod.workflow, _helpers._TICK_ATTR, side_effect=fake_tick,
+                    main_mod.workflow, _helpers._TICK_ATTR, side_effect=poll_probe.tick,
                 ):
-                    current_pass[_helpers._COUNT_FIELD] = 1
+                    poll_probe.current_pass = 1
                     t0 = time.monotonic()
                     main_mod._run_tick(clients, sched)
                     pass1_elapsed = time.monotonic() - t0
                     self.assertTrue(
-                        alpha_started.wait(timeout=_helpers._FAST_WAIT_SECONDS),
+                        poll_probe.alpha_started.wait(timeout=_helpers._FAST_WAIT_SECONDS),
                         "alpha worker should have started during pass 1",
                     )
                     # Pass 1 returned without waiting for alpha — the
@@ -714,18 +585,16 @@ class AsyncPollingDispatchTest(unittest.TestCase):
                         "should not wait for handler completion",
                     )
 
-                    current_pass[_helpers._COUNT_FIELD] = 2
+                    poll_probe.current_pass = 2
                     main_mod._run_tick(clients, sched)
                     self.assertTrue(
-                        beta_done.wait(timeout=_helpers._FAST_WAIT_SECONDS),
+                        poll_probe.beta_done.wait(timeout=_helpers._FAST_WAIT_SECONDS),
                         "beta worker did not run during pass 2 while "
                         "alpha's worker was still in flight",
                     )
                     # Alpha is still mid-flight; releasing now lets it
                     # exit cleanly before the scheduler shutdown.
                     self.assertTrue(sched.is_active(_helpers._ALPHA_REPO, 1))
-            finally:
-                alpha_release.set()
 
     def test_issue_not_relaunched_across_polls(
         self,
@@ -743,42 +612,25 @@ class AsyncPollingDispatchTest(unittest.TestCase):
             self.addCleanup(sched.shutdown)
             clients = _helpers._build_clients([_helpers._REPO])
 
-            started = threading.Event()
-            release = threading.Event()
-            run_count = {_helpers._COUNT_FIELD: 0}
-            run_lock = threading.Lock()
-            submit_results: list[bool] = []
-
-            def slow_worker() -> None:
-                with run_lock:
-                    run_count[_helpers._COUNT_FIELD] += 1
-                started.set()
-                release.wait(timeout=_helpers._WORKER_WAIT_SECONDS)
-
-            def fake_tick(gh, spec, *, scheduler=None):
-                submit_results.append(
-                    scheduler.submit(spec.slug, 7, slow_worker)
-                )
-
-            try:
+            active_probe = _helpers._DuplicateActiveProbe()
+            with ExitStack() as cleanup:
+                cleanup.callback(active_probe.release.set)
                 with patch.object(
-                    main_mod.workflow, _helpers._TICK_ATTR, side_effect=fake_tick,
+                    main_mod.workflow, _helpers._TICK_ATTR, side_effect=active_probe.tick,
                 ):
                     main_mod._run_tick(clients, sched)
                     self.assertTrue(
-                        started.wait(timeout=_helpers._FAST_WAIT_SECONDS),
+                        active_probe.started.wait(timeout=_helpers._FAST_WAIT_SECONDS),
                     )
                     main_mod._run_tick(clients, sched)
-            finally:
-                release.set()
 
             # Pass 1 was accepted; pass 2 was rejected by the
             # duplicate-active gate.
-            self.assertEqual(submit_results, [True, False])
+            self.assertEqual(active_probe.submit_results, [True, False])
             # The handler only ran once -- no second concurrent worker
             # was ever started while the first was still in flight.
-            with run_lock:
-                self.assertEqual(run_count[_helpers._COUNT_FIELD], 1)
+            with active_probe.lock:
+                self.assertEqual(active_probe.run_count, 1)
 
     def test_worker_finish_clears_in_flight_marker(
         self,
@@ -795,50 +647,29 @@ class AsyncPollingDispatchTest(unittest.TestCase):
             self.addCleanup(sched.shutdown)
             clients = _helpers._build_clients([_helpers._REPO])
 
-            done_events: list[threading.Event] = []
-            run_count = {_helpers._COUNT_FIELD: 0}
-            run_lock = threading.Lock()
-            submit_results: list[bool] = []
-
-            def quick_worker() -> None:
-                with run_lock:
-                    run_count[_helpers._COUNT_FIELD] += 1
-                done_events[-1].set()
-
-            def fake_tick(gh, spec, *, scheduler=None):
-                done_events.append(threading.Event())
-                submit_results.append(
-                    scheduler.submit(spec.slug, 3, quick_worker)
-                )
+            finish_probe = _helpers._FinishedWorkerProbe()
 
             with patch.object(
-                main_mod.workflow, _helpers._TICK_ATTR, side_effect=fake_tick,
+                main_mod.workflow, _helpers._TICK_ATTR, side_effect=finish_probe.tick,
             ):
                 main_mod._run_tick(clients, sched)
                 self.assertTrue(
-                    done_events[-1].wait(timeout=_helpers._FAST_WAIT_SECONDS),
+                    finish_probe.done_events[-1].wait(timeout=_helpers._FAST_WAIT_SECONDS),
                 )
                 # Spin briefly for the done-callback to clear the
                 # marker; with the callback running on a background
                 # thread, "worker finished" and "marker cleared" are
                 # distinct events.
-                deadline = time.monotonic() + _helpers._FAST_WAIT_SECONDS
-                while sched.is_active(_helpers._REPO, 3):
-                    if time.monotonic() > deadline:
-                        self.fail(
-                            "in-flight marker not cleared after worker "
-                            "exit",
-                        )
-                    time.sleep(_helpers._SCHEDULER_POLL_SECONDS)
+                _helpers._wait_until_inactive(sched, _helpers._REPO, 3)
                 self.assertFalse(sched.is_active(_helpers._REPO, 3))
                 main_mod._run_tick(clients, sched)
                 self.assertTrue(
-                    done_events[-1].wait(timeout=_helpers._FAST_WAIT_SECONDS),
+                    finish_probe.done_events[-1].wait(timeout=_helpers._FAST_WAIT_SECONDS),
                 )
 
-            self.assertEqual(submit_results, [True, True])
-            with run_lock:
-                self.assertEqual(run_count[_helpers._COUNT_FIELD], 2)
+            self.assertEqual(finish_probe.submit_results, [True, True])
+            with finish_probe.lock:
+                self.assertEqual(finish_probe.run_count, 2)
 
     def test_single_repo_reaps_once_per_poll(
         self,
@@ -861,9 +692,8 @@ class AsyncPollingDispatchTest(unittest.TestCase):
             ) as fake_tick, patch.object(sched, "reap") as reap:
                 fake_tick.return_value = None
                 main_mod._run_tick(clients, sched)
-
-            # Exactly one reap per polling pass.
-            self.assertEqual(reap.call_count, 1)
+                # Exactly one reap per polling pass.
+                self.assertEqual(reap.call_count, 1)
 
     def test_multi_repo_reaps_once_per_poll(
         self,
@@ -878,7 +708,8 @@ class AsyncPollingDispatchTest(unittest.TestCase):
                 global_cap=4, per_repo_cap=4,
             )
             self.addCleanup(sched.shutdown)
-            clients = _helpers._build_clients([_helpers._ALPHA_REPO, _helpers._BETA_REPO],
+            clients = _helpers._build_clients(
+                [_helpers._ALPHA_REPO, _helpers._BETA_REPO],
             )
 
             with patch.object(
@@ -886,9 +717,8 @@ class AsyncPollingDispatchTest(unittest.TestCase):
             ) as fake_tick, patch.object(sched, "reap") as reap:
                 fake_tick.return_value = None
                 main_mod._run_tick(clients, sched)
-
-            # One reap for the whole polling pass, not per repo.
-            self.assertEqual(reap.call_count, 1)
+                # One reap for the whole polling pass, not per repo.
+                self.assertEqual(reap.call_count, 1)
 
     def test_real_multi_repo_dispatch_reaps_once(
         self,
@@ -916,7 +746,8 @@ class AsyncPollingDispatchTest(unittest.TestCase):
                 global_cap=4, per_repo_cap=4,
             )
             self.addCleanup(sched.shutdown)
-            clients = _helpers._build_clients([_helpers._ALPHA_REPO, _helpers._BETA_REPO],
+            clients = _helpers._build_clients(
+                [_helpers._ALPHA_REPO, _helpers._BETA_REPO],
             )
             for _spec, gh in clients:
                 gh.list_pollable_issues.return_value = iter([])
@@ -925,10 +756,9 @@ class AsyncPollingDispatchTest(unittest.TestCase):
                 workflow_mod, "_refresh_base_and_worktrees",
             ), patch.object(sched, "reap") as reap:
                 main_mod._run_tick(clients, sched)
-
-            # The real `_dispatch_via_scheduler` is exercised this time;
-            # only `_run_tick`'s own reap should be counted.
-            self.assertEqual(reap.call_count, 1)
+                # The real `_dispatch_via_scheduler` is exercised this time;
+                # only `_run_tick`'s own reap should be counted.
+                self.assertEqual(reap.call_count, 1)
 
 
 class ShutdownWatchdogTest(unittest.TestCase):
@@ -946,7 +776,7 @@ class ShutdownWatchdogTest(unittest.TestCase):
         with _reload_main(_helpers._LEGACY_ENV) as main_mod:
             with patch.object(main_mod, "_arm_shutdown_watchdog") as arm:
                 main_mod._shutdown(signal.SIGTERM, None)
-            arm.assert_called_once_with(signal.SIGTERM)
+                arm.assert_called_once_with(signal.SIGTERM)
 
     def test_watchdog_force_exits_when_drain_overruns(self) -> None:
         with _reload_main(_helpers._LEGACY_ENV) as main_mod:
@@ -989,13 +819,14 @@ class ShutdownWatchdogTest(unittest.TestCase):
             ) as os_exit:
                 with self.assertRaises(RuntimeError):
                     main_mod._force_exit(signal.SIGTERM)
-            # The sweep is bounded by the reserved terminate grace -- NOT the
-            # default 5s -- so the watchdog path cannot push total exit past
-            # `SHUTDOWN_GRACE_SECONDS` (the Finding-1 ceiling contract).
-            term.assert_called_once_with(
-                grace=main_mod._shutdown_terminate_grace(),
-            )
-            os_exit.assert_called_once_with(_helpers._SIGNAL_EXIT_BASE + signal.SIGTERM)
+                # The sweep is bounded by the reserved terminate grace -- NOT
+                # the default 5s -- so the watchdog path stays within budget.
+                term.assert_called_once_with(
+                    grace=main_mod._shutdown_terminate_grace(),
+                )
+                os_exit.assert_called_once_with(
+                    _helpers._SIGNAL_EXIT_BASE + signal.SIGTERM,
+                )
 
     def test_drain_window_reserves_terminate_grace(self) -> None:
         # The hard ceiling is `SHUTDOWN_GRACE_SECONDS`. `_force_exit`'s own
@@ -1005,28 +836,25 @@ class ShutdownWatchdogTest(unittest.TestCase):
         # sweep's grace. Capture the timeout the watchdog waits on to prove
         # drain_window + sweep_reserve == SHUTDOWN_GRACE_SECONDS.
         with _reload_main(_helpers._LEGACY_ENV) as main_mod:
-            captured: dict[str, float] = {}
+            wait_recorder = _helpers._WaitRecorder()
             fake_event = MagicMock()
-
-            def fake_wait(timeout=None):
-                captured["timeout"] = timeout
-                return True  # drain reported complete; no force-exit
-
-            fake_event.wait.side_effect = fake_wait
-            with patch.object(main_mod, "_shutdown_complete", fake_event), \
-                 patch.object(
-                     main_mod.config,
-                     _helpers._SHUTDOWN_GRACE_ATTR,
-                     _helpers._SHUTDOWN_GRACE_SECONDS,
-                 ):
+            fake_event.wait.side_effect = wait_recorder
+            with (
+                patch.object(main_mod, "_shutdown_complete", fake_event),
+                patch.object(
+                    main_mod.config,
+                    _helpers._SHUTDOWN_GRACE_ATTR,
+                    _helpers._SHUTDOWN_GRACE_SECONDS,
+                ),
+            ):
                 main_mod._run_shutdown_watchdog(signal.SIGTERM)
             reserve = main_mod._shutdown_terminate_grace()
             self.assertEqual(
-                captured["timeout"],
+                wait_recorder.timeout,
                 _helpers._SHUTDOWN_GRACE_SECONDS - reserve,
             )
             self.assertLessEqual(
-                captured["timeout"] + reserve,
+                wait_recorder.timeout + reserve,
                 _helpers._SHUTDOWN_GRACE_SECONDS,
             )
 
@@ -1065,9 +893,9 @@ class ShutdownWatchdogTest(unittest.TestCase):
                 ),
             ):
                 rc = main_mod.main(_helpers._ONCE_ARGS)
+                term.assert_called_once_with()
 
             self.assertEqual(rc, _helpers._SIGNAL_EXIT_BASE + signal.SIGTERM)
-            term.assert_called_once_with()
 
     def test_normal_exit_does_not_terminate_agents(self) -> None:
         # The non-signal paths (`--once` finishing, self-modifying-merge
@@ -1087,9 +915,9 @@ class ShutdownWatchdogTest(unittest.TestCase):
                 patch.object(main_mod.workflow, _helpers._TICK_ATTR),
             ):
                 rc = main_mod.main(_helpers._ONCE_ARGS)
+                term.assert_not_called()
 
             self.assertEqual(rc, 0)
-            term.assert_not_called()
 
 
 if __name__ == "__main__":

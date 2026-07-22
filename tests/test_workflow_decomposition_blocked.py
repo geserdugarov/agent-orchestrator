@@ -265,6 +265,7 @@ class HandleBlockedResolutionTest(unittest.TestCase, _PatchedWorkflowMixin):
             for _, body in gh.posted_comments
         ))
 
+
 class HandleBlockedDependencyTest(unittest.TestCase, _PatchedWorkflowMixin):
     def test_unblocks_middle_child_when_dep_done(self) -> None:
         # children[0] is done; children[1] depends on [0] and is currently
@@ -330,6 +331,7 @@ class HandleBlockedDependencyTest(unittest.TestCase, _PatchedWorkflowMixin):
 
         with self.assertNoLogs("orchestrator.workflow", level="INFO"):
             _run_blocked(self, gh, parent)
+
 
 class HandleBlockedRecoveryTest(unittest.TestCase, _PatchedWorkflowMixin):
     def test_blocked_with_no_recorded_children_parks(self) -> None:

@@ -65,11 +65,12 @@ class _LocalBranchPusher:
     ) -> bool:
         self.branch = branch
         self.force_with_lease = force_with_lease or ""
+        expected_lease = self.force_with_lease
         push_result = subprocess.run(
             [
                 GIT_COMMAND,
                 PUSH_COMMAND,
-                f"--force-with-lease=refs/heads/{branch}:{force_with_lease or ''}",
+                f"--force-with-lease=refs/heads/{branch}:{expected_lease}",
                 ORIGIN_REMOTE,
                 f"HEAD:refs/heads/{branch}",
             ],
@@ -190,7 +191,6 @@ class _RefreshBaseRealGitFixture:
     def _is_clean(self) -> bool:
         return self._git("status", "--porcelain", cwd=self.wt).strip() == ""
 
-
     def _refresh(self) -> None:
         with patch.object(
             workflow.config,
@@ -278,11 +278,13 @@ class RefreshPrRealGitTest(_RefreshBaseRealGitFixture, unittest.TestCase):
         # the production helper.
         pusher = _LocalBranchPusher()
 
-        with patch.object(base_sync, "_push_branch", side_effect=pusher), \
-             patch.object(
+        with (
+            patch.object(base_sync, "_push_branch", side_effect=pusher),
+            patch.object(
                 workflow.config, WORKTREES_DIR_ATTR,
                 self.tmpdir / WORKTREES_DIR_NAME,
-             ):
+            ),
+        ):
             workflow._refresh_base_and_worktrees(self.gh, self.spec)
 
         # The local HEAD moved: the rebase replayed the feature commit
@@ -333,11 +335,13 @@ class RefreshPrRealGitTest(_RefreshBaseRealGitFixture, unittest.TestCase):
         # check would have done the same thing on a diverged remote).
         push = MagicMock(return_value=False)
 
-        with patch.object(base_sync, "_push_branch", push), \
-             patch.object(
+        with (
+            patch.object(base_sync, "_push_branch", push),
+            patch.object(
                 workflow.config, WORKTREES_DIR_ATTR,
                 self.tmpdir / WORKTREES_DIR_NAME,
-             ):
+            ),
+        ):
             workflow._refresh_base_and_worktrees(self.gh, self.spec)
 
         # Push was attempted exactly once.
@@ -379,11 +383,13 @@ class RefreshPrRealGitTest(_RefreshBaseRealGitFixture, unittest.TestCase):
         head_before = self._wt_head()
 
         push = MagicMock()
-        with patch.object(base_sync, "_push_branch", push), \
-             patch.object(
+        with (
+            patch.object(base_sync, "_push_branch", push),
+            patch.object(
                 workflow.config, WORKTREES_DIR_ATTR,
                 self.tmpdir / WORKTREES_DIR_NAME,
-             ):
+            ),
+        ):
             workflow._refresh_base_and_worktrees(self.gh, self.spec)
 
         # The rebase was attempted and aborted on conflict -- HEAD stays.

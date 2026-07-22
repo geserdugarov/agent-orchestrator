@@ -30,7 +30,7 @@ _DEVELOP_SKILLS = (
     _REPO_ROOT / ".agents" / "skills" / "develop" / "SKILL.md",
     _REPO_ROOT / ".claude" / "skills" / "develop" / "SKILL.md",
 )
-_YAML_BLOCK_MARKERS = frozenset({">", ">-", ">+", "|", "|-", "|+"})
+_YAML_BLOCK_MARKERS = frozenset((">", ">-", ">+", "|", "|-", "|+"))
 
 
 def _is_indented_or_blank(line: str) -> bool:

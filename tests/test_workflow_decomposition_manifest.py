@@ -17,9 +17,10 @@ EXCESSIVE_CHILD_COUNT = 11
 
 class ParseManifestDecisionTest(unittest.TestCase):
     def test_single_decision(self) -> None:
-        msg = "I think this fits.\n\n" + _manifest(
-            '{"decision": "single", "rationale": "small change"}'
+        manifest_block = _manifest(
+            '{"decision": "single", "rationale": "small change"}',
         )
+        msg = f"I think this fits.\n\n{manifest_block}"
         manifest, error = workflow._parse_manifest(msg)
         self.assertIsNone(error)
         self.assertIsNotNone(manifest)
@@ -61,6 +62,7 @@ class ParseManifestDecisionTest(unittest.TestCase):
         )
         self.assertIsNone(manifest)
         self.assertIn("non-empty", error)
+
 
 class ParseManifestChildValidationTest(unittest.TestCase):
     def test_child_missing_title_rejected(self) -> None:
@@ -128,6 +130,7 @@ class ParseManifestChildValidationTest(unittest.TestCase):
         self.assertIsNone(manifest)
         self.assertIn("title or body", error)
 
+
 class ParseManifestEnvelopeTest(unittest.TestCase):
     def test_multiple_manifest_blocks_rejected(self) -> None:
         # The decompose prompt requires exactly one manifest. If the
@@ -153,7 +156,8 @@ class ParseManifestEnvelopeTest(unittest.TestCase):
         # prose suggests the agent did not finish its final answer or
         # appended commentary that the orchestrator would ignore --
         # either way, surface to the human rather than silently act.
-        msg = _manifest('{"decision": "single"}') + "\n\nP.S. hope this works"
+        manifest_block = _manifest('{"decision": "single"}')
+        msg = f"{manifest_block}\n\nP.S. hope this works"
         manifest, error = workflow._parse_manifest(msg)
         self.assertIsNone(manifest)
         self.assertIn("final block", error)
@@ -162,7 +166,8 @@ class ParseManifestEnvelopeTest(unittest.TestCase):
         # Pure whitespace (newlines/spaces) after the closing fence is a
         # benign formatting artifact and must NOT trip the "trailing
         # content" guard.
-        msg = _manifest('{"decision": "single"}') + "\n\n   \n"
+        manifest_block = _manifest('{"decision": "single"}')
+        msg = f"{manifest_block}\n\n   \n"
         manifest, error = workflow._parse_manifest(msg)
         self.assertIsNone(error)
         self.assertEqual(manifest[KEY_DECISION], DECISION_SINGLE)
@@ -185,6 +190,7 @@ class ParseManifestEnvelopeTest(unittest.TestCase):
                 ))
                 self.assertIsNone(manifest)
                 self.assertIn("must be a list", error)
+
 
 class ParseManifestOptionsTest(unittest.TestCase):
     def test_null_depends_on_treated_as_empty(self) -> None:

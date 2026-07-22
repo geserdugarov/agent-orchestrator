@@ -191,7 +191,7 @@ class TransitionTableTest(unittest.TestCase):
         # straight to done/rejected.
         self.assertEqual(
             ALLOWED_TRANSITIONS[None],
-            frozenset({WorkflowLabel.DECOMPOSING, WorkflowLabel.IMPLEMENTING}),
+            frozenset((WorkflowLabel.DECOMPOSING, WorkflowLabel.IMPLEMENTING)),
         )
 
     def test_detour_set_matches_base_sync(self) -> None:
@@ -263,7 +263,7 @@ class TransitionGraphReachabilityTest(unittest.TestCase):
 
 class IsAllowedTransitionTest(unittest.TestCase):
     def test_spine_edges_allowed(self) -> None:
-        for cur, nxt in [
+        for cur, nxt in (
             (None, WorkflowLabel.DECOMPOSING),
             (None, WorkflowLabel.IMPLEMENTING),
             (WorkflowLabel.IMPLEMENTING, WorkflowLabel.VALIDATING),
@@ -275,17 +275,17 @@ class IsAllowedTransitionTest(unittest.TestCase):
             (WorkflowLabel.BLOCKED, WorkflowLabel.READY),
             (WorkflowLabel.BLOCKED, WorkflowLabel.DECOMPOSING),  # drift
             (WorkflowLabel.UMBRELLA, WorkflowLabel.DONE),
-        ]:
+        ):
             self.assertTrue(is_allowed_transition(cur, nxt), (cur, nxt))
 
     def test_illegal_edges_rejected(self) -> None:
-        for cur, nxt in [
+        for cur, nxt in (
             (WorkflowLabel.VALIDATING, WorkflowLabel.IN_REVIEW),  # skips docs
             (WorkflowLabel.IMPLEMENTING, WorkflowLabel.IN_REVIEW),  # skips the reviewer path
             (WorkflowLabel.IMPLEMENTING, WorkflowLabel.DOCUMENTING),
             (WorkflowLabel.READY, WorkflowLabel.VALIDATING),  # skips implementing
             (None, WorkflowLabel.DONE),  # entry not terminalizable
-        ]:
+        ):
             self.assertFalse(is_allowed_transition(cur, nxt), (cur, nxt))
 
     def test_conflict_only_from_detour_sources(self) -> None:
@@ -368,6 +368,7 @@ class TerminalTransitionTest(unittest.TestCase):
             self.assertFalse(
                 is_allowed_transition(state, WorkflowLabel.REJECTED), state,
             )
+
 
 class GuardModeTest(unittest.TestCase):
     """`guard_transition` is the mode-aware wrapper `set_workflow_label`

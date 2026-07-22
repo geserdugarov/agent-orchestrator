@@ -140,10 +140,14 @@ class StageEvaluationAnalyticsTest(unittest.TestCase):
             gh = FakeGitHubClient()
             issue = make_issue(_ERROR_ISSUE, label=LABEL_VALIDATING)
             gh.add_issue(issue)
-            with patch.object(analytics, _ANALYTICS_PATH_ATTR, path), \
-                 patch.object(
-                     workflow, "_handle_validating", side_effect=sentinel,
-                 ):
+            with (
+                patch.object(analytics, _ANALYTICS_PATH_ATTR, path),
+                patch.object(
+                    workflow,
+                    "_handle_validating",
+                    side_effect=sentinel,
+                ),
+            ):
                 self.assertIs(_process_error(gh, issue), sentinel)
             records = _stage_evaluations(path, _ERROR_ISSUE)
         self.assertEqual(len(records), 1)

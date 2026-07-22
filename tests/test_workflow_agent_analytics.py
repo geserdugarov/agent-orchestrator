@@ -913,15 +913,18 @@ class TrajectoryRecordingTest(unittest.TestCase):
         gh = FakeGitHubClient()
         with tempfile.TemporaryDirectory(prefix="traj-failopen-") as td:
             t_path = Path(td) / "trajectory.jsonl"
-            with patch.object(analytics, _ANALYTICS_PATH_ATTR, None), \
-                    patch.object(analytics, _TRAJECTORY_PATH_ATTR, t_path), \
-                    patch.object(analytics, _TRACK_SKILLS_ATTR, True), \
-                    patch.object(
-                        analytics.usage, "parse_agent_trajectory",
-                        side_effect=RuntimeError("boom"),
-                    ), \
-                    patch.object(workflow, _RUN_AGENT_ATTR) as run_mock, \
-                    self.assertLogs(analytics.log, level="ERROR"):
+            with (
+                patch.object(analytics, _ANALYTICS_PATH_ATTR, None),
+                patch.object(analytics, _TRAJECTORY_PATH_ATTR, t_path),
+                patch.object(analytics, _TRACK_SKILLS_ATTR, True),
+                patch.object(
+                    analytics.usage,
+                    "parse_agent_trajectory",
+                    side_effect=RuntimeError("boom"),
+                ),
+                patch.object(workflow, _RUN_AGENT_ATTR) as run_mock,
+                self.assertLogs(analytics.log, level="ERROR"),
+            ):
                 run_mock.return_value = AgentResult(
                     session_id="sess-skill", last_message="", exit_code=0,
                     timed_out=False,
@@ -1153,12 +1156,15 @@ class SkillTriggeredEventTest(unittest.TestCase):
         # The events are driven by `record_agent_exit`'s return value, not a
         # second parse of stdout: a stubbed return emits exactly its names.
         gh = FakeGitHubClient()
-        with patch.object(analytics, _ANALYTICS_PATH_ATTR, None), \
-                patch.object(
-                    analytics, "record_agent_exit",
-                    return_value=["alpha", "beta"],
-                ), \
-                patch.object(workflow, _RUN_AGENT_ATTR) as run_mock:
+        with (
+            patch.object(analytics, _ANALYTICS_PATH_ATTR, None),
+            patch.object(
+                analytics,
+                "record_agent_exit",
+                return_value=["alpha", "beta"],
+            ),
+            patch.object(workflow, _RUN_AGENT_ATTR) as run_mock,
+        ):
             run_mock.return_value = AgentResult(
                 session_id="s", last_message="", exit_code=0,
                 timed_out=False, stdout="ignored-not-reparsed", stderr="",

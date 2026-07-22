@@ -14,9 +14,34 @@ import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import patch
+from typing import NamedTuple
+from unittest.mock import MagicMock, patch
 
 from orchestrator.analytics import _sync_rows
+
+
+class _AgentRunProjection(NamedTuple):
+    model: str
+    total_tokens: int
+    total_cache: int
+    bucket: str
+    failed: bool
+    has_cost: bool
+    cost_source: str
+
+
+class _DailyRollupProjection(NamedTuple):
+    total_in: int
+    total_out: int
+    total_cached: int
+    total_cache_read: int
+    total_cache_write: int
+    total_cost: object
+    duration_sum: float
+    duration_count: int
+    failed_count: int
+    timed_out_count: int
+    event_count: int
 
 
 SAMPLE_TIMESTAMP = "2026-05-25T12:00:00+00:00"
@@ -338,9 +363,12 @@ def _sync_capturing_logs(test_case, analytics_sync, connection, **kwargs):
     the captured output off a plain list rather than the `assertLogs`
     control variable.
     """
-    with test_case.assertLogs(_SYNC_MODULE, level=_LOG_LEVEL_INFO) as cm:
+    with contextlib.ExitStack() as cleanup:
+        captured = cleanup.enter_context(
+            test_case.assertLogs(_SYNC_MODULE, level=_LOG_LEVEL_INFO),
+        )
         sync_result = _run_sync(analytics_sync, connection, **kwargs)
-    return sync_result, list(cm.output)
+    return sync_result, list(captured.output)
 
 
 def _reset_root_logger() -> None:
@@ -752,14 +780,11 @@ class AnalyticsSyncCliTest(unittest.TestCase):
                 _DB_URL_ENV: "",
             })
 
-            def fake_sync(*, log_path, db_url, **kwargs):
-                # Verify the CLI threads the overrides through.
-                self.assertEqual(log_path, path)
-                self.assertEqual(db_url, "postgresql://override/db")
-                return analytics_sync.SyncResult(inserted=1, total_lines=1)
-
+            sync_mock = MagicMock(
+                return_value=analytics_sync.SyncResult(inserted=1, total_lines=1),
+            )
             with patch.object(
-                analytics_sync, "sync_jsonl_to_postgres", side_effect=fake_sync
+                analytics_sync, "sync_jsonl_to_postgres", sync_mock,
             ):
                 buf = io.StringIO()
                 with patch(_STDOUT, buf):
@@ -769,6 +794,12 @@ class AnalyticsSyncCliTest(unittest.TestCase):
                     ])
             self.assertEqual(rc, 0)
             self.assertIn("inserted=1", buf.getvalue())
+            sync_mock.assert_called_once()
+            self.assertEqual(sync_mock.call_args.kwargs["log_path"], path)
+            self.assertEqual(
+                sync_mock.call_args.kwargs["db_url"],
+                "postgresql://override/db",
+            )
 
     def test_cli_surfaces_failure_as_nonzero(self) -> None:
         _, analytics_sync = _reload({
@@ -1009,7 +1040,8 @@ class AnalyticsSyncBatchTest(unittest.TestCase):
                 sync_result.skipped_duplicate, len(racing_records),
             )
             self.assertEqual(len(fake.batches), 1)
-            self.assertEqual(len(fake.batches[0][1]), len(records))
+            first_batch_records = fake.batches[0][1]
+            self.assertEqual(len(first_batch_records), len(records))
 
     def test_final_partial_batch_flushed_at_eof(self) -> None:
         # 5 records with `_BATCH_SIZE=3` yields one full batch of 3
@@ -1490,25 +1522,22 @@ class AnalyticsSyncLiveDdlTest(unittest.TestCase):
                     )
                     row = cur.fetchone()
         self.assertIsNotNone(row)
-        (
-            model, total_tokens, total_cache, bucket,
-            failed, has_cost, cost_source,
-        ) = row
-        self.assertEqual(model, agent_run["models"][0])
+        projection = _AgentRunProjection(*row)
+        self.assertEqual(projection.model, agent_run["models"][0])
         self.assertEqual(
-            total_tokens,
+            projection.total_tokens,
             agent_run["input_tokens"] + agent_run["output_tokens"],
         )
         self.assertEqual(
-            total_cache,
+            projection.total_cache,
             agent_run["cached_tokens"]
             + agent_run["cache_read_tokens"]
             + agent_run["cache_write_tokens"],
         )
-        self.assertEqual(bucket, "3-5")
-        self.assertFalse(failed)
-        self.assertTrue(has_cost)
-        self.assertEqual(cost_source, "estimated")
+        self.assertEqual(projection.bucket, "3-5")
+        self.assertFalse(projection.failed)
+        self.assertTrue(projection.has_cost)
+        self.assertEqual(projection.cost_source, "estimated")
 
     def test_daily_rollup_refreshes_after_sync(self) -> None:
         # End-to-end Layer 4: insert two `agent_exit` rows on the same
@@ -1580,44 +1609,47 @@ class AnalyticsSyncLiveDdlTest(unittest.TestCase):
                     )
                     row = cur.fetchone()
         self.assertIsNotNone(row)
-        (
-            total_in, total_out, total_cached, total_cr, total_cw,
-            total_cost, dur_sum, dur_count,
-            failed_count, timed_out_count, event_count,
-        ) = row
+        projection = _DailyRollupProjection(*row)
         self.assertEqual(
-            total_in, sum(run["input_tokens"] for run in runs),
+            projection.total_in, sum(run["input_tokens"] for run in runs),
         )
         self.assertEqual(
-            total_out, sum(run["output_tokens"] for run in runs),
+            projection.total_out, sum(run["output_tokens"] for run in runs),
         )
         self.assertEqual(
-            total_cached, sum(run["cached_tokens"] for run in runs),
+            projection.total_cached, sum(run["cached_tokens"] for run in runs),
         )
         self.assertEqual(
-            total_cr, sum(run["cache_read_tokens"] for run in runs),
+            projection.total_cache_read,
+            sum(run["cache_read_tokens"] for run in runs),
         )
         self.assertEqual(
-            total_cw, sum(run["cache_write_tokens"] for run in runs),
+            projection.total_cache_write,
+            sum(run["cache_write_tokens"] for run in runs),
         )
         # Numeric comparison: the schema uses NUMERIC(20, 10), so the
         # sum may come back as a Decimal. Cast both sides to float for
         # the comparison so an exact-decimal mismatch on the literal
         # does not blow up the assertion.
         self.assertAlmostEqual(
-            float(total_cost), sum(run["cost_usd"] for run in runs), places=6,
+            float(projection.total_cost),
+            sum(run["cost_usd"] for run in runs),
+            places=6,
         )
         self.assertEqual(
-            dur_sum, sum(run["duration_s"] for run in runs),
+            projection.duration_sum,
+            sum(run["duration_s"] for run in runs),
         )
-        self.assertEqual(dur_count, len(runs))
+        self.assertEqual(projection.duration_count, len(runs))
         self.assertEqual(
-            failed_count, sum(run["exit_code"] != 0 for run in runs),
+            projection.failed_count,
+            sum(run["exit_code"] != 0 for run in runs),
         )
         self.assertEqual(
-            timed_out_count, sum(run["timed_out"] for run in runs),
+            projection.timed_out_count,
+            sum(run["timed_out"] for run in runs),
         )
-        self.assertEqual(event_count, len(runs))
+        self.assertEqual(projection.event_count, len(runs))
 
     def _apply_schema(self) -> None:
         import psycopg

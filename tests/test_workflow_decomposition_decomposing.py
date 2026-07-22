@@ -450,6 +450,7 @@ class HandleDecomposingDecisionTest(
                 DEPENDENCY_SPLIT_ISSUE_NUMBER,
             )
 
+
 class HandleDecomposingParkTest(
     unittest.TestCase,
     _DecomposingWorkflowMixin,
@@ -581,6 +582,7 @@ class HandleDecomposingParkTest(
             and "exit_code=3" in record.getMessage()
             for record in logs.records
         ))
+
 
 class HandleDecomposingResumeTest(
     unittest.TestCase,
@@ -732,6 +734,7 @@ class HandleDecomposingResumeTest(
             f"hit retry cap ({config.MAX_RETRIES_PER_DAY}/day) for decomposing",
             last_comment,
         )
+
 
 class DecompositionDisabledTest(
     unittest.TestCase,
@@ -971,6 +974,7 @@ class DecompositionDisabledTest(
         self.assertNotIn(LABEL_IMPLEMENTING, labels)
         self.assertEqual(gh.created_child_issues, [])
 
+
 class DecompositionChildPersistenceTest(
     unittest.TestCase,
     _DecomposingWorkflowMixin,
@@ -1013,6 +1017,7 @@ class DecompositionChildPersistenceTest(
             len(gh.pinned_data(PERSISTENCE_ISSUE_NUMBER).get(KEY_CHILDREN) or []),
             3,
         )
+
 
 class DecompositionRecoveryTest(
     unittest.TestCase,
@@ -1240,6 +1245,7 @@ class DecompositionRecoveryTest(
             ORPHAN_REPAIR_PARENT_NUMBER,
         )
 
+
 class DecompositionWriteOrderingTest(
     unittest.TestCase,
     _DecomposingWorkflowMixin,
@@ -1307,6 +1313,7 @@ class DecompositionWriteOrderingTest(
             "parent must record the child number before the child's "
             "pinned state is seeded",
         )
+
 
 class DecompositionWorktreeTest(
     unittest.TestCase,

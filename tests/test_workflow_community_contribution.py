@@ -116,12 +116,14 @@ class SweepCommunityContributionFailuresTest(unittest.TestCase):
         calls: list[int] = []
         original = gh.add_pr_label
 
-        with patch.object(config, _ALLOWLIST_CONFIG, (_ALLOWED_LOGIN,)), \
-             patch.object(
-                 gh,
-                 "add_pr_label",
-                 side_effect=partial(_fail_first_label_write, calls, original),
-             ):
+        with (
+            patch.object(config, _ALLOWLIST_CONFIG, (_ALLOWED_LOGIN,)),
+            patch.object(
+                gh,
+                "add_pr_label",
+                side_effect=partial(_fail_first_label_write, calls, original),
+            ),
+        ):
             workflow._sweep_community_contribution_prs(gh, _TEST_SPEC)
         # Both PRs were attempted (the failure on #1 must not abort the
         # sweep). Both got a HITL ping because the comment is posted
@@ -146,10 +148,14 @@ class SweepCommunityContributionFailuresTest(unittest.TestCase):
         # the next tick and no human is ever called.
         gh = FakeGitHubClient()
         gh.add_pr(_pr(_COMMENT_RETRY_PR_NUMBER, author=_OUTSIDER_LOGIN))
-        with patch.object(config, _ALLOWLIST_CONFIG, (_ALLOWED_LOGIN,)), \
-             patch.object(
-                gh, "pr_comment", side_effect=RuntimeError("comment boom")
-             ):
+        with (
+            patch.object(config, _ALLOWLIST_CONFIG, (_ALLOWED_LOGIN,)),
+            patch.object(
+                gh,
+                "pr_comment",
+                side_effect=RuntimeError("comment boom"),
+            ),
+        ):
             workflow._sweep_community_contribution_prs(gh, _TEST_SPEC)
         self.assertFalse(
             gh.pr_has_label(
@@ -174,10 +180,14 @@ class SweepCommunityContributionFailuresTest(unittest.TestCase):
 
     def test_enumeration_failure_is_swallowed(self) -> None:
         gh = FakeGitHubClient()
-        with patch.object(config, _ALLOWLIST_CONFIG, (_ALLOWED_LOGIN,)), \
-             patch.object(
-                gh, "iter_open_prs", side_effect=RuntimeError("api boom")
-             ):
+        with (
+            patch.object(config, _ALLOWLIST_CONFIG, (_ALLOWED_LOGIN,)),
+            patch.object(
+                gh,
+                "iter_open_prs",
+                side_effect=RuntimeError("api boom"),
+            ),
+        ):
             # Must not raise.
             workflow._sweep_community_contribution_prs(gh, _TEST_SPEC)
         self.assertEqual(gh.posted_pr_comments, [])
