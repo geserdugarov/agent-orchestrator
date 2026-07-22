@@ -41,11 +41,11 @@ Do not mark a stage complete until its completion gate is satisfied.
 |---|---|---:|---:|
 | 1 | Concrete formatting and correctness cleanup | 9/9 | [x] |
 | 2 | Extreme production complexity hotspots | 8/8 | [x] |
-| 3 | Remaining production complexity | 5/6 | [ ] |
+| 3 | Remaining production complexity | 6/6 | [x] |
 | 4 | Remaining production style and structure | 5/5 | [x] |
 | 5 | Test structure and complexity | 7/7 | [x] |
 | 6 | Test literals and naming | 7/7 | [x] |
-| 7 | Long-tail cleanup and final verification | 3/5 | [ ] |
+| 7 | Long-tail cleanup and final verification | 4/5 | [ ] |
 
 ## Finding-count progress
 
@@ -441,15 +441,15 @@ packages and accepted-remainder review.
 
 ### Package 7.4 — Review accepted remainder
 
-- [ ] Challenge every entry in the accepted-remainder register and remove it if a clear implementation is now
+- [x] Challenge every entry in the accepted-remainder register and remove it if a clear implementation is now
   available.
-- [ ] Confirm each retained entry protects readability or a documented compatibility contract rather than convenience.
-- [ ] Revalidate the refreshed `WPS402` facade finding with the registered compatibility remainders.
+- [x] Confirm each retained entry protects readability or a documented compatibility contract rather than convenience.
+- [x] Revalidate the refreshed `WPS402` facade finding with the registered compatibility remainders.
 
 ### Package 7.5 — Final repository validation
 
-- [ ] Run the full validation gate from a clean worktree.
-- [ ] Update all progress tables and close every completed package.
+- [x] Run the full validation gate from a clean worktree.
+- [x] Update all progress tables and close every completed package.
 - [ ] Confirm the final result reaches zero findings or the minimum acceptable fallback.
 
 Completion gate: the primary zero-finding target is achieved, or at least 90% of findings are removed with no
@@ -473,7 +473,8 @@ considered.
 
 ### Agent-exit analytics context
 
-- File and symbol: `orchestrator/analytics/__init__.py: record_agent_exit`
+- File and symbol: `orchestrator/analytics/_recording.py: record_agent_exit`, re-exported through
+  `orchestrator/analytics/__init__.py`.
 - Rule: `WPS211`
 - Reason: The explicit keyword-only run context is called by workflow code and tests. A request object would break the
   established call contract, while `**kwargs` would discard useful typing and validation. Cohesive context helpers own
@@ -583,8 +584,8 @@ considered.
 
 ### Analytics event-recording result inputs
 
-- File and symbols: `orchestrator/analytics/__init__.py`: `record_stage_evaluation` and `record_agent_exit` (the
-  `result` parameter).
+- File and symbols: `orchestrator/analytics/_recording.py`: `record_stage_evaluation` and `record_agent_exit` (the
+  `result` parameter), re-exported through `orchestrator/analytics/__init__.py`.
 - Rule: `WPS110`
 - Reason: `result` is part of the public keyword contract of these `analytics.__all__` recorders; workflow code calls
   them as `record_stage_evaluation(result=...)` / `record_agent_exit(result=...)`. Renaming the parameter would break
@@ -679,7 +680,7 @@ considered.
   irreducible zeros remain.
 - Protected by: `tests/test_analytics_read_*.py`, `tests/test_analytics_read_cost_cell.py`,
   `tests/test_dashboard*.py`, and `tests/test_trajectory_reader.py`.
-- Reviewed: [ ]
+- Reviewed: [x]
 
 ### Terminal state writes and inherent per-branch repetition
 
@@ -700,7 +701,7 @@ considered.
   the source of the stage repetition.
 - Protected by: the stage-handler suites (`tests/test_workflow_<stage>.py` family),
   `tests/test_workflow_base_sync_unit.py`, `tests/test_analytics_read_*.py`, and the dashboard tests.
-- Reviewed: [ ]
+- Reviewed: [x]
 
 ### Positional row/column indices
 
@@ -712,7 +713,7 @@ considered.
   otherwise-literal positional sequence (`row[8]`, `row[9]`, `row[10]`, `row[11]`, ...) fragments the
   column layout instead of clarifying it.
 - Protected by: `tests/test_analytics_read_tables.py` and `tests/test_analytics_read_breakdowns.py`.
-- Reviewed: [ ]
+- Reviewed: [x]
 
 ### Axis-step ladder and one-off chart heights
 
@@ -725,7 +726,7 @@ considered.
   `150` are empty-state chart heights used once each, where a named constant used a single time adds
   no clarity. The reused default height was named `_DEFAULT_CHART_HEIGHT`.
 - Protected by: `tests/test_dashboard_charts.py`.
-- Reviewed: [ ]
+- Reviewed: [x]
 
 ### Git CLI subcommand and flag tokens
 
@@ -738,7 +739,7 @@ considered.
   invocation; a constant per token (or a `_C = "-c"`) obscures the command without adding meaning. The
   `git` executable name and the `fetch` operation, which do carry meaning, were named.
 - Protected by: `tests/test_workflow_*worktree*.py` and the conflict/base-sync git suites.
-- Reviewed: [ ]
+- Reviewed: [x]
 
 ### Plotly layout and trace dict keys
 
@@ -750,7 +751,7 @@ considered.
 - Reason: `color` is plotly's own trace-dictionary vocabulary. Naming it forces a reader to dereference a
   constant to recover the plotly attribute it stands for, which is less clear than the literal API key.
 - Protected by: `tests/test_dashboard_charts.py`.
-- Reviewed: [ ]
+- Reviewed: [x]
 
 ### Dashboard KPI-tile and stack-mode dict keys
 
@@ -763,7 +764,7 @@ considered.
   `value` additionally cannot become a constant without tripping `WPS110` (a blacklisted generic
   name). `type` / `backend` are the two stack-mode radio option values in `dashboard_widgets.py`.
 - Protected by: `tests/test_dashboard.py`.
-- Reviewed: [ ]
+- Reviewed: [x]
 
 ### Categorical chart palette hues
 
@@ -776,7 +777,7 @@ considered.
   the hues coincide with the semantic `WARNING` / `DANGER` delta colors -- wrongly couple unrelated
   concerns.
 - Protected by: `tests/test_dashboard_theme.py` and `tests/test_dashboard_charts.py`.
-- Reviewed: [ ]
+- Reviewed: [x]
 
 ### Numeric format-spec f-strings
 
@@ -795,7 +796,7 @@ considered.
   call that reads worse than the f-string it dodges.
 - Protected by: `tests/test_dashboard.py`, `tests/test_dashboard_charts.py`,
   `tests/test_dashboard_theme.py`, and `tests/test_trajectory_dashboard.py`.
-- Reviewed: [ ]
+- Reviewed: [x]
 
 ### Hashable dashboard cache key
 
@@ -809,7 +810,7 @@ considered.
   (`read_dashboard._skill_matrix_order_key`) was converted to a list because it is only ever a
   `sorted(key=...)` argument; this one cannot be.
 - Protected by: `orchestrator.dashboard.__all__` and `tests/test_dashboard.py`.
-- Reviewed: [ ]
+- Reviewed: [x]
 
 ### Decompose-handler cleanup guarantee
 
@@ -824,7 +825,7 @@ considered.
   would only dodge `WPS501` without changing behavior or clarity -- exactly the "alter cleanup
   guarantees solely to flatten code" the package forbids.
 - Protected by: `tests/test_workflow_decomposition_*.py`.
-- Reviewed: [ ]
+- Reviewed: [x]
 
 ### Force-exit shutdown finally
 
@@ -837,7 +838,7 @@ considered.
   semantics. The clean resource-cleanup try/finally blocks (analytics read connection, question-run
   worktree teardown, scheduler drain) were converted to context managers instead.
 - Protected by: `tests/test_main.py`.
-- Reviewed: [ ]
+- Reviewed: [x]
 
 ### Nice-number axis-tick float comparison
 
@@ -849,7 +850,7 @@ considered.
   concern `WPS459` targets does not arise, and rewriting the `<=` comparison to dodge the float literal
   (e.g. scaling by two to `2 * norm <= 5`) would obscure the ladder without changing the result.
 - Protected by: `tests/test_dashboard_charts.py`.
-- Reviewed: [ ]
+- Reviewed: [x]
 
 ### Core workflow and worktree compatibility facades
 
@@ -891,7 +892,7 @@ considered.
   callers and patch targets; blanket suppression is forbidden, so the individual compatibility annotations remain.
 - Protected by: `tests/test_analytics.py`, `tests/test_analytics_read_*.py`, `tests/test_dashboard.py`, and
   `tests/test_reexport_surface.py`.
-- Reviewed: [ ]
+- Reviewed: [x]
 
 ### Developer-resume compatibility helper
 
@@ -903,7 +904,7 @@ considered.
   and delegates to `_DevResumeContext`; changing the facade itself would break direct callers and patch targets.
 - Protected by: the implementing, fixing, validating, in-review, documenting, conflict, usage-accumulator, and prompt
   regression suites.
-- Reviewed: [ ]
+- Reviewed: [x]
 
 ### Target-root lock registry
 
@@ -915,7 +916,7 @@ considered.
   concurrency tests clear the same registry between cases. Hiding replacement state behind a setter would weaken that
   identity guarantee without removing the underlying mutation.
 - Protected by: `tests/test_workflow_worktree_serialization.py` and the worktree compatibility facade.
-- Reviewed: [ ]
+- Reviewed: [x]
 
 ### Cohesive production classes
 
@@ -928,7 +929,7 @@ considered.
   Further mixins would distribute one object's invariants across artificial base classes solely to meet a seven-method
   threshold.
 - Protected by: the trajectory-reader/dashboard, GitHub/state-machine, scheduler, and parallel-workflow suites.
-- Reviewed: [ ]
+- Reviewed: [x]
 
 ### GitHub client stateless public helpers
 
@@ -940,7 +941,7 @@ considered.
   semantically false class dependency and change descriptor/signature behavior; moving them to module scope would
   break the public `GitHubClient` surface.
 - Protected by: the state-machine, PR-lifecycle, community-contribution, in-review, base-sync, and workflow suites.
-- Reviewed: [ ]
+- Reviewed: [x]
 
 ### Cohesive core, orchestration, and stage-handler module magnitude
 
@@ -985,7 +986,7 @@ considered.
   the cohesive surface that remains. Another split would move helpers into still more private files, duplicate local
   context, or replace direct dependencies with indirection without removing behavior or improving ownership.
 - Protected by: the usage, analytics-read/sync, dashboard/chart/theme, and trajectory suites.
-- Reviewed: [ ]
+- Reviewed: [x]
 
 ### Analytics, dashboard, and trajectory test scenario density
 
@@ -1398,6 +1399,37 @@ Add one row for every implementation session, including partial sessions.
 | 2026-07-21 | 7.1 | Complete | Scan 1968/1943; Ruff/diff; tracked gate 2204p/3s | Not committed | Start 7.2 |
 | 2026-07-21 | 7.2 | Complete | Prod 347->223; 1190 focused; Ruff/diff; tracked 2204p/3s | Not committed | Start 7.3 |
 | 2026-07-21 | 7.3 | Complete | Tests 1621->1350; Ruff/diff; tracked gate 2204p/3s | Not committed | Start 7.4 |
+| 2026-07-22 | 7.4 | Complete | 66 entries; WPS402 24; 199 focused; Ruff/diff; 2204p/3s | Not committed | Start 7.5 |
+| 2026-07-22 | 7.5 | Partial | Scan 1573; 79.5% removed; checks pass | Not committed | Clear 807 or revise fallback |
+
+Package 7.5 is **partial**. The clean-worktree validation used Flake8 7.3.0, wemake-python-styleguide 1.6.2, and
+Python 3.12.3 with the Package 7.1 scan command. It reports 1,573 parsed / 1,573 unique findings across 163 files:
+production 223, tests 1,350, and no standard `E...` or `F...` findings. The inventory is unchanged from Package 7.4,
+and every finding remains covered by the reviewed accepted-remainder register.
+
+Ruff and both working-tree and committed-range diff checks pass. The unscoped pytest command collects all 2,207
+tracked tests but cannot traverse the ignored, externally owned `analytics-db/data` volume; the established tracked-tree
+gate passes with 2,204 tests and the three expected live-Postgres skips.
+
+The final count removes 79.5% of both the parsed and unique initial inventories. The fallback requires at most 768
+parsed and 766 unique findings, so Package 7.5 needs 807 additional unique removals to reach the stated 90% threshold.
+The final completion checkbox and Stage 7 therefore remain open pending either more remediation or an explicit change
+to the fallback criterion.
+
+Package 7.4 is **complete**. All 66 accepted-remainder entries were challenged against the refreshed 1,573-finding
+scan and the current implementation. Each retained entry protects a public keyword, attribute, serialized-data,
+re-export, direct-launch, or test-double contract, or keeps literal protocol / query / rendering data and focused
+scenario setup more readable than the linter-driven alternative. No entry has a clear removal that improves the code
+without changing one of those contracts or adding indirection solely to cross a numeric threshold. The two analytics
+recording entries now point to their current `_recording.py` definitions while preserving the package-facade contract
+that protects their public call shapes.
+
+The single refreshed `WPS402` finding remains the 24 targeted `# noqa: E402` annotations on
+`orchestrator/dashboard.py`. Every annotation is attached to an intentional compatibility import after the
+direct-script path bootstrap required by `streamlit run orchestrator/dashboard.py`; there is no blanket or unrelated
+suppression. Moving those imports above the bootstrap breaks direct launch, while replacing the explicit re-exports
+with dynamic import machinery makes the facade less auditable. The 199 focused dashboard / re-export tests pass, as
+do Ruff, both diff checks, and the complete tracked suite (2,204 passed, 3 live-Postgres skips).
 
 Package 7.3 is **complete**. The test scan fell from 1,621 to 1,350 findings. The 67 refreshed findings assigned to
 this package are cleared: `E124` (3), `E127` (4), `E128` (4), `E203` (2), `E302` (34), `E303` (3), and `WPS118`
