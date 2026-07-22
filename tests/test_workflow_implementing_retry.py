@@ -492,11 +492,14 @@ class SilentSessionResumeFallbackTest(
         gh, issue = self._seeded_issue(silent_park_count=threshold)
         state = gh.read_pinned_state(issue)
 
-        with patch.object(workflow, ENSURE_WORKTREE, return_value=_FAKE_WT), \
-             patch.object(
-                 workflow, RUN_AGENT,
-                 lambda *args, **kwargs: _agent(session_id="", last_message=""),
-             ):
+        with (
+            patch.object(workflow, ENSURE_WORKTREE, return_value=_FAKE_WT),
+            patch.object(
+                workflow,
+                RUN_AGENT,
+                lambda *args, **kwargs: _agent(session_id="", last_message=""),
+            ),
+        ):
             workflow._resume_dev_with_text(gh, _TEST_SPEC, issue, state, RESUME_TEXT)
 
         self.assertIsNone(

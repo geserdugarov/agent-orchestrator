@@ -20,13 +20,19 @@ whatever the earlier test-session import left cached.
 from __future__ import annotations
 
 import importlib
+import inspect
 import os
+import runpy
 import sys
+import tempfile
+import threading
+import time
 import unittest
 from contextlib import ExitStack, contextmanager
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from functools import partial
-from types import SimpleNamespace
+from pathlib import Path
+from types import MappingProxyType, SimpleNamespace
 from unittest.mock import patch
 
 
@@ -41,6 +47,7 @@ MISSING_TOKEN_FILE = "/tmp/agent-orchestrator-token-missing"
 # repeated dotted strings do not drift between the reload pop-list and
 # the per-module assertions.
 ORCHESTRATOR_PKG = "orchestrator"
+ANALYTICS_READ_MODULE = "orchestrator.analytics.read"
 DASHBOARD_MODULE = "orchestrator.dashboard"
 DASHBOARD_CARDS_MODULE = "orchestrator.dashboard_cards"
 DASHBOARD_KPI_STRIP_MODULE = "orchestrator.dashboard_kpi_strip"
@@ -53,7 +60,7 @@ DASHBOARD_CHARTS_MODULE = "orchestrator.dashboard_charts"
 # facade re-binds every extracted leaf against the patched env.
 _RELOAD_POP_MODULES = (
     "orchestrator.config",
-    "orchestrator.analytics.read",
+    ANALYTICS_READ_MODULE,
     "orchestrator.analytics",
     DASHBOARD_STATE_MODULE,
     "orchestrator.dashboard_kpis",
@@ -120,6 +127,14 @@ def _reload(env: dict[str, str] | None = None):
         return analytics, dashboard
 
 
+def _analytics_read_module():
+    return importlib.import_module(ANALYTICS_READ_MODULE)
+
+
+def _theme_module():
+    return importlib.import_module("orchestrator.dashboard_theme")
+
+
 # The dashboard's only configuration input is the analytics DB URL env
 # var; tests flip it between "unset" (the disabled-DB banner / hermetic
 # reload) and a syntactically-valid Postgres URL (the source-inspection
@@ -129,7 +144,7 @@ PARALLEL_READS_ENV = "DASHBOARD_PARALLEL_READS"
 CONFIGURED_DB_URL = "postgresql://h/db"
 # The reload env that the source-inspection tests share: a configured
 # Postgres URL so `dashboard.main` resolves its read wrappers.
-CONFIGURED_DB_ENV = {ANALYTICS_DB_URL_ENV: CONFIGURED_DB_URL}
+CONFIGURED_DB_ENV = MappingProxyType({ANALYTICS_DB_URL_ENV: CONFIGURED_DB_URL})
 
 # Every date/datetime fixture builds off this single calendar year so the
 # window math reads as day/month offsets rather than repeated literals.
@@ -317,12 +332,11 @@ def _clear_modules(predicate) -> None:
 
 
 def _restore_sys_path(path_entries: list[str]) -> None:
-    sys.path[:] = path_entries
+    sys.path.clear()
+    sys.path.extend(path_entries)
 
 
 def _dashboard_launch_paths() -> SimpleNamespace:
-    from pathlib import Path
-
     repo_root = Path(__file__).resolve().parent.parent
     dashboard_path = repo_root / ORCHESTRATOR_PKG / "dashboard.py"
     return SimpleNamespace(
@@ -333,13 +347,13 @@ def _dashboard_launch_paths() -> SimpleNamespace:
 
 
 def _drop_repo_root_from_sys_path(repo_root) -> None:
-    from pathlib import Path
-
     resolved_root = repo_root.resolve()
-    sys.path[:] = [
+    filtered_paths = [
         path_entry for path_entry in sys.path
         if not path_entry or Path(path_entry).resolve() != resolved_root
     ]
+    sys.path.clear()
+    sys.path.extend(filtered_paths)
 
 
 @contextmanager
@@ -374,12 +388,11 @@ def _raise_read_error(
     calls: list[str] | None = None,
     call_name: str | None = None,
 ) -> None:
-    from orchestrator.analytics.read import AnalyticsReadError
-
+    read_error = _analytics_read_module().AnalyticsReadError
     if calls is None or call_name is None:
-        raise AnalyticsReadError(message)
+        raise read_error(message)
     calls.append(call_name)
-    raise AnalyticsReadError(message)
+    raise read_error(message)
 
 
 def _increment_reader_count(name: str, counts: dict[str, int]) -> str:
@@ -397,8 +410,6 @@ def _record_threaded_reader(
     threads: set[int],
     lock,
 ) -> str:
-    import threading
-
     with lock:
         calls[name] = calls.get(name, 0) + 1
         threads.add(threading.get_ident())
@@ -406,8 +417,6 @@ def _record_threaded_reader(
 
 
 def _sleep_then_return(delay: float, payload: str) -> str:
-    import time
-
     time.sleep(delay)
     return payload
 
@@ -449,7 +458,6 @@ class _MainSourceTest(unittest.TestCase):
         return self._source_of(ENTRYPOINT_ATTR)
 
     def _source_of(self, name: str) -> str:
-        import inspect
         _, dashboard = _reload(CONFIGURED_DB_ENV)
         return inspect.getsource(getattr(dashboard, name))
 
@@ -579,7 +587,7 @@ class LazyImportTest(unittest.TestCase):
         with patch.dict(os.environ, _hermetic_env(), clear=True):
             for stale_module in (
                 "orchestrator.config",
-                "orchestrator.analytics.read",
+                ANALYTICS_READ_MODULE,
                 "orchestrator.analytics",
                 DASHBOARD_MODULE,
                 DASHBOARD_CHARTS_MODULE,
@@ -609,8 +617,6 @@ class ScriptPathLaunchTest(unittest.TestCase):
     """
 
     def test_runs_without_repo_root_on_syspath(self) -> None:
-        import runpy
-
         launch = _dashboard_launch_paths()
         with _script_launch_sandbox(_is_orchestrator_module):
             # Match Streamlit's launch shape: only the script's
@@ -637,10 +643,6 @@ class ScriptPathLaunchTest(unittest.TestCase):
         # shim adds the repo root without importing `orchestrator.*` first, so
         # the real package resolves even with a decoy parent behind the script
         # dir on the path.
-        import runpy
-        import tempfile
-        from pathlib import Path
-
         launch = _dashboard_launch_paths()
         with _script_launch_sandbox(_is_orchestrator_launch_module) as cleanup:
             decoy_root = cleanup.enter_context(tempfile.TemporaryDirectory())
@@ -664,7 +666,7 @@ class ScriptPathLaunchTest(unittest.TestCase):
             # has no `analytics` submodule and would raise on import).
             self.assertEqual(
                 namespace["analytics_read"].__name__,
-                "orchestrator.analytics.read",
+                ANALYTICS_READ_MODULE,
             )
 
     def test_package_import_ignores_stray_script(self) -> None:
@@ -673,10 +675,6 @@ class ScriptPathLaunchTest(unittest.TestCase):
         # `import script_launch`. An unrelated top-level `script_launch.py`
         # earlier on `sys.path` would otherwise shadow the helper or fail the
         # import outright, so the package path must not probe the bare name.
-        import importlib
-        import tempfile
-        from pathlib import Path
-
         with _script_launch_sandbox(_is_dashboard_script_launch_module) as cleanup:
             stray_dir = cleanup.enter_context(tempfile.TemporaryDirectory())
             # A stray top-level `script_launch` that detonates on import, so a
@@ -1255,8 +1253,7 @@ class SkillTriggersHtmlTest(unittest.TestCase):
         self.assertNotIn(ROLE_WITH_MARKUP, html)
 
     def _row(self, role, backend, runs, skill_runs, triggers):
-        from orchestrator.analytics.read import SkillTriggerRateRow
-        return SkillTriggerRateRow(
+        return _analytics_read_module().SkillTriggerRateRow(
             agent_role=role,
             backend=backend,
             runs=runs,
@@ -1550,7 +1547,7 @@ class SkillAdoptionHtmlTest(unittest.TestCase):
         self.assertIn('<td class="r">38</td>', html)
         self.assertIn('<td class="r">2</td>', html)
 
-    def test_incidental_reference_never_raises_adoption(self) -> None:
+    def test_incidental_never_raises_adoption(self) -> None:
         # A purely-incidental cell -- the skill's `SKILL.md` was referenced
         # but never loaded, and no session had it available -- carries zero
         # sessions / zero adopted and an undefined (em-dash) rate, so its
@@ -1572,7 +1569,7 @@ class SkillAdoptionHtmlTest(unittest.TestCase):
         self.assertNotIn("%</td>", html)
         self.assertNotIn("%</span>", html)
 
-    def test_available_but_unadopted_renders_muted_zero_percent(self) -> None:
+    def test_unadopted_available_renders_muted_zero(self) -> None:
         # A skill available to sessions that none loaded is a real "offered
         # but ignored" signal: its adoption rate renders as an explicit
         # (muted) 0% rather than the undefined em-dash.
@@ -1831,11 +1828,11 @@ class SkillAdoptionRenderTest(unittest.TestCase):
     end-to-end and its captions can be observed.
     """
 
-    def _render(self, adoption_rows, *, skill_rows=None):
+    def render_skill_panel(self, adoption_rows, *, skill_rows=None):
         _, dashboard = _reload()
         st = _SkillPanelStreamlit()
         if skill_rows is None:
-            skill_rows = [self._rate_row()]
+            skill_rows = [self.build_rate_row()]
         dashboard._render_skill_adoption(
             st=st,
             skill_adoption_rows=adoption_rows,
@@ -1844,21 +1841,22 @@ class SkillAdoptionRenderTest(unittest.TestCase):
         )
         return st
 
-    def test_available_but_unadopted_captions_genuine_zero(self) -> None:
+    def test_unadopted_available_caption_is_zero(self) -> None:
         # sessions > 0 proves availability was tracked, so a 0-adoption
         # window reads as a genuine 0%, never a "turn on tracking" nag.
-        st = self._render([self._adopt_row(sessions=5, adopted=0)])
+        st = self.render_skill_panel([self.build_adoption_row(sessions=5, adopted=0)])
         self.assertEqual(len(st.captions), 1)
         caption = st.captions[0]
         self.assertIn("genuine 0% adoption", caption)
         self.assertNotIn("Enable", caption)
         self.assertNotIn("TRACK_SKILL_TRIGGERS", caption)
 
-    def test_incidental_only_captions_neutral_not_tracking_nag(self) -> None:
+    def test_incidental_only_caption_stays_neutral(self) -> None:
         # Incidental evidence with no availability still proves the stream
         # was parsed, so the caption stays neutral rather than recommending
         # the already-on switch.
-        st = self._render([self._adopt_row(sessions=0, adopted=0, incidental=1)])
+        adoption_row = self.build_adoption_row(sessions=0, adopted=0, incidental=1)
+        st = self.render_skill_panel([adoption_row])
         self.assertEqual(len(st.captions), 1)
         caption = st.captions[0]
         self.assertIn("incidental", caption)
@@ -1866,41 +1864,42 @@ class SkillAdoptionRenderTest(unittest.TestCase):
         self.assertNotIn("TRACK_SKILL_TRIGGERS", caption)
 
     def test_adopted_window_has_no_caption(self) -> None:
-        st = self._render([self._adopt_row(sessions=5, adopted=3)])
+        st = self.render_skill_panel([self.build_adoption_row(sessions=5, adopted=3)])
         self.assertEqual(st.captions, [])
 
-    def test_empty_rows_leave_switch_hint_to_the_table(self) -> None:
+    def test_empty_rows_defer_hint_to_table(self) -> None:
         # No adoption rows -> the table itself renders the
         # `TRACK_SKILL_TRIGGERS` fallback; the panel adds no caption so the
         # switch reminder is not doubled.
-        st = self._render([])
+        st = self.render_skill_panel([])
         self.assertEqual(st.captions, [])
         blob = "".join(st.markdowns)
         self.assertIn("orch-skilladopt-empty", blob)
         self.assertIn("TRACK_SKILL_TRIGGERS", blob)
 
     def test_no_agent_exit_rows_shows_single_info(self) -> None:
-        st = self._render([], skill_rows=[])
+        st = self.render_skill_panel([], skill_rows=[])
         self.assertEqual(len(st.infos), 1)
         self.assertIn("No `agent_exit` rows", st.infos[0])
 
-    def test_load_only_diagnostic_captions_loads_not_incidental(self) -> None:
+    def test_load_only_caption_uses_loads(self) -> None:
         # sessions=0, load_rows>0, incidental=0: a session loaded a skill it
         # did not report available. The caption must name the loads (matching
         # the Invocation loads column), never "only incidental references".
-        st = self._render([self._adopt_row(sessions=0, adopted=0, load_rows=2)])
+        adoption_row = self.build_adoption_row(sessions=0, adopted=0, load_rows=2)
+        st = self.render_skill_panel([adoption_row])
         self.assertEqual(len(st.captions), 1)
         caption = st.captions[0]
         self.assertIn("loaded", caption)
         self.assertNotIn("Only incidental", caption)
         self.assertNotIn("Enable", caption)
 
-    def test_mixed_evidence_captions_loads_and_incidental(self) -> None:
+    def test_mixed_caption_uses_both_evidence(self) -> None:
         # sessions=0 with both load and incidental evidence: the caption
         # names both so it matches the Invocation loads and Incidental
         # references columns.
-        st = self._render(
-            [self._adopt_row(sessions=0, adopted=0, load_rows=2, incidental=1)],
+        st = self.render_skill_panel(
+            [self.build_adoption_row(sessions=0, adopted=0, load_rows=2, incidental=1)],
         )
         self.assertEqual(len(st.captions), 1)
         caption = st.captions[0]
@@ -1908,25 +1907,28 @@ class SkillAdoptionRenderTest(unittest.TestCase):
         self.assertIn("incidental", caption)
         self.assertNotIn("Enable", caption)
 
-    def test_zero_trigger_diagnostic_stays_neutral_with_adoption_evidence(
+    def test_zero_trigger_diagnostic_stays_neutral(
         self,
     ) -> None:
         # A window with adoption evidence (sessions>0) but no run triggering a
         # skill must not tell the operator to enable a switch the adoption
         # caption just confirmed is on -- no caption in the panel nags to
         # enable tracking, and the diagnostic reports the genuine no-trigger.
-        quiet = self._quiet_rate_row()
-        st = self._render(
-            [self._adopt_row(sessions=5, adopted=0)], skill_rows=[quiet],
+        quiet = self.build_quiet_rate_row()
+        st = self.render_skill_panel(
+            [self.build_adoption_row(sessions=5, adopted=0)], skill_rows=[quiet],
         )
         joined = " ".join(st.captions)
         self.assertNotIn("Enable", joined)
         self.assertNotIn("TRACK_SKILL_TRIGGERS", joined)
         self.assertTrue(
-            any("No agent run triggered a skill" in c for c in st.captions),
+            any(
+                "No agent run triggered a skill" in caption
+                for caption in st.captions
+            ),
         )
 
-    def _adopt_row(self, *, sessions, adopted, load_rows=0, incidental=0):
+    def build_adoption_row(self, *, sessions, adopted, load_rows=0, incidental=0):
         from orchestrator.analytics.read import SkillAdoptionRow
         return SkillAdoptionRow(
             repo="owner/repo",
@@ -1940,12 +1942,11 @@ class SkillAdoptionRenderTest(unittest.TestCase):
             incidental=incidental,
         )
 
-    def _rate_row(self):
+    def build_rate_row(self):
         # skill_runs > 0 so the invocation-level diagnostics expander adds no
         # caption of its own -- the assertions then observe only the
         # adoption panel's own caption.
-        from orchestrator.analytics.read import SkillTriggerRateRow
-        return SkillTriggerRateRow(
+        return _analytics_read_module().SkillTriggerRateRow(
             agent_role=ROLE_DEVELOPER,
             backend=BACKEND_CLAUDE,
             runs=5,
@@ -1953,10 +1954,9 @@ class SkillAdoptionRenderTest(unittest.TestCase):
             total_triggers=2,
         )
 
-    def _quiet_rate_row(self):
+    def build_quiet_rate_row(self):
         # skill_runs == 0 so the diagnostics zero-trigger caption is exercised.
-        from orchestrator.analytics.read import SkillTriggerRateRow
-        return SkillTriggerRateRow(
+        return _analytics_read_module().SkillTriggerRateRow(
             agent_role=ROLE_DEVELOPER,
             backend=BACKEND_CLAUDE,
             runs=5,
@@ -1978,8 +1978,6 @@ class SkillTriggersCompatShimTest(unittest.TestCase):
         self.assertTrue(hasattr(dashboard, "_render_skill_matrix_expander"))
 
     def test_shim_signatures_preserved(self) -> None:
-        import inspect
-
         _, dashboard = _reload()
         triggers = inspect.signature(dashboard._render_skill_triggers)
         self.assertEqual(
@@ -2012,7 +2010,7 @@ class SkillTriggersCompatShimTest(unittest.TestCase):
             any("Per-skill trigger matrix" in label for label in st.expanders),
         )
 
-    def test_matrix_expander_shim_opens_collapsed_matrix(self) -> None:
+    def test_expander_shim_opens_collapsed_matrix(self) -> None:
         _, dashboard = _reload()
         st = _SkillPanelStreamlit()
         dashboard._render_skill_matrix_expander(
@@ -2024,8 +2022,7 @@ class SkillTriggersCompatShimTest(unittest.TestCase):
         self.assertIn("orch-skillmatrix", "".join(st.markdowns))
 
     def _rate_row(self):
-        from orchestrator.analytics.read import SkillTriggerRateRow
-        return SkillTriggerRateRow(
+        return _analytics_read_module().SkillTriggerRateRow(
             agent_role=ROLE_DEVELOPER,
             backend=BACKEND_CLAUDE,
             runs=4,
@@ -2144,7 +2141,7 @@ class BackendEfficiencyCardHtmlTest(unittest.TestCase):
 
     def test_headline_and_metrics_rendered(self) -> None:
         _, dashboard = _reload()
-        from orchestrator import dashboard_theme as theme
+        theme = _theme_module()
         row = self._row(
             backend=BACKEND_CLAUDE, runs=4, total_cost_usd=8.0,
             total_input_tokens=1_000_000, total_output_tokens=0,
@@ -2162,7 +2159,7 @@ class BackendEfficiencyCardHtmlTest(unittest.TestCase):
 
     def test_zero_tokens_and_runs_avoid_division(self) -> None:
         _, dashboard = _reload()
-        from orchestrator import dashboard_theme as theme
+        theme = _theme_module()
         row = self._row(backend=BACKEND_CODEX, runs=0, total_cost_usd=0.0)
         html = dashboard._backend_efficiency_card_html(row, theme=theme)
         self.assertIn("$0.00 / 1M tok", html)
@@ -2171,7 +2168,7 @@ class BackendEfficiencyCardHtmlTest(unittest.TestCase):
 
     def test_backend_name_html_escaped(self) -> None:
         _, dashboard = _reload()
-        from orchestrator import dashboard_theme as theme
+        theme = _theme_module()
         row = self._row(backend="ba<ck>", runs=1, total_cost_usd=1.0)
         html = dashboard._backend_efficiency_card_html(row, theme=theme)
         self.assertIn("ba&lt;ck&gt;", html)
@@ -2191,7 +2188,7 @@ class CostCoverageBarHtmlTest(unittest.TestCase):
 
     def test_segments_sized_by_token_share(self) -> None:
         _, dashboard = _reload()
-        from orchestrator import dashboard_theme as theme
+        theme = _theme_module()
         # 750 / 1000 tokens = 75% by tokens, NOT 10% by run count.
         rows = [
             self._row(COST_SOURCE_REPORTED, 1, 750),
@@ -2204,7 +2201,7 @@ class CostCoverageBarHtmlTest(unittest.TestCase):
 
     def test_falls_back_to_run_share_without_tokens(self) -> None:
         _, dashboard = _reload()
-        from orchestrator import dashboard_theme as theme
+        theme = _theme_module()
         # No token volume yet -> size by run share: 3 / 4 = 75%.
         rows = [
             self._row(COST_SOURCE_REPORTED, 3, 0),
@@ -2215,7 +2212,7 @@ class CostCoverageBarHtmlTest(unittest.TestCase):
 
     def test_cost_source_html_escaped(self) -> None:
         _, dashboard = _reload()
-        from orchestrator import dashboard_theme as theme
+        theme = _theme_module()
         rows = [self._row("src<&>", 1, 10)]
         html = dashboard._cost_coverage_bar_html(rows, theme=theme)
         self.assertIn("src&lt;&amp;&gt;", html)
@@ -2294,7 +2291,7 @@ class DashboardDataPrepTest(unittest.TestCase):
 
     def test_kpis_use_cache_tokens_and_daily_sparks(self) -> None:
         _, dashboard = _reload()
-        from orchestrator import dashboard_theme as theme
+        theme = _theme_module()
         from orchestrator.analytics.read import (
             ReviewRoundBucketRow,
             ThroughputDayRow,
@@ -2994,8 +2991,6 @@ class DashboardCompatibilityHelperTest(_MainSourceTest):
     """Exported dashboard helpers retain their historical call shapes."""
 
     def test_topbar_signature_is_stable(self) -> None:
-        import inspect
-
         _, dashboard = _reload(CONFIGURED_DB_ENV)
         self.assertEqual(
             tuple(inspect.signature(dashboard._topbar_html).parameters),
@@ -3010,8 +3005,6 @@ class DashboardCompatibilityHelperTest(_MainSourceTest):
         )
 
     def test_drilldown_signature_and_delegate_stable(self) -> None:
-        import inspect
-
         _, dashboard = _reload(CONFIGURED_DB_ENV)
         self.assertEqual(
             tuple(inspect.signature(dashboard._render_drilldown).parameters),
@@ -3059,7 +3052,7 @@ class FanOutReadsSequentialTest(unittest.TestCase):
         # surfaces one user-friendly message instead of a stack of
         # errors.
         _, dashboard = _reload()
-        from orchestrator.analytics.read import AnalyticsReadError
+        read_error = _analytics_read_module().AnalyticsReadError
         called: list[str] = []
 
         readers = [
@@ -3067,7 +3060,7 @@ class FanOutReadsSequentialTest(unittest.TestCase):
             ("b", partial(_raise_read_error, "connection refused", called, "boom")),
             ("c", partial(_record_reader_call, "never", 2, called)),
         ]
-        with self.assertRaises(AnalyticsReadError):
+        with self.assertRaises(read_error):
             dashboard._fan_out_reads(readers, parallel=False)
         self.assertEqual(called, ["ok", "boom"])
 
@@ -3110,7 +3103,6 @@ class FanOutReadsParallelTest(unittest.TestCase):
         # parallelism, but the exact count depends on scheduling so
         # we only assert it ran on a non-main thread when more than
         # one reader was submitted.
-        import threading
         _, dashboard = _reload()
         calls: dict[str, int] = {}
         threads: set[int] = set()
@@ -3136,7 +3128,6 @@ class FanOutReadsParallelTest(unittest.TestCase):
         # to the sum. Pin a loose ceiling so the test is not flaky on a
         # busy CI host but still fails if the executor degenerates to
         # the sequential path.
-        import time
         _, dashboard = _reload()
         delay = 0.08
 
@@ -3159,13 +3150,13 @@ class FanOutReadsParallelTest(unittest.TestCase):
         # the helper so the caller's `try/except AnalyticsReadError`
         # in `main()` can render a single `st.error` and stop.
         _, dashboard = _reload()
-        from orchestrator.analytics.read import AnalyticsReadError
+        read_error = _analytics_read_module().AnalyticsReadError
 
         readers = [
             ("ok", partial(_return_value, 1)),
             ("boom", partial(_raise_read_error, "query failed")),
         ]
-        with self.assertRaisesRegex(AnalyticsReadError, "query failed"):
+        with self.assertRaisesRegex(read_error, "query failed"):
             dashboard._fan_out_reads(
                 readers, parallel=True, max_workers=2
             )
@@ -3624,9 +3615,9 @@ class FanOutReadsErrorPropagationTest(unittest.TestCase):
 
     def test_sequential_propagates_in_staged_call(self) -> None:
         _, dashboard = _reload()
-        from orchestrator.analytics.read import AnalyticsReadError
+        read_error = _analytics_read_module().AnalyticsReadError
 
-        with self.assertRaisesRegex(AnalyticsReadError, "first wave dead"):
+        with self.assertRaisesRegex(read_error, "first wave dead"):
             dashboard._fan_out_reads(
                 [("summary", partial(_raise_read_error, "first wave dead"))],
                 parallel=False,
@@ -3634,9 +3625,9 @@ class FanOutReadsErrorPropagationTest(unittest.TestCase):
 
     def test_parallel_propagates_in_staged_call(self) -> None:
         _, dashboard = _reload()
-        from orchestrator.analytics.read import AnalyticsReadError
+        read_error = _analytics_read_module().AnalyticsReadError
 
-        with self.assertRaisesRegex(AnalyticsReadError, "second wave dead"):
+        with self.assertRaisesRegex(read_error, "second wave dead"):
             dashboard._fan_out_reads(
                 [("repo_rows", partial(_raise_read_error, "second wave dead"))],
                 parallel=True,
@@ -3671,12 +3662,10 @@ class ShiftTsTest(unittest.TestCase):
     selected offset for display in the "Recent agent runs" table."""
 
     def test_none_passes_through(self) -> None:
-        from datetime import timedelta
         _, dashboard = _reload()
         self.assertIsNone(dashboard.shift_ts(None, timedelta(hours=7)))
 
     def test_aware_ts_converted_to_offset(self) -> None:
-        from datetime import timedelta
         _, dashboard = _reload()
         ts = JUN05_NOON_UTC
         shifted = dashboard.shift_ts(ts, timedelta(hours=7))
@@ -3684,7 +3673,6 @@ class ShiftTsTest(unittest.TestCase):
         self.assertEqual(shifted.utcoffset(), timedelta(hours=7))
 
     def test_aware_ts_negative_offset(self) -> None:
-        from datetime import timedelta
         _, dashboard = _reload()
         ts = JUN05_NOON_UTC
         shifted = dashboard.shift_ts(ts, timedelta(hours=-5))
@@ -3692,7 +3680,6 @@ class ShiftTsTest(unittest.TestCase):
         self.assertEqual(shifted.utcoffset(), timedelta(hours=-5))
 
     def test_naive_ts_shifted_in_place(self) -> None:
-        from datetime import timedelta
         _, dashboard = _reload()
         ts = JUN05_NOON_NAIVE
         shifted = dashboard.shift_ts(ts, timedelta(hours=7))

@@ -186,6 +186,7 @@ class HandleUmbrellaResolutionTest(unittest.TestCase, _PatchedWorkflowMixin):
             [],
         )
 
+
 class HandleUmbrellaChildStateTest(unittest.TestCase, _PatchedWorkflowMixin):
     """Rejected, closed, and dependency-gated children keep the parent open."""
 

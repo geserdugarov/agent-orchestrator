@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import signal
@@ -12,7 +13,6 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from orchestrator import agents
 from orchestrator.agents import (
     _AGENT_PROVIDER_AUTH_ALLOWLIST,
     _AGENT_WRITE_CREDENTIAL_LOCATORS,
@@ -26,6 +26,7 @@ from orchestrator.agents import (
     run_agent,
 )
 
+agents = sys.modules["orchestrator.agents"]
 
 _CWD = Path("/tmp/agent-orchestrator-test-cwd-doesnt-matter")
 # A real directory for tests that spawn an actual subprocess (Popen rejects a
@@ -80,6 +81,32 @@ def _killpg_group_alive(pid: int, sig: int) -> None:
     """`os.killpg` side_effect where the signal-0 liveness probe succeeds, so
     a descendant outlived the leader and the group must still be SIGKILLed.
     """
+
+
+@contextlib.contextmanager
+def _registered_procs(*processes: object):
+    with contextlib.ExitStack() as cleanup:
+        for process in processes:
+            agents._register_proc(process)
+            cleanup.callback(agents._unregister_proc, process)
+        yield
+
+
+def _stop_process_group(process: subprocess.Popen) -> None:
+    with contextlib.suppress(ProcessLookupError):
+        os.killpg(process.pid, signal.SIGKILL)
+    process.wait(timeout=5)
+
+
+class _RegistrationProbe:
+    def __init__(self, process: object) -> None:
+        self.process = process
+        self.seen = False
+
+    def __call__(self, *unused_args, **unused_kwargs) -> tuple[str, str]:
+        with agents._running_procs_lock:
+            self.seen = self.process in agents._running_procs
+        return "{}", ""
 
 
 class ParseSessionIdTest(unittest.TestCase):
@@ -205,9 +232,8 @@ class ClaudeLastMessageTest(unittest.TestCase):
 
 class RunAgentDispatchTest(unittest.TestCase):
     def test_unknown_backend_raises_value_error(self) -> None:
-        with self.assertRaises(ValueError) as cm:
+        with self.assertRaisesRegex(ValueError, "gemini"):
             run_agent("gemini", "prompt", _CWD)
-        self.assertIn("gemini", str(cm.exception))
 
     def test_dispatches_to_codex(self) -> None:
         # Use stream-json-shaped output so parse_session_id has something to
@@ -218,9 +244,9 @@ class RunAgentDispatchTest(unittest.TestCase):
             return_value=_completed(stdout=json.dumps({"session_id": sid})),
         ) as run_mock:
             agent_result = run_agent(_CODEX, _PROMPT, _CWD)
+            argv = list(run_mock.call_args.args[0])
         self.assertEqual(agent_result.session_id, sid)
         self.assertEqual(agent_result.exit_code, 0)
-        argv = run_mock.call_args.args[0]
         self.assertIn("--dangerously-bypass-approvals-and-sandbox", argv)
         self.assertEqual(argv[1], _CODEX_EXEC)
 
@@ -235,9 +261,9 @@ class RunAgentDispatchTest(unittest.TestCase):
             return_value=_completed(stdout="\n".join(events)),
         ) as run_mock:
             agent_result = run_agent(_CLAUDE, _PROMPT, _CWD)
+            argv = list(run_mock.call_args.args[0])
         self.assertEqual(agent_result.session_id, sid)
         self.assertEqual(agent_result.last_message, "shipped")
-        argv = run_mock.call_args.args[0]
         self.assertIn("--dangerously-skip-permissions", argv)
         self.assertIn("-p", argv)
         self.assertIn("--output-format", argv)
@@ -260,7 +286,7 @@ class RunCodexEnvScrubTest(unittest.TestCase):
             return_value=_completed(),
         ) as run_mock:
             _run_codex(_PROMPT, _CWD)
-        passed_env = run_mock.call_args.kwargs[_ENV_KWARG]
+            passed_env = dict(run_mock.call_args.kwargs[_ENV_KWARG])
         self.assertNotIn("GITHUB_TOKEN", passed_env)
         self.assertNotIn("GH_TOKEN", passed_env)
         self.assertEqual(passed_env.get(_ANTHROPIC_API_KEY), "sk-keep-me")
@@ -295,7 +321,7 @@ class RunCodexEnvScrubTest(unittest.TestCase):
             return_value=_completed(),
         ) as run_mock:
             _run_codex(_PROMPT, _CWD)
-        passed_env = run_mock.call_args.kwargs[_ENV_KWARG]
+            passed_env = dict(run_mock.call_args.kwargs[_ENV_KWARG])
         for stripped in (
             "STRIPE_API_KEY", "DATABASE_PASSWORD", "AWS_SECRET_ACCESS_KEY",
             "DEPLOY_TOKEN", "MY_CREDENTIAL", "PAGERDUTY_PAT", "VAULT_SECRET",
@@ -329,7 +355,7 @@ class RunCodexEnvScrubTest(unittest.TestCase):
             return_value=_completed(),
         ) as run_mock:
             _run_codex(_PROMPT, _CWD)
-        passed_env = run_mock.call_args.kwargs[_ENV_KWARG]
+            passed_env = dict(run_mock.call_args.kwargs[_ENV_KWARG])
         for stripped in _AGENT_WRITE_CREDENTIAL_LOCATORS:
             self.assertNotIn(
                 stripped, passed_env,
@@ -365,7 +391,7 @@ class RunCodexEnvScrubTest(unittest.TestCase):
             return_value=_completed(),
         ) as run_mock:
             _run_codex(_PROMPT, _CWD)
-        passed_env = run_mock.call_args.kwargs[_ENV_KWARG]
+            passed_env = dict(run_mock.call_args.kwargs[_ENV_KWARG])
         for stripped in (
             "ORCHESTRATOR_TOKEN_FILE",
             "GOOGLE_APPLICATION_CREDENTIALS",
@@ -484,7 +510,7 @@ class RunCodexCwdTest(unittest.TestCase):
             return_value=_completed(),
         ) as run_mock:
             _run_codex(_PROMPT, rel_cwd)
-        argv = run_mock.call_args.args[0]
+            argv = list(run_mock.call_args.args[0])
         c_value = argv[argv.index("-C") + 1]
         self.assertTrue(
             Path(c_value).is_absolute(),
@@ -501,7 +527,7 @@ class RunClaudeResumeTest(unittest.TestCase):
             return_value=_completed(),
         ) as run_mock:
             _run_claude("followup", _CWD, resume_session_id=sid)
-        argv = run_mock.call_args.args[0]
+            argv = list(run_mock.call_args.args[0])
         self.assertIn(_RESUME_FLAG, argv)
         self.assertEqual(argv[argv.index(_RESUME_FLAG) + 1], sid)
 
@@ -604,7 +630,7 @@ class RunAgentExtraArgsTest(unittest.TestCase):
                 resume_session_id=resume_session_id,
                 extra_args=extra_args,
             )
-        return list(run_mock.call_args.args[0])
+            return list(run_mock.call_args.args[0])
 
 
 class TerminateAllRunningTest(unittest.TestCase):
@@ -619,28 +645,23 @@ class TerminateAllRunningTest(unittest.TestCase):
         # so this exercises the early return with no signals sent.
         with patch.object(agents.os, _KILLPG) as killpg:
             self.assertEqual(agents.terminate_all_running(), 0)
-        killpg.assert_not_called()
+            killpg.assert_not_called()
 
     def test_no_sigkill_after_all_groups_exit(self) -> None:
         # Both leaders exit on SIGTERM and the signal-0 group probe reports the
         # group empty, so no SIGKILL is sent -- the clean-shutdown path.
         proc1, proc2 = MagicMock(), MagicMock()
-        proc1.pid, proc2.pid = 111, 222
+        proc1.pid = 111
+        proc2.pid = 222
         proc1.wait.return_value = 0
         proc2.wait.return_value = 0
-        agents._register_proc(proc1)
-        agents._register_proc(proc2)
-
-        try:
+        with _registered_procs(proc1, proc2):
             with patch.object(
                 agents.os, _KILLPG, side_effect=_killpg_group_empty,
             ) as signal_mock:
                 terminated_count = agents.terminate_all_running(grace=0.5)
-        finally:
-            agents._unregister_proc(proc1)
-            agents._unregister_proc(proc2)
+                sent = {call.args for call in signal_mock.call_args_list}
         self.assertEqual(terminated_count, 2)
-        sent = {call.args for call in signal_mock.call_args_list}
         self.assertIn((111, signal.SIGTERM), sent)
         self.assertIn((222, signal.SIGTERM), sent)
         self.assertNotIn((111, signal.SIGKILL), sent)
@@ -654,16 +675,12 @@ class TerminateAllRunningTest(unittest.TestCase):
         proc = MagicMock()
         proc.pid = 555
         proc.wait.return_value = 0  # leader exits promptly on SIGTERM
-        agents._register_proc(proc)
-
-        try:
+        with _registered_procs(proc):
             with patch.object(
                 agents.os, _KILLPG, side_effect=_killpg_group_alive,
             ) as signal_mock:
                 agents.terminate_all_running(grace=_TERMINATION_GRACE_SECONDS)
-        finally:
-            agents._unregister_proc(proc)
-        sent = [call.args for call in signal_mock.call_args_list]
+                sent = [call.args for call in signal_mock.call_args_list]
         self.assertIn((555, signal.SIGTERM), sent)
         self.assertIn((555, 0), sent)  # group liveness probed after leader exit
         self.assertIn((555, signal.SIGKILL), sent)
@@ -676,13 +693,10 @@ class TerminateAllRunningTest(unittest.TestCase):
         proc.wait.side_effect = subprocess.TimeoutExpired(
             cmd=_AGENT_COMMAND, timeout=_TERMINATION_GRACE_SECONDS,
         )
-        agents._register_proc(proc)
-        try:
+        with _registered_procs(proc):
             with patch.object(agents.os, _KILLPG) as killpg:
                 agents.terminate_all_running(grace=_TERMINATION_GRACE_SECONDS)
-        finally:
-            agents._unregister_proc(proc)
-        calls = [call.args for call in killpg.call_args_list]
+                calls = [call.args for call in killpg.call_args_list]
         self.assertIn((333, signal.SIGTERM), calls)
         self.assertIn((333, signal.SIGKILL), calls)
 
@@ -692,8 +706,7 @@ class TerminateAllRunningTest(unittest.TestCase):
         proc = MagicMock()
         proc.pid = 444
         proc.wait.return_value = 0
-        agents._register_proc(proc)
-        try:
+        with _registered_procs(proc):
             with patch.object(
                 agents.os, _KILLPG, side_effect=ProcessLookupError,
             ):
@@ -703,8 +716,6 @@ class TerminateAllRunningTest(unittest.TestCase):
                     ),
                     1,
                 )
-        finally:
-            agents._unregister_proc(proc)
 
     def test_process_group_alive_real_process(self) -> None:
         # The mock tests can't exercise the actual `killpg(_, 0)` probe the
@@ -716,14 +727,9 @@ class TerminateAllRunningTest(unittest.TestCase):
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-        try:
+        with contextlib.ExitStack() as cleanup:
+            cleanup.callback(_stop_process_group, proc)
             self.assertTrue(agents._process_group_alive(proc.pid))
-        finally:
-            try:
-                os.killpg(proc.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            proc.wait(timeout=5)
         self.assertFalse(agents._process_group_alive(proc.pid))
 
 
@@ -747,7 +753,7 @@ class TerminateProcessGroupTest(unittest.TestCase):
             agents.os, _KILLPG, side_effect=_killpg_group_alive,
         ) as signal_mock:
             agents._terminate_process_group(proc)
-        sent = [call.args for call in signal_mock.call_args_list]
+            sent = [call.args for call in signal_mock.call_args_list]
         self.assertIn((777, signal.SIGTERM), sent)
         self.assertIn((777, 0), sent)  # group liveness probed after leader exit
         self.assertIn((777, signal.SIGKILL), sent)
@@ -763,7 +769,7 @@ class TerminateProcessGroupTest(unittest.TestCase):
             agents.os, _KILLPG, side_effect=_killpg_group_empty,
         ) as signal_mock:
             agents._terminate_process_group(proc)
-        sent = [call.args for call in signal_mock.call_args_list]
+            sent = [call.args for call in signal_mock.call_args_list]
         self.assertIn((778, signal.SIGTERM), sent)
         self.assertIn((778, 0), sent)
         self.assertNotIn((778, signal.SIGKILL), sent)
@@ -779,7 +785,7 @@ class TerminateProcessGroupTest(unittest.TestCase):
         )
         with patch.object(agents.os, _KILLPG) as killpg:
             agents._terminate_process_group(proc)
-        calls = [call.args for call in killpg.call_args_list]
+            calls = [call.args for call in killpg.call_args_list]
         self.assertIn((779, signal.SIGTERM), calls)
         self.assertIn((779, signal.SIGKILL), calls)
         self.assertNotIn((779, 0), calls)  # no probe when the leader is alive
@@ -793,8 +799,9 @@ class TerminateProcessGroupTest(unittest.TestCase):
             agents.os, _KILLPG, side_effect=ProcessLookupError,
         ) as signal_mock:
             agents._terminate_process_group(proc)
+            sent = [call.args for call in signal_mock.call_args_list]
         self.assertEqual(
-            [call.args for call in signal_mock.call_args_list],
+            sent,
             [(780, signal.SIGTERM)],
         )
         proc.wait.assert_not_called()
@@ -808,18 +815,12 @@ class RunSubprocessRegistrationTest(unittest.TestCase):
 
     def test_registers_during_run_and_clears_after(self) -> None:
         proc = _completed(stdout="{}", returncode=0)
-        seen: dict[str, bool] = {}
-
-        def check_registered(*unused_args, **unused_kwargs):
-            with agents._running_procs_lock:
-                seen["during"] = proc in agents._running_procs
-            return ("{}", "")
-
-        proc.communicate.side_effect = check_registered
+        registration_probe = _RegistrationProbe(proc)
+        proc.communicate.side_effect = registration_probe
         with patch(_POPEN_TARGET, return_value=proc):
             agents._run_subprocess([_AGENT_COMMAND], _CWD, {}, 10)
 
-        self.assertTrue(seen["during"], "child not registered during the run")
+        self.assertTrue(registration_probe.seen, "child not registered during the run")
         with agents._running_procs_lock:
             self.assertNotIn(proc, agents._running_procs)
 
@@ -959,9 +960,8 @@ class ClaudeLastMessageGatingTest(unittest.TestCase):
             ),
             "",
         )
-        with_result = _PARTIAL_CLAUDE_OUTPUT + "\n" + json.dumps(
-            {"type": "result", "result": "final"}
-        )
+        result_frame = json.dumps({"type": "result", "result": "final"})
+        with_result = f"{_PARTIAL_CLAUDE_OUTPUT}\n{result_frame}"
         self.assertEqual(
             _claude_last_message(with_result, allow_assistant_fallback=False),
             "final",
@@ -992,9 +992,10 @@ class ClaudeLastMessageGatingTest(unittest.TestCase):
         # A run that emitted the terminal result before being killed still
         # surfaces that result -- the gate only suppresses the partial-chunk
         # fallback, never the documented final-message channel.
-        out = _PARTIAL_CLAUDE_OUTPUT + "\n" + json.dumps(
-            {"type": "result", "result": "done before kill"}
+        result_frame = json.dumps(
+            {"type": "result", "result": "done before kill"},
         )
+        out = f"{_PARTIAL_CLAUDE_OUTPUT}\n{result_frame}"
         with patch(
             _POPEN_TARGET,
             return_value=_completed(stdout=out, returncode=-signal.SIGKILL),

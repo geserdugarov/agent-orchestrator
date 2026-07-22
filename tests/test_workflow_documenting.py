@@ -366,6 +366,7 @@ class HandleDocumentingFreshOutcomeTest(
         self.assertEqual(state.get(PARK_REASON), PARK_AGENT_TIMEOUT)
         self.assertIn("agent timed out", gh.posted_comments[-1][1])
 
+
 class HandleDocumentingFreshSafetyTest(
     unittest.TestCase,
     _FreshDocumentingFixture,
@@ -1681,6 +1682,7 @@ class HandleDocumentingDriftRouteTest(
         mocks[PUSH_BRANCH].assert_not_called()
         state = gh.pinned_data(self.issue_number)
         self.assertEqual(state.get(REVIEW_ROUND), 0)
+
 
 class HandleDocumentingDriftRecoveryTest(
     unittest.TestCase, _DocumentingDriftFixture

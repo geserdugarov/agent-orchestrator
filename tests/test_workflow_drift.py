@@ -855,7 +855,7 @@ class OrchCommentMarkerSurvivesIdCapTest(unittest.TestCase):
         # from the bounded cap. Its body still carries the marker
         # (because every orchestrator comment is posted with it), so
         # the hash filter must drop it.
-        bot_body = "picking this up\n\n" + workflow._ORCH_COMMENT_MARKER
+        bot_body = f"picking this up\n\n{workflow._ORCH_COMMENT_MARKER}"
         bot = FakeComment(
             id=_EVICTED_BOT_COMMENT_ID,
             body=bot_body,

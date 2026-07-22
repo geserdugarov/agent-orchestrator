@@ -702,7 +702,6 @@ class FullSpecDevNoSessionTest(unittest.TestCase, _FullSpecFixtureMixin):
         )
 
 
-
 class FullSpecDecomposerNoSessionTest(
     unittest.TestCase, _FullSpecFixtureMixin,
 ):

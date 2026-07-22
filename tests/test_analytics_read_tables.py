@@ -293,8 +293,14 @@ class IssuesOverviewTest(unittest.TestCase):
         # Order preserved from the SQL; the second row's `None` cost
         # survives as `None` rather than coercing to 0.0.
         self.assertEqual(len(issues), 2)
-        self.assertEqual((issues[0].repo, issues[0].issue), ("owner/b", 1))
-        self.assertEqual((issues[1].repo, issues[1].issue), ("owner/a", 1))
+        self.assertEqual(
+            (issues[0].repo, issues[0].issue),
+            ("owner/b", 1),
+        )
+        self.assertEqual(
+            (issues[1].repo, issues[1].issue),
+            ("owner/a", 1),
+        )
         self.assertEqual(issues[0].event_count, 3)
         self.assertEqual(issues[0].first_seen, _LATER_SEEN)
         self.assertEqual(issues[0].last_seen, _LATEST_SEEN)

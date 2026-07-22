@@ -26,21 +26,27 @@ import unittest
 from datetime import date
 from pathlib import Path
 
+
+def _load_chart_dependencies():
+    charts = importlib.import_module("orchestrator.dashboard_charts")
+    theme_module = importlib.import_module("orchestrator.dashboard_theme")
+    read_module = importlib.import_module("orchestrator.analytics.read")
+    return charts, theme_module, read_module
+
+
 try:
-    from orchestrator import dashboard_charts
-    from orchestrator import dashboard_theme as theme
-    from orchestrator.analytics.read import (
-        HourlyHeatmapPoint,
-        RepoBreakdownRow,
-        ReviewRoundBucketRow,
-        StageBreakdown,
-        ThroughputDayRow,
-        TimeSeriesPoint,
-    )
-    HAS_PLOTLY = True
+    dashboard_charts, theme, _analytics_read = _load_chart_dependencies()
 except ModuleNotFoundError:
     HAS_PLOTLY = False
     dashboard_charts = None  # type: ignore[assignment]
+else:
+    HAS_PLOTLY = True
+    HourlyHeatmapPoint = _analytics_read.HourlyHeatmapPoint
+    RepoBreakdownRow = _analytics_read.RepoBreakdownRow
+    ReviewRoundBucketRow = _analytics_read.ReviewRoundBucketRow
+    StageBreakdown = _analytics_read.StageBreakdown
+    ThroughputDayRow = _analytics_read.ThroughputDayRow
+    TimeSeriesPoint = _analytics_read.TimeSeriesPoint
 
 
 _SKIP_REASON = "plotly not installed -- run `uv sync --group dashboard`"

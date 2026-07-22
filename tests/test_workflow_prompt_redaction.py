@@ -158,7 +158,6 @@ class RedactSecretsTest(unittest.TestCase):
         self.assertNotIn("hunter2isthepasswordvalue", out)
 
 
-
 class RedactionBoundaryTest(unittest.TestCase):
     """Redaction preserves harmless text and handles output boundaries."""
 
@@ -183,7 +182,8 @@ class RedactionBoundaryTest(unittest.TestCase):
         # tail. Pad noise so the secret would otherwise straddle the cap.
         secret = "sk-ant-spanningthecutboundary123"
         with _patched_env(ANTHROPIC_API_KEY=secret):
-            stderr = ("X" * (workflow._STDERR_TAIL_BUDGET - 8)) + secret + " trailing"
+            padding = "X" * (workflow._STDERR_TAIL_BUDGET - 8)
+            stderr = f"{padding}{secret} trailing"
             block = workflow._format_stderr_diagnostics(
                 AgentResult(
                     session_id=_AGENT_SESSION_ID, last_message="", exit_code=1,
@@ -220,7 +220,7 @@ class RedactionBoundaryTest(unittest.TestCase):
                 AgentResult(
                     session_id=_AGENT_SESSION_ID, last_message="", exit_code=1,
                     timed_out=False, stdout="",
-                    stderr="boom: " + secret,
+                    stderr=f"boom: {secret}",
                 ),
                 "Agent",
             )
@@ -234,7 +234,7 @@ class RedactionBoundaryTest(unittest.TestCase):
                 AgentResult(
                     session_id=_AGENT_SESSION_ID, last_message="", exit_code=1,
                     timed_out=False, stdout="",
-                    stderr="leaked: " + secret,
+                    stderr=f"leaked: {secret}",
                 ),
             )
         self.assertNotIn("line2-of-secret-value", tail)

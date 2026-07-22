@@ -33,6 +33,14 @@ _WINDOW_START = datetime(2026, 6, 1, tzinfo=timezone.utc)
 _WINDOW_END = datetime(2026, 6, 24, tzinfo=timezone.utc)
 
 
+def _session_load_count(index: int) -> int:
+    if index <= 35:
+        return 1
+    if index == 36:
+        return 2
+    return 0
+
+
 def _window_row(
     *,
     row_id: int,
@@ -45,7 +53,8 @@ def _window_row(
     incidental: list[str] | None = None,
 ) -> tuple:
     """A reporting-window `agent_exit` scan row (identity + skill names)."""
-    return (repo, role, backend, resume, session, row_id, triggered, incidental)
+    row = [repo, role, backend, resume, session, row_id, triggered, incidental]
+    return tuple(row)
 
 
 def _history_row(
@@ -69,10 +78,11 @@ def _history_row(
     """
     if available_present is None:
         available_present = available is not None
-    return (
+    row = [
         repo, role, backend, resume, session, row_id,
         available, available_present, triggered,
-    )
+    ]
+    return tuple(row)
 
 
 class SkillAdoptionTest(unittest.TestCase):
@@ -119,7 +129,7 @@ class SkillAdoptionTest(unittest.TestCase):
         for index in range(41):
             anchor = f"anchor-{index}"
             run_count = 3 if index < 40 else 2
-            load_count = 1 if index <= 35 else (2 if index == 36 else 0)
+            load_count = _session_load_count(index)
             for run in range(run_count):
                 row_id += 1
                 triggered = [_DEVELOP] if run < load_count else None
@@ -180,7 +190,7 @@ class SkillAdoptionTest(unittest.TestCase):
         self.assertEqual((row.sessions, row.adopted), (1, 1))
         self.assertEqual((row.invocations, row.load_rows), (1, 0))
 
-    def test_history_scan_drops_start_and_stage_keeps_end(self) -> None:
+    def test_history_drops_start_and_keeps_end(self) -> None:
         conn = _FakeConnection()
         _reload_read().get_skill_adoption(
             start=_WINDOW_START, end=_WINDOW_END, repo=_REPO,
@@ -253,7 +263,7 @@ class SkillAdoptionTest(unittest.TestCase):
         self.assertEqual((row.sessions, row.adopted), (3, 2))
         self.assertEqual((row.invocations, row.load_rows), (3, 2))
 
-    def test_legacy_load_implies_availability_without_metadata(self) -> None:
+    def test_legacy_load_implies_availability(self) -> None:
         conn = _FakeConnection()
         conn.rows_for = {
             _WINDOW_SCAN: [
@@ -271,9 +281,12 @@ class SkillAdoptionTest(unittest.TestCase):
         # A load whose session never carried the `skills_available` key
         # implies the skill was offered, so it counts in the denominator;
         # the metadata-less quiet session with no load fabricates nothing.
-        self.assertEqual((row.skill, row.sessions, row.adopted), (_DEVELOP, 1, 1))
+        self.assertEqual(
+            (row.skill, row.sessions, row.adopted),
+            (_DEVELOP, 1, 1),
+        )
 
-    def test_empty_availability_metadata_blocks_implied_availability(self) -> None:
+    def test_empty_metadata_blocks_implied_skill(self) -> None:
         conn = _FakeConnection()
         conn.rows_for = {
             _WINDOW_SCAN: [
@@ -301,7 +314,7 @@ class SkillAdoptionTest(unittest.TestCase):
         self.assertEqual((row.sessions, row.adopted), (1, 1))
         self.assertEqual(row.load_rows, 2)
 
-    def test_incidental_reference_is_window_scoped_diagnostic(self) -> None:
+    def test_incidental_reference_is_window_scoped(self) -> None:
         conn = _FakeConnection()
         conn.rows_for = {
             _WINDOW_SCAN: [
@@ -344,7 +357,10 @@ class SkillAdoptionTest(unittest.TestCase):
             ],
         }
         rows = _reload_read().get_skill_adoption(connect=conn.as_connect)
-        self.assertEqual((rows[0].agent_role, rows[0].backend), (_UNKNOWN, _UNKNOWN))
+        self.assertEqual(
+            (rows[0].agent_role, rows[0].backend),
+            (_UNKNOWN, _UNKNOWN),
+        )
 
     def test_window_and_repo_params_bound(self) -> None:
         conn = _FakeConnection()
@@ -357,8 +373,8 @@ class SkillAdoptionTest(unittest.TestCase):
         self.assertIn(_EVENT_AGENT_EXIT, window_sql)
         self.assertIn("ts >= %s", window_sql)
         self.assertIn("repo = %s", window_sql)
-        for value in (_WINDOW_START, _WINDOW_END, _REPO):
-            self.assertIn(value, window_params)
+        for expected_parameter in (_WINDOW_START, _WINDOW_END, _REPO):
+            self.assertIn(expected_parameter, window_params)
         # Neither scan touches the rollup / agent-runs view.
         for sql, _ in conn.executed:
             self.assertIn(_EVENT_AGENT_EXIT, sql)

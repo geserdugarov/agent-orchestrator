@@ -495,8 +495,9 @@ class HandleQuestionParkPathsTest(unittest.TestCase, _QuestionWorkflowMixin):
         pinned_data = gh.pinned_data(issue.number)
         self.assertEqual(pinned_data[KEY_PARK_REASON], PARK_QUESTION_DIRTY)
         comment = gh.posted_comments[-1][1]
+        last_visible_file = DIRTY_DISPLAY_LIMIT - 1
         self.assertIn("file_0.py", comment)
-        self.assertIn(f"file_{DIRTY_DISPLAY_LIMIT - 1}.py", comment)
+        self.assertIn(f"file_{last_visible_file}.py", comment)
         self.assertNotIn(f"file_{DIRTY_DISPLAY_LIMIT}.py", comment)
         self.assertIn(f"({DIRTY_OVERFLOW_COUNT} more)", comment)
 

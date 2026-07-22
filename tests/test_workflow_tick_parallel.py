@@ -607,13 +607,15 @@ class TickFamilySchedulingTest(unittest.TestCase):
         # fake_process gets called for it too -- but ALSO for #1 and #3,
         # proving the other issues weren't aborted.
 
-        with patch.object(
-            FakeGitHubClient,
-            "workflow_label",
-            _flaky_workflow_label,
-        ), \
-             patch.object(workflow, REFRESH_BASE), \
-             patch.object(workflow, PROCESS_ISSUE, side_effect=recorder):
+        with (
+            patch.object(
+                FakeGitHubClient,
+                "workflow_label",
+                _flaky_workflow_label,
+            ),
+            patch.object(workflow, REFRESH_BASE),
+            patch.object(workflow, PROCESS_ISSUE, side_effect=recorder),
+        ):
             workflow.tick(gh, _spec(parallel_limit=3))
 
         # All three issues were attempted -- the partition did not abort
@@ -752,12 +754,14 @@ class TickFamilySchedulingTest(unittest.TestCase):
             umbrella=None,
         )
 
-        with patch.object(workflow, REFRESH_BASE), \
-             patch.object(
-                 workflow,
-                 PROCESS_ISSUE,
-                 side_effect=_simulate_family_child_state,
-             ):
+        with (
+            patch.object(workflow, REFRESH_BASE),
+            patch.object(
+                workflow,
+                PROCESS_ISSUE,
+                side_effect=_simulate_family_child_state,
+            ),
+        ):
             workflow.tick(gh, _spec(parallel_limit=4))
 
         # Child's final state retains the parent's seed and is not parked.
@@ -889,13 +893,15 @@ class TickGlobalSchedulingTest(unittest.TestCase):
         _seed_issues(gh, (1, 2, 3))
         recorder = _IssueProcessRecorder()
 
-        with patch.object(
-            gh,
-            "list_pollable_issues",
-            partial(_poll_then_raise, gh),
-        ), \
-             patch.object(workflow, REFRESH_BASE), \
-             patch.object(workflow, PROCESS_ISSUE, side_effect=recorder):
+        with (
+            patch.object(
+                gh,
+                "list_pollable_issues",
+                partial(_poll_then_raise, gh),
+            ),
+            patch.object(workflow, REFRESH_BASE),
+            patch.object(workflow, PROCESS_ISSUE, side_effect=recorder),
+        ):
             # The enumeration failure is not caught inside `tick` (it lives
             # at the per-repo boundary in `main._run_tick`), but the issues
             # yielded BEFORE the raise must still have been processed.

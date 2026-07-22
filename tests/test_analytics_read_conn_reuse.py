@@ -14,7 +14,11 @@ from tests.analytics_read_helpers import (
 # totals row that keeps the reader from short-circuiting when the
 # values themselves are irrelevant to the reuse assertions.
 _WIN_CTE = "WITH win AS"
-_ZERO_TOTALS_ROW = ("t", None, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+_ZERO_TOTALS_ROW = (
+    "t", None,
+    0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0,
+)
 
 # Non-null data-extent bounds for the `get_data_extent` fakes; the
 # reuse tests only assert they round-trip as non-None.

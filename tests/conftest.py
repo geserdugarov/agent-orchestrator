@@ -26,12 +26,16 @@ unwinds back to `None`.
 """
 from __future__ import annotations
 
+from importlib import import_module
 from unittest.mock import patch
 
 import pytest
 
-from tests import bootstrap  # noqa: F401 -- normalize settings before orchestrator imports
-from orchestrator import analytics
+from tests.bootstrap import normalize_test_environment
+
+normalize_test_environment()
+
+analytics = import_module("orchestrator.analytics")
 
 
 @pytest.fixture(autouse=True)

@@ -690,12 +690,13 @@ class SquashHelperRecoveryRealGitTest(
         # failure names the offending command. The `/`+NUL response is
         # fsmonitor v1 for "assume everything changed" -- a scan hint only, so
         # a genuinely clean tree still reads clean.
-        hook.write_text(
-            "#!/bin/sh\n"
-            "tr '\\0' ' ' < /proc/$PPID/cmdline >> '" + str(marker) + "'\n"
-            "printf '\\n' >> '" + str(marker) + "'\n"
-            "printf '/\\000'\n"
+        hook_lines = (
+            "#!/bin/sh",
+            rf"tr '\0' ' ' < /proc/$PPID/cmdline >> '{marker}'",
+            rf"printf '\n' >> '{marker}'",
+            r"printf '/\000'",
         )
+        hook.write_text("\n".join((*hook_lines, "")))
         hook.chmod(EXECUTABLE_MODE)
         _git("config", "core.fsmonitor", str(hook), cwd=self.work)
 

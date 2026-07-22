@@ -86,6 +86,7 @@ class DocumentingLabelRegistrationTest(unittest.TestCase):
 
         self.assertIn(LABEL_DOCUMENTING, _PR_REFRESH_DETOUR_LABELS)
 
+
 class DocumentingLabelRoutingTest(unittest.TestCase):
     """Dispatcher routing and the missing-PR park remain stable."""
 

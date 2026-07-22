@@ -239,7 +239,8 @@ class HandleValidatingFreshReviewTest(
         # A multi-MB CF response must not bloat the issue body. The
         # park comment caps stderr at 1KB.
         gh, issue = self._seeded()
-        huge = "X" * STDERR_PAYLOAD_SIZE + "TAIL_MARKER"
+        padding = "X" * STDERR_PAYLOAD_SIZE
+        huge = f"{padding}TAIL_MARKER"
         self._run_validating(
             gh,
             issue,
@@ -914,8 +915,9 @@ class HandleValidatingReviewCapAddRoundsCommandTest(
     ) -> None:
         # `N >= MAX_REVIEW_ROUNDS` clamps review_round to 0 -- the full
         # reset. The reviewer-spawn block then runs with a fresh budget.
+        requested_rounds = config.MAX_REVIEW_ROUNDS + 5
         gh, issue = self._seeded(
-            comment_body=(f"/orchestrator add-review-rounds {config.MAX_REVIEW_ROUNDS + 5}"),
+            comment_body=f"/orchestrator add-review-rounds {requested_rounds}",
         )
 
         self._run_validating(

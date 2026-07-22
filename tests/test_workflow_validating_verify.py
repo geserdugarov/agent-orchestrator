@@ -492,7 +492,8 @@ class RunVerifyCommandsTest(
         self.assertIn(LEFTOVER_FILE, run.dirty_files)
 
     def test_output_truncated_to_budget(self) -> None:
-        big = "X" * OUTPUT_PAYLOAD_SIZE + "TAIL"
+        padding = "X" * OUTPUT_PAYLOAD_SIZE
+        big = f"{padding}TAIL"
         run = workflow._run_verify_commands(
             self.worktree,
             (f"sh -c 'printf %s {shutil_quote(big)}; exit 1'",),
@@ -547,10 +548,11 @@ class VerifyCommandEnvironmentTest(
         # Length 8 matches `_REDACT_MIN_VALUE_LEN`: shorter accidental
         # collisions are below the redaction threshold and tolerable.
         for start in range(len(secret) - 7):
+            secret_fragment = secret[start:start + 8]
             self.assertNotIn(
-                secret[start : start + 8],
+                secret_fragment,
                 run.output,
-                f"partial secret substring leaked: {secret[start : start + 8]!r}",
+                f"partial secret substring leaked: {secret_fragment!r}",
             )
         # And the redaction marker is present (proves the runner
         # actually saw and replaced the secret).

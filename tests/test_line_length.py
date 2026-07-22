@@ -115,7 +115,7 @@ def _flagged_lines(text: str) -> list[int]:
 
 def _line_rule_cases() -> _LineRuleCases:
     long_prose = "word " * _LONG_PROSE_REPETITIONS
-    long_url = "https://example.com/" + "a" * _LONG_TOKEN_LENGTH
+    long_url = "".join(("https://example.com/", "a" * _LONG_TOKEN_LENGTH))
     wide_divider = "─" * _DIVIDER_WIDTH
     return {
         "short line": ("plain short line", []),
@@ -125,7 +125,7 @@ def _line_rule_cases() -> _LineRuleCases:
         "unbreakable url": (long_url, []),
         "wide box drawing": (wide_divider, []),
         "exactly at limit": ("a" * _TEST_LINE_LIMIT, []),
-        "one over limit": ("a " + "a" * _ONE_BELOW_TEST_LIMIT, [1]),
+        "one over limit": ("".join(("a ", "a" * _ONE_BELOW_TEST_LIMIT)), [1]),
     }
 
 
@@ -136,10 +136,11 @@ class TrackedFilesWithinLimitTest(unittest.TestCase):
             for relative_path, path in _tracked_text_files()
             for violation in _file_violations(relative_path, path)
         ]
+        violation_report = "\n".join(violations)
         self.assertEqual(
             violations,
             [],
-            "tracked text lines exceed the line-length limit:\n" + "\n".join(violations),
+            f"tracked text lines exceed the line-length limit:\n{violation_report}",
         )
 
 

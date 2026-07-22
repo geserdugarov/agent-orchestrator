@@ -31,7 +31,7 @@ from orchestrator.state_machine import (
 _LabelHistory = list[tuple[int, Optional[str]]]
 _STATE_CLOSED = "closed"
 _STATE_OPEN = "open"
-_CLOSED_SWEEP_LABELS = frozenset({
+_CLOSED_SWEEP_LABELS = frozenset((
     "implementing",
     "documenting",
     "validating",
@@ -39,7 +39,7 @@ _CLOSED_SWEEP_LABELS = frozenset({
     "fixing",
     "resolving_conflict",
     "question",
-})
+))
 
 
 def _has_closed_sweep_label(issue: "FakeIssue") -> bool:
@@ -386,7 +386,8 @@ class FakeGitHubClient:
         # Mirror the real client's strict typo guard on this direct
         # workflow-label write path.
         validated = [coerce_workflow_label(label) for label in labels]
-        full_body = f"{(body or '').rstrip()}\n\nParent: #{parent_number}"
+        trimmed_body = (body or "").rstrip()
+        full_body = f"{trimmed_body}\n\nParent: #{parent_number}"
         child = FakeIssue(
             number=next(self._next_issue_number),
             title=title,
@@ -426,7 +427,9 @@ class FakeGitHubClient:
     def pinned_data(self, issue_number: int) -> dict[str, Any]:
         """Convenience for tests: the last-written state dict for an issue."""
         st = self._pinned.get(issue_number)
-        return dict(st.data) if st is not None else {}
+        if st is None:
+            return {}
+        return dict(st.data)
 
     def comments_after(
         self, issue: FakeIssue, after_id: Optional[int]
@@ -518,21 +521,21 @@ class FakeGitHubClient:
 
     @staticmethod
     def pr_is_approved(pr: FakePR, *, head_sha: str) -> bool:
-        if not pr.approved:
-            return False
-        sha = pr.approval_head_sha if pr.approval_head_sha is not None else pr.head.sha
-        return sha == head_sha
+        if pr.approved:
+            sha = pr.approval_head_sha
+            if sha is None:
+                sha = pr.head.sha
+            return sha == head_sha
+        return False
 
     @staticmethod
     def pr_has_changes_requested(pr: FakePR, *, head_sha: str) -> bool:
-        if not pr.changes_requested:
-            return False
-        sha = (
-            pr.changes_requested_head_sha
-            if pr.changes_requested_head_sha is not None
-            else pr.head.sha
-        )
-        return sha == head_sha
+        if pr.changes_requested:
+            sha = pr.changes_requested_head_sha
+            if sha is None:
+                sha = pr.head.sha
+            return sha == head_sha
+        return False
 
     @staticmethod
     def pr_combined_check_state(pr: FakePR) -> str:

@@ -61,19 +61,25 @@ class ResolvingConflictPublishGuardUnitTest(unittest.TestCase):
 
     def test_already_rebased_reads_rev_list_count(self) -> None:
         fetch_ok = MagicMock(return_value=MagicMock(returncode=0))
-        with patch.object(workflow, "_authed_fetch", fetch_ok), \
-             patch.object(
-                 workflow, "_git_hardened",
-                 MagicMock(return_value=MagicMock(returncode=0, stdout="0\n")),
-             ):
+        with (
+            patch.object(workflow, "_authed_fetch", fetch_ok),
+            patch.object(
+                workflow,
+                "_git_hardened",
+                MagicMock(return_value=MagicMock(returncode=0, stdout="0\n")),
+            ),
+        ):
             self.assertTrue(
                 conflicts._already_rebased_onto_base(_TEST_SPEC, Path("/tmp/x")),
             )
-        with patch.object(workflow, "_authed_fetch", fetch_ok), \
-             patch.object(
-                 workflow, "_git_hardened",
-                 MagicMock(return_value=MagicMock(returncode=0, stdout="3\n")),
-             ):
+        with (
+            patch.object(workflow, "_authed_fetch", fetch_ok),
+            patch.object(
+                workflow,
+                "_git_hardened",
+                MagicMock(return_value=MagicMock(returncode=0, stdout="3\n")),
+            ),
+        ):
             self.assertFalse(
                 conflicts._already_rebased_onto_base(_TEST_SPEC, Path("/tmp/x")),
             )
