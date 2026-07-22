@@ -13,12 +13,17 @@ ORCHESTRATOR_TOKEN_FILE).
 from __future__ import annotations
 
 import os
-import shlex
 import sys
 from pathlib import Path
-from typing import NoReturn, Optional
+from typing import NoReturn
 
-from orchestrator import _repo_config
+from orchestrator import (
+    _agent_config,
+    _dotenv_config,
+    _repo_config,
+    _runtime_config,
+    _token_config,
+)
 # The repository-entry model and REPOS parsing / default-spec construction live
 # in a focused private module; re-export `RepoSpec` so `orchestrator.config`
 # stays the compatibility import site for every caller and test patch target.
@@ -29,17 +34,9 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 # Keys whose values must never be loaded from REPO_ROOT/.env. The agent has
 # read access to that file via the orchestrator checkout; secrets belong in
 # process env or in a file outside REPO_ROOT.
-_SECRET_KEYS = frozenset((
-    "GITHUB_TOKEN",
-    "GH_TOKEN",
-    "GITHUB_PAT",
-    "GH_ENTERPRISE_TOKEN",
-    "GITHUB_ENTERPRISE_TOKEN",
-    "GIT_TOKEN",
-))
-_DOTENV_TRUE_VALUES = frozenset(("1", "true", "on", "yes"))
 # Default value for boolean env knobs that ship enabled.
 _DEFAULT_ENABLED = "on"
+_DOTENV_TRUE_VALUES = _dotenv_config._TRUE_VALUES
 
 
 def _config_error(message: str) -> NoReturn:
@@ -63,116 +60,18 @@ def _config_warning(message: str) -> None:
     sys.stderr.write(f"{message}\n")
 
 
-def _has_matched_outer_quotes(dotenv_value: str) -> bool:
-    if len(dotenv_value) < 2:
-        return False
-    quote = dotenv_value[0]
-    if quote not in ('"', "'"):
-        return False
-    return dotenv_value[-1] == quote
-
-
-def _strip_dotenv_quotes(dotenv_value: str) -> str:
-    """Strip a single matched outer quote pair off a dotenv value.
-
-    The legacy form (`value.strip('"').strip("'")`) stripped quote
-    characters off both ends independently and across both quote types,
-    which corrupted any value whose payload legitimately ended in a
-    quote -- e.g. the shell-spec form
-    ``codex -m gpt-5.5 -c 'model_reasoning_effort="xhigh"'`` would have
-    its trailing `'` stripped by `.strip("'")` even though it is the
-    closing half of an inner quote pair, leaving `shlex.split` to choke
-    on `No closing quotation`.
-
-    Only a single matched outer pair (`"..."` or `'...'`) is unwrapped;
-    anything else is returned verbatim so quoted segments inside the
-    value survive untouched.
-    """
-    stripped_value = dotenv_value.strip()
-    if _has_matched_outer_quotes(stripped_value):
-        return stripped_value[1:-1]
-    return stripped_value
-
-
-def _dotenv_loading_disabled() -> bool:
-    setting = os.environ.get("ORCHESTRATOR_SKIP_DOTENV", "")
-    return setting.strip().lower() in _DOTENV_TRUE_VALUES
-
-
-def _parse_dotenv_entry(raw_line: str) -> Optional[tuple[str, str]]:
-    line = raw_line.strip()
-    if not line or line.startswith("#"):
-        return None
-    key, _, raw_value = line.partition("=")
-    return key.strip(), _strip_dotenv_quotes(raw_value)
-
-
-def _warn_ignored_dotenv_secret(key: str, env_path: Path) -> None:
-    _config_warning(
-        f"orchestrator: ignoring {key} in {env_path}; the implementer "
-        f"agent can read this file. Move the token to "
-        f"~/.config/<owner>/<repo>/token (path derived from REPO) "
-        f"or export {key} before launching."
-    )
-
-
-def _load_dotenv_entry(raw_line: str, env_path: Path) -> None:
-    entry = _parse_dotenv_entry(raw_line)
-    if entry is None:
-        return
-    key, entry_value = entry
-    if key in _SECRET_KEYS:
-        _warn_ignored_dotenv_secret(key, env_path)
-        return
-    os.environ.setdefault(key, entry_value)
-
-
 def _load_dotenv() -> None:
-    if _dotenv_loading_disabled():
-        return
-    env_path = REPO_ROOT / ".env"
-    if not env_path.exists():
-        return
-    for raw_line in env_path.read_text().splitlines():
-        _load_dotenv_entry(raw_line, env_path)
+    _dotenv_config.load_dotenv(REPO_ROOT, os.environ, _config_warning)
 
 
-def _resolve_github_token(repo: str) -> str:
-    """Resolve GITHUB_TOKEN from process env or a file outside REPO_ROOT.
-
-    Default file path is `~/.config/<owner>/<repo>/token`, derived from REPO so
-    a single host can drive multiple repos without colliding token files.
-    Returns "" when neither is set; GitHubClient surfaces the actionable error.
-    """
-    env_val = os.environ.get("GITHUB_TOKEN", "").strip()
-    if env_val:
-        return env_val
-    default_path = Path.home() / ".config" / repo / "token"
-    token_file = Path(os.environ.get("ORCHESTRATOR_TOKEN_FILE", str(default_path)))
-    try:
-        return token_file.read_text().strip()
-    except FileNotFoundError:
-        return ""
-    except OSError as err:
-        _config_warning(
-            f"orchestrator: could not read token file {token_file}: {err}"
-        )
-        return ""
+_strip_dotenv_quotes = _dotenv_config.strip_dotenv_quotes
+_resolve_github_token = _token_config.resolve_github_token
 
 
 _load_dotenv()
 
 
-def _parse_hitl_handles(raw: str) -> tuple[str, ...]:
-    handles: list[str] = []
-    seen: set[str] = set()
-    for part in raw.split(","):
-        hitl_handle = part.strip().lstrip("@").strip()
-        if not hitl_handle or hitl_handle in seen:
-            continue
-        handles.append(hitl_handle)
-        seen.add(hitl_handle)
-    return tuple(handles)
+_parse_hitl_handles = _runtime_config.parse_hitl_handles
 
 
 REPO: str = os.environ.get("REPO", "geserdugarov/agent-orchestrator")
@@ -291,32 +190,6 @@ CODEX_BIN: str = os.environ.get("CODEX_BIN", "codex")
 CLAUDE_BIN: str = os.environ.get("CLAUDE_BIN", _CLAUDE)
 
 
-def _agent_spec_tokens(name: str, spec: str) -> list[str]:
-    """Shell-split a backend spec into tokens, aborting on an empty or
-    unparseable value (the same import-time validation `_parse_agent_spec`
-    relies on)."""
-    raw = (spec or "").strip()
-    if not raw:
-        _config_error(
-            f"orchestrator: {name}={spec!r} is empty; expected 'codex' "
-            "or 'claude' (optionally followed by CLI args)"
-        )
-    try:
-        tokens = shlex.split(raw)
-    except ValueError as err:
-        _config_error(
-            f"orchestrator: {name}={spec!r} is not a valid shell-like "
-            f"command spec ({err}); expected 'codex' or 'claude' "
-            "(optionally followed by CLI args)"
-        )
-    if not tokens:
-        _config_error(
-            f"orchestrator: {name}={spec!r} parses to no tokens; expected "
-            "'codex' or 'claude' (optionally followed by CLI args)"
-        )
-    return tokens
-
-
 def _parse_agent_spec(name: str, spec: str) -> tuple[str, tuple[str, ...]]:
     """Parse a shell-like backend spec into (backend, extra_args).
 
@@ -332,14 +205,7 @@ def _parse_agent_spec(name: str, spec: str) -> tuple[str, tuple[str, ...]]:
     backend value (`"codex"` / `"claude"`) round-trips cleanly to
     `(backend, ())` and a full spec with args round-trips to its tokens.
     """
-    tokens = _agent_spec_tokens(name, spec)
-    backend = tokens[0].lower()
-    if backend not in ("codex", _CLAUDE):
-        _config_error(
-            f"orchestrator: {name}={spec!r} first token {tokens[0]!r} is "
-            "invalid; expected 'codex' or 'claude'"
-        )
-    return backend, tuple(tokens[1:])
+    return _agent_config.parse_agent_spec(name, spec, _config_error)
 
 
 # Default split: claude implements, codex reviews. Validated at import so a
@@ -403,31 +269,7 @@ BASE_BRANCH: str = os.environ.get("BASE_BRANCH", "main")
 REMOTE_NAME: str = os.environ.get("REMOTE_NAME", "origin")
 
 
-def _parse_positive_int(name: str, raw: str, default: int) -> int:
-    """Parse an env value as a positive int; abort at import on bad values.
-
-    Used by the parallel-limit knobs (`MAX_PARALLEL_ISSUES_PER_REPO`,
-    `MAX_PARALLEL_ISSUES_GLOBAL`). Empty/unset falls back to `default`;
-    non-numeric or non-positive values abort startup so a typo cannot
-    silently degrade the orchestrator to e.g. "process zero issues at a
-    time" without surfacing the misconfiguration.
-    """
-    stripped = (raw or "").strip()
-    if not stripped:
-        return default
-    try:
-        parsed = int(stripped)
-    except ValueError:
-        _config_error(
-            f"orchestrator: {name}={raw!r} is not a valid integer; "
-            "expected a positive integer (>= 1)"
-        )
-    if parsed < 1:
-        _config_error(
-            f"orchestrator: {name}={raw!r} must be >= 1 "
-            "(zero or negative would block all work)"
-        )
-    return parsed
+_parse_positive_int = _runtime_config.PositiveIntParser(_config_error)
 
 
 # Per-repo cap on how many issues the orchestrator may advance in parallel
@@ -561,24 +403,7 @@ EXPOSE_TRACKED_REPOS: bool = os.environ.get(
 ).strip().lower() in _DOTENV_TRUE_VALUES
 
 
-def _parse_verify_commands(raw: str) -> tuple[str, ...]:
-    """Parse VERIFY_COMMANDS into an ordered tuple of shell command strings.
-
-    Each command is a single non-empty line; ``;`` is also accepted as a
-    separator so the value can fit on one line in a ``.env`` file (the
-    simple ``_load_dotenv`` parser cannot represent newlines inside a
-    value, mirroring how ``REPOS`` is parsed). Blank lines and lines
-    starting with ``#`` are skipped. Commands are executed via the shell
-    in `_run_verify_commands`, so quoting / pipes / `&&` work the way an
-    operator would type them.
-    """
-    commands: list[str] = []
-    for raw_line in raw.replace(";", "\n").splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#"):
-            continue
-        commands.append(line)
-    return tuple(commands)
+_parse_verify_commands = _runtime_config.parse_verify_commands
 
 
 # Local verification commands run in the per-issue worktree on

@@ -39,20 +39,30 @@ calls made from inside a stage handler.
 
 ```
 orchestrator/
-  main.py               entry point, polling loop, self-restart guard
-  config.py             env / token loading, secret handling, backend
-                        validation; re-exports `RepoSpec` and wraps
-                        `_parse_repos_env` / `default_repo_specs` from
-                        `_repo_config`
-  _repo_config.py       repository-entry model (`RepoSpec`) plus REPOS parsing
-                        and default-spec construction; a stdlib-only leaf
-                        (abort / warn diagnostics injected from config)
-  state_machine.py      typed label vocabulary, transition table, typo guard
-                        and transition guard
-  github.py             PyGithub wrapper, label bootstrap, pinned-state comment
-  agents.py             coding-agent subprocess runner (codex/claude dispatch)
-  scheduler.py          process-local IssueScheduler (global / per-repo caps,
-                        duplicate-active gate, family-aware mutex, executor)
+  __init__.py           lazy package/version compatibility surface;
+  _package_exports.py   owns root-package export resolution and caching
+  main.py               stable entry-point and test-patch facade
+  _main_*.py            CLI/setup, tick fan-out, loop/drain, logging,
+                        self-update probes, and shutdown/watchdog leaves
+  config.py             stable configuration surface and import-time assembly
+  _dotenv_config.py     non-secret `.env` parsing
+  _agent_config.py      agent-spec parsing
+  _runtime_config.py    runtime toggles, commands, and numeric controls
+  _token_config.py      process/token-file GitHub credential resolution
+  _repo_config*.py      `RepoSpec`, REPOS entry parsing, validation, and
+                        default-spec construction
+  state_machine.py      stable typed-label and transition-guard surface
+  _workflow_labels.py   label enums and strict label-name coercion
+  _state_transitions.py declared workflow transition graph
+  github.py             stable PyGithub client and compatibility surface
+  _github_*.py          labels, queries, pinned state, issues, PRs, reviews,
+                        checks, feedback, events, and composed client mixins
+  agents.py             stable runner API plus subprocess-group lifecycle
+  _agent_*.py           environment filtering, result/options models,
+                        session parsing, and codex/claude command runners
+  scheduler.py          stable `IssueScheduler` / `SubmissionRequest` surface
+  _scheduler_*.py       typed legacy-call binding, scheduler views,
+                        reservation, execution, and completion handling
   workflow.py           per-repo tick loop, label dispatcher, pickup handler,
                         shared cross-stage helpers (park, finalize-on-merge,
                         finalize-on-close, drain-review-pr-terminals,
@@ -83,6 +93,7 @@ orchestrator/
                         plus the per-run `discover_local_skills` filesystem
                         scan and `discover_codex_tools` baseline that backfill
                         a codex trajectory's offered skills and tools
+  _local_skills.py      per-run filesystem skill discovery and codex tool list
   stages/
     decomposition.py    decomposing / ready / blocked / umbrella handlers and
                         the decomposer-session lifecycle

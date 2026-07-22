@@ -132,9 +132,10 @@ run advances the issue; any failure parks on `validating` with a typed `park_rea
   right after the binary, before the orchestrator's own `-p` / `--dangerously-skip-permissions` / `--output-format`
   flags. The safety/output flags and the prompt stay where they are so operator args cannot silently displace them.
 - **`CODEX_BIN` / `CLAUDE_BIN` interaction** — the first token is only a backend selector. It picks the codex vs.
-  claude runner in `agents.py`; the actual executable launched is `CODEX_BIN` when the first token is `codex` and
-  `CLAUDE_BIN` when it is `claude`. Set those to a full path when the CLI is not on `$PATH`. Writing a full path as the
-  first token of `DEV_AGENT` / `REVIEW_AGENT` / `DECOMPOSE_AGENT` is rejected (it would not match `codex` / `claude`).
+  stable API in `agents.py`; command construction and provider parsing live in `_agent_codex.py` and
+  `_agent_claude.py`. The actual executable launched is `CODEX_BIN` when the first token is `codex` and `CLAUDE_BIN`
+  when it is `claude`. Set those to a full path when the CLI is not on `$PATH`. Writing a full path as the first token
+  of `DEV_AGENT` / `REVIEW_AGENT` / `DECOMPOSE_AGENT` is rejected (it would not match `codex` / `claude`).
 
 ### Examples
 
