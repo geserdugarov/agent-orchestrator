@@ -52,6 +52,18 @@ class PackageExportTest(unittest.TestCase):
         self.assertEqual(_ORCHESTRATOR_PACKAGE.__all__, ("__version__",))
 
 
+class MainModuleEntrypointTest(unittest.TestCase):
+    def test_module_launch_resolves_runtime_facade(self) -> None:
+        completed = subprocess.run(
+            [sys.executable, "-m", "orchestrator.main", "--help"],
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("Agent orchestrator polling loop.", completed.stdout)
+
+
 class PinnedStateCompatibilityTest(unittest.TestCase):
     def test_keywords_share_data_attribute(self) -> None:
         state_data = {"branch": "orchestrator/issue-7"}

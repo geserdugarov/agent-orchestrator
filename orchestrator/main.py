@@ -61,4 +61,7 @@ _SIGNAL_EXIT_BASE = 128
 
 
 if __name__ == "__main__":
+    # `python -m` registers this module only as `__main__`; runtime leaves
+    # resolve their process-wide patch surface through its canonical name.
+    sys.modules["orchestrator.main"] = sys.modules[__name__]
     sys.exit(main())
