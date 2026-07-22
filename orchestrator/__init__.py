@@ -2,4 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """agent-orchestrator: GitHub-Issue-driven AI agent workflow."""
 
-__version__ = "0.7.0"
+# Seed explicit-use bindings while keeping this initializer import-only; the
+# compatibility imports below replace both harmless future-feature objects.
+from __future__ import annotations as __getattr__
+from __future__ import generator_stop as __dir__
+
+from orchestrator._package_exports import __dir__ as __dir__
+from orchestrator._package_exports import __getattr__ as __getattr__

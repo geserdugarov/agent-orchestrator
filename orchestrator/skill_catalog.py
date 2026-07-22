@@ -42,12 +42,9 @@ source for these).
 from __future__ import annotations
 
 import logging
-import os
-from contextlib import suppress
-from pathlib import Path
 from typing import Iterable, Optional
 
-from orchestrator import analytics
+from orchestrator import _local_skills, analytics
 from orchestrator.config import RepoSpec
 from orchestrator.git_plumbing import _git
 
@@ -55,6 +52,9 @@ log = logging.getLogger(__name__)
 
 _SkillPaths = dict[str, list[str]]
 _SkillCatalog = tuple[list[str], _SkillPaths]
+discover_codex_tools = _local_skills.discover_codex_tools
+discover_local_skills = _local_skills.discover_local_skills
+_CODEX_OFFERED_TOOLS = _local_skills._CODEX_OFFERED_TOOLS
 
 # Skill roots scanned on the target repo's base ref. Both are passed as
 # pathspecs to a single `git ls-tree`; a root absent from the tree simply
@@ -198,117 +198,3 @@ def _emit_repo_skill_catalog(spec: RepoSpec) -> None:
         log.exception(
             "repo=%s skill catalog collection failed; continuing", spec.slug,
         )
-
-
-# --- per-run local skill discovery (out-of-band codex workaround) -----------
-
-
-# codex ships its built-in skills under a `.system` container inside the global
-# skills root (`$CODEX_HOME/skills/.system/<name>/SKILL.md`) and auto-loads them
-# every session. It is descended only for that global root: repo skill roots do
-# not carry `.system`, and the per-tick catalog deliberately ignores it there.
-_SYSTEM_SKILL_DIR = ".system"
-
-
-def _direct_skill_names(root: Path) -> list[str]:
-    """Return the direct `<root>/<name>/SKILL.md` skill names under `root`.
-
-    A skill is a direct child directory of `root` that contains a `SKILL.md`
-    file, matching `_skill_name_from_path`'s "direct child only" rule. Names
-    are sorted for deterministic output (the filesystem scan order is not).
-    Dot-prefixed entries (e.g. codex's `.system` container) are not skills
-    themselves -- a caller descends into them explicitly when relevant. Any
-    `OSError` (missing root, permission) yields the names gathered so far and
-    never raises, so a caller can fold several roots without guarding each one.
-    """
-    names: list[str] = []
-    try:
-        entries = list(os.scandir(root))
-    except OSError:
-        return names
-    for entry in entries:
-        if entry.name.startswith("."):
-            continue
-        with suppress(OSError):
-            if entry.is_dir() and (Path(entry.path) / _SKILL_FILE).is_file():
-                names.append(entry.name)
-    return sorted(names)
-
-
-def _add_skill_names(
-    seen: dict[str, None], names: Iterable[str],
-) -> None:
-    """Add names to an insertion-ordered deduplication map."""
-    for skill_name in names:
-        seen.setdefault(skill_name, None)
-
-
-def _global_codex_skill_names() -> list[str]:
-    """Collect user and built-in skill names from the global codex root."""
-    codex_home = os.environ.get("CODEX_HOME") or os.path.expanduser("~/.codex")
-    global_root = Path(codex_home) / "skills"
-    return sorted(set(
-        _direct_skill_names(global_root)
-        + _direct_skill_names(global_root / _SYSTEM_SKILL_DIR)
-    ))
-
-
-def discover_local_skills(cwd: Path) -> tuple[str, ...]:
-    """Enumerate the skill names available to a codex run rooted at `cwd`.
-
-    Out-of-band workaround for codex's `--json` stream carrying no
-    offered-skills catalog (see the module docstring): scan the repo skill
-    roots (`_SKILL_ROOTS`: `.agents/skills` / `.claude/skills`) under the run's
-    worktree `cwd`, then the global `$CODEX_HOME/skills` (falling back to
-    `~/.codex/skills`) codex loads. Repo roots contribute their direct
-    `<root>/<name>/SKILL.md` definitions; the global root additionally
-    contributes the built-in skills codex auto-loads from its `.system`
-    container (`$CODEX_HOME/skills/.system/<name>/SKILL.md` -- imagegen,
-    openai-docs, skill-installer, ...), so the offered set mirrors what codex
-    actually loads rather than only user-placed skills. Names are deduped in
-    first-seen order (repo-local before global, so a name defined in both keeps
-    its repo-local position). Fail-open: a missing root or filesystem error
-    contributes nothing rather than raising, so the caller degrades to an empty
-    available set. Reads only skill names, never `SKILL.md` contents.
-    """
-    seen: dict[str, None] = {}
-    for root in _SKILL_ROOTS:
-        _add_skill_names(seen, _direct_skill_names(cwd / root))
-    _add_skill_names(seen, _global_codex_skill_names())
-    return tuple(seen)
-
-
-# codex exec's default offered-tools surface, captured from a real codex-cli
-# 0.142.5 request payload (the `codex exec --json` stream itself carries no
-# offered-tools frame the way claude's `system`/`init` frame does -- the
-# upstream codex feature request tracks adding one). Kept as codex's own tool
-# identifiers so it reads as what codex actually offers. Best-effort by nature:
-# codex assembles the real per-run set from its version, feature flags, model,
-# and MCP config, none of which is observable out-of-band, so this baseline can
-# drift -- the trade-off the workaround accepts. MCP-server tools are not
-# enumerated (that needs live negotiation).
-_CODEX_OFFERED_TOOLS: tuple[str, ...] = (
-    "exec_command",
-    "write_stdin",
-    "update_plan",
-    "request_user_input",
-    "view_image",
-    "multi_agent_v1",
-    "get_goal",
-    "create_goal",
-    "update_goal",
-    "web_search",
-)
-
-
-def discover_codex_tools() -> tuple[str, ...]:
-    """Return codex's best-effort offered-tools set for a trajectory record.
-
-    Out-of-band workaround mirroring `discover_local_skills`: codex's `codex
-    exec --json` stream carries no offered-tools frame, so a codex trajectory's
-    "Tools offered" chip would otherwise stay empty. Returns the
-    `_CODEX_OFFERED_TOOLS` baseline (see its comment for the drift caveat and
-    provenance). A function rather than a bare constant so the analytics
-    backfill has a single seam that can later grow config awareness.
-    """
-    return _CODEX_OFFERED_TOOLS

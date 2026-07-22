@@ -285,7 +285,9 @@ The two caps below are the levers:
   Invalid values abort at startup.
 
 Both caps are enforced by a single `IssueScheduler` (`orchestrator/scheduler.py`) built once at startup and threaded
-through every `workflow.tick` call. A submit is skipped this tick (and retried next pass) when:
+through every `workflow.tick` call. New callers may pass a frozen `SubmissionRequest`; the historical
+`submit(repo_slug, issue_number, fn, *, ...)` positional/all-keyword API remains supported. A submit is skipped this
+tick (and retried next pass) when:
 
 - the `(repo_slug, issue_number)` pair is already in flight (duplicate-active gate),
 - the global or per-repo cap is reached,
