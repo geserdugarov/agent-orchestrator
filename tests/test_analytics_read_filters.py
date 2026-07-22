@@ -10,6 +10,11 @@ from tests.analytics_read_helpers import (
     _reload_read,
 )
 
+_WINDOW_END_DAY = 28
+_FILTER_NARROWS_SUMMARY_ISSUE = 42
+_FILTER_NARROWS_SUMMARY_ASSERTIN_ARGUMENT = 42
+_TS_DAY = 25
+
 # Event / stage names and the repo slug the dashboard threads into
 # every read; each recurs across the module's filter assertions.
 _AGENT_EXIT = "agent_exit"
@@ -22,7 +27,7 @@ _REPO_SHORT = "owner/r"
 # datetimes directly rather than a `.date()` projection.
 _YEAR = 2026
 _WINDOW_START = datetime(_YEAR, 5, 1, tzinfo=timezone.utc)
-_WINDOW_END = datetime(_YEAR, 5, 28, tzinfo=timezone.utc)
+_WINDOW_END = datetime(_YEAR, 5, _WINDOW_END_DAY, tzinfo=timezone.utc)
 
 
 class EventStageIssueFilterTest(unittest.TestCase):
@@ -77,11 +82,13 @@ class EventStageIssueFilterTest(unittest.TestCase):
         analytics_read = _reload_read()
         conn = _FakeConnection()
         analytics_read.get_summary(
-            repo=_REPO_SHORT, issue=42, connect=conn.as_connect,
+            repo=_REPO_SHORT,
+            issue=_FILTER_NARROWS_SUMMARY_ISSUE,
+            connect=conn.as_connect,
         )
         sql, query_params = conn.first_query
         self.assertIn("issue = %s", sql)
-        self.assertIn(42, query_params)
+        self.assertIn(_FILTER_NARROWS_SUMMARY_ASSERTIN_ARGUMENT, query_params)
 
 
 class RecentAgentExitsFilterTest(unittest.TestCase):
@@ -95,7 +102,10 @@ class RecentAgentExitsFilterTest(unittest.TestCase):
         analytics_read = _reload_read()
         conn = _FakeConnection()
         analytics_read.get_recent_agent_exits(
-            limit=10, start=_WINDOW_START, end=_WINDOW_END, repo=_REPO_SHORT,
+            limit=10,
+            start=_WINDOW_START,
+            end=_WINDOW_END,
+            repo=_REPO_SHORT,
             connect=conn.as_connect,
         )
         sql, query_params = conn.first_query
@@ -114,7 +124,8 @@ class RecentAgentExitsFilterTest(unittest.TestCase):
         analytics_read = _reload_read()
         conn = _FakeConnection()
         rows = analytics_read.get_recent_agent_exits(
-            events=[_STAGE_ENTER], connect=conn.as_connect,
+            events=[_STAGE_ENTER],
+            connect=conn.as_connect,
         )
         self.assertEqual(rows, [])
         self.assertEqual(conn.executed, [])
@@ -124,15 +135,31 @@ class RecentAgentExitsFilterTest(unittest.TestCase):
         # `event = 'agent_exit'` and the function returns rows.
         analytics_read = _reload_read()
         conn = _FakeConnection()
-        ts = datetime(_YEAR, 5, 25, tzinfo=timezone.utc)
+        ts = datetime(_YEAR, 5, _TS_DAY, tzinfo=timezone.utc)
         conn.rows_for = {
             "ORDER BY ts DESC LIMIT %s": [
-                (ts, _REPO_SHORT, 7, _STAGE_IMPLEMENTING, "dev", "claude",
-                 33.0, 0, False, 1, 0, 100, 200, 0.12, "cli"),
+                (
+                    ts,
+                    _REPO_SHORT,
+                    7,
+                    _STAGE_IMPLEMENTING,
+                    "dev",
+                    "claude",
+                    33.0,
+                    0,
+                    False,
+                    1,
+                    0,
+                    100,
+                    200,
+                    0.12,
+                    "cli",
+                ),
             ],
         }
         rows = analytics_read.get_recent_agent_exits(
-            events=[_AGENT_EXIT, _STAGE_ENTER], stages=[_STAGE_IMPLEMENTING],
+            events=[_AGENT_EXIT, _STAGE_ENTER],
+            stages=[_STAGE_IMPLEMENTING],
             connect=conn.as_connect,
         )
         self.assertEqual(len(rows), 1)
@@ -144,7 +171,8 @@ class RecentAgentExitsFilterTest(unittest.TestCase):
         analytics_read = _reload_read()
         conn = _FakeConnection()
         rows = analytics_read.get_recent_agent_exits(
-            stages=[], connect=conn.as_connect,
+            stages=[],
+            connect=conn.as_connect,
         )
         self.assertEqual(rows, [])
         self.assertEqual(conn.executed, [])
@@ -159,8 +187,11 @@ class IssueEventsFilterTest(unittest.TestCase):
         analytics_read = _reload_read()
         conn = _FakeConnection()
         analytics_read.get_issue_events(
-            repo=_REPO_SHORT, issue=7,
-            start=_WINDOW_START, end=_WINDOW_END, events=[_AGENT_EXIT],
+            repo=_REPO_SHORT,
+            issue=7,
+            start=_WINDOW_START,
+            end=_WINDOW_END,
+            events=[_AGENT_EXIT],
             connect=conn.as_connect,
         )
         sql, query_params = conn.first_query
@@ -177,7 +208,10 @@ class IssueEventsFilterTest(unittest.TestCase):
         analytics_read = _reload_read()
         conn = _FakeConnection()
         rows = analytics_read.get_issue_events(
-            repo=_REPO_SHORT, issue=7, events=[], connect=conn.as_connect,
+            repo=_REPO_SHORT,
+            issue=7,
+            events=[],
+            connect=conn.as_connect,
         )
         self.assertEqual(rows, [])
         self.assertEqual(conn.executed, [])

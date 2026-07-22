@@ -9,6 +9,24 @@ from tests.analytics_read_helpers import (
     _FakeConnection,
     _reload_read,
 )
+from tests.analytics_assertions import (
+    assert_row_fields,
+    assert_sql_fragments,
+)
+
+_WINDOW_END_DAY = 28
+_TS_DAY_DAY = 25
+_TS_NEXT_DAY_DAY = 26
+_AGGREGATES_BREAKDOWNS_TOTAL_EVENTS = 42
+_AGGREGATES_BREAKDOWNS_TOTAL_COST_USD = 1.234
+_AGGREGATES_BREAKDOWNS_TOTAL_OUTPUT_TOKENS = 200
+_AGENT_RUN_COLUMNS_TOTAL_AGENT_RUNS = 15
+_CACHE_TOKEN_COLUMNS_TOTAL_CACHE_READ_TOKEN = 1200
+_CACHE_TOKEN_COLUMNS_TOTAL_CACHE_WRITE_TOKE = 800
+_DAY_NORMALISED_DATE_DAY = 25
+_AGGREGATES_ROUND_TRIP_COST_USD = 0.42
+_AGGREGATES_ROUND_TRIP_OUTPUT_TOKENS = 500
+_AGGREGATES_ROUND_TRIP_CACHE_READ_TOKENS = 200
 
 # The combined summary query opens with this CTE and scans the daily
 # rollup; both fragments are asserted against the emitted SQL across
@@ -28,10 +46,10 @@ _REPO_SHORT = "owner/r"
 # than incidental fixture noise.
 _YEAR = 2026
 _WINDOW_START = datetime(_YEAR, 5, 1, tzinfo=timezone.utc)
-_WINDOW_END = datetime(_YEAR, 5, 28, tzinfo=timezone.utc)
+_WINDOW_END = datetime(_YEAR, 5, _WINDOW_END_DAY, tzinfo=timezone.utc)
 _PREV_START = datetime(_YEAR, 4, 1, tzinfo=timezone.utc)
-_TS_DAY = date(_YEAR, 5, 25)
-_TS_NEXT_DAY = date(_YEAR, 5, 26)
+_TS_DAY = date(_YEAR, 5, _TS_DAY_DAY)
+_TS_NEXT_DAY = date(_YEAR, 5, _TS_NEXT_DAY_DAY)
 
 
 class SummaryTest(unittest.TestCase):
@@ -69,14 +87,10 @@ class SummaryTest(unittest.TestCase):
         conn.rows_for = {
             _WIN_CTE: [
                 (_KIND_TOTALS, None, 42, 10, 2, 1.234, 100, 200, 0, 0, 0, 0, 0),
-                ("e", _AGENT_EXIT, 12, None, None, None, None, None,
-                 None, None, None, None, None),
-                ("e", _STAGE_ENTER, 30, None, None, None, None, None,
-                 None, None, None, None, None),
-                ("s", "validating", 10, None, None, None, None, None,
-                 None, None, None, None, None),
-                ("s", "implementing", 20, None, None, None, None, None,
-                 None, None, None, None, None),
+                ("e", _AGENT_EXIT, 12, None, None, None, None, None, None, None, None, None, None),
+                ("e", _STAGE_ENTER, 30, None, None, None, None, None, None, None, None, None, None),
+                ("s", "validating", 10, None, None, None, None, None, None, None, None, None, None),
+                ("s", "implementing", 20, None, None, None, None, None, None, None, None, None, None),
             ],
         }
         summary = analytics_read.get_summary(
@@ -85,12 +99,12 @@ class SummaryTest(unittest.TestCase):
             repo=_REPO,
             connect=conn.as_connect,
         )
-        self.assertEqual(summary.total_events, 42)
+        self.assertEqual(summary.total_events, _AGGREGATES_BREAKDOWNS_TOTAL_EVENTS)
         self.assertEqual(summary.distinct_issues, 10)
         self.assertEqual(summary.distinct_repos, 2)
-        self.assertEqual(summary.total_cost_usd, 1.234)
+        self.assertEqual(summary.total_cost_usd, _AGGREGATES_BREAKDOWNS_TOTAL_COST_USD)
         self.assertEqual(summary.total_input_tokens, 100)
-        self.assertEqual(summary.total_output_tokens, 200)
+        self.assertEqual(summary.total_output_tokens, _AGGREGATES_BREAKDOWNS_TOTAL_OUTPUT_TOKENS)
         # Insertion order must match `c DESC, label ASC` so the
         # dashboard's iteration order does not depend on which UNION
         # plan Postgres picked.
@@ -109,7 +123,9 @@ class SummaryTest(unittest.TestCase):
         analytics_read = _reload_read()
         conn = _FakeConnection()
         analytics_read.get_summary(
-            start=_WINDOW_START, end=_WINDOW_END, repo=_REPO_SHORT,
+            start=_WINDOW_START,
+            end=_WINDOW_END,
+            repo=_REPO_SHORT,
             connect=conn.as_connect,
         )
         # The single combined SQL applies the filter once in the CTE
@@ -173,7 +189,7 @@ class SummaryAgentRunsExtensionTest(unittest.TestCase):
             ],
         }
         summary = analytics_read.get_summary(connect=conn.as_connect)
-        self.assertEqual(summary.total_agent_runs, 15)
+        self.assertEqual(summary.total_agent_runs, _AGENT_RUN_COLUMNS_TOTAL_AGENT_RUNS)
         self.assertEqual(summary.failed_agent_runs, 4)
         sql, _ = conn.first_query
         self.assertIn("total_agent_runs", sql)
@@ -218,8 +234,8 @@ class SummaryAgentRunsExtensionTest(unittest.TestCase):
             ],
         }
         summary = analytics_read.get_summary(connect=conn.as_connect)
-        self.assertEqual(summary.total_cache_read_tokens, 1200)
-        self.assertEqual(summary.total_cache_write_tokens, 800)
+        self.assertEqual(summary.total_cache_read_tokens, _CACHE_TOKEN_COLUMNS_TOTAL_CACHE_READ_TOKEN)
+        self.assertEqual(summary.total_cache_write_tokens, _CACHE_TOKEN_COLUMNS_TOTAL_CACHE_WRITE_TOKE)
         sql, _ = conn.first_query
         # The rollup carries cache-band tokens pre-summed per group
         # under the `total_cache_*` column names, so the reader sums
@@ -311,8 +327,11 @@ class KpiPrevTest(unittest.TestCase):
         analytics_read = _reload_read()
         conn = _FakeConnection()
         analytics_read.get_kpi_prev(
-            start=_PREV_START, end=_WINDOW_START, repo=_REPO_SHORT,
-            events=[_AGENT_EXIT], stages=["implementing"],
+            start=_PREV_START,
+            end=_WINDOW_START,
+            repo=_REPO_SHORT,
+            events=[_AGENT_EXIT],
+            stages=["implementing"],
             connect=conn.as_connect,
         )
         # One round-trip; the rollup window predicate replaces the
@@ -370,7 +389,6 @@ class KpiPrevTest(unittest.TestCase):
 
 
 class TimeSeriesTest(unittest.TestCase):
-
     def test_unset_db_url_returns_empty_list(self) -> None:
         analytics_read = _reload_read(db_url="")
         self.assertEqual(
@@ -411,7 +429,7 @@ class TimeSeriesTest(unittest.TestCase):
         conn = _FakeConnection()
         conn.rows_for = {
             _ROLLUP_SCAN: [
-                (datetime(_YEAR, 5, 25, 0, 0, tzinfo=timezone.utc), "x", 1),
+                (datetime(_YEAR, 5, _DAY_NORMALISED_DATE_DAY, 0, 0, tzinfo=timezone.utc), "x", 1),
             ],
         }
         points = analytics_read.get_time_series(connect=conn.as_connect)
@@ -440,23 +458,35 @@ class TimeSeriesAggregatesTest(unittest.TestCase):
         points = analytics_read.get_time_series(connect=conn.as_connect)
         self.assertEqual(len(points), 1)
         point = points[0]
-        self.assertEqual(point.count, 3)
-        self.assertEqual(point.cost_usd, 0.42)
-        self.assertEqual(point.input_tokens, 1000)
-        self.assertEqual(point.output_tokens, 500)
-        self.assertEqual(point.cache_read_tokens, 200)
-        self.assertEqual(point.cache_write_tokens, 100)
+        assert_row_fields(
+            self,
+            point,
+            {
+                "count": 3,
+                "cost_usd": _AGGREGATES_ROUND_TRIP_COST_USD,
+                "input_tokens": 1000,
+                "output_tokens": _AGGREGATES_ROUND_TRIP_OUTPUT_TOKENS,
+                "cache_read_tokens": _AGGREGATES_ROUND_TRIP_CACHE_READ_TOKENS,
+                "cache_write_tokens": 100,
+            },
+        )
         sql, _ = conn.first_query
         # Every per-day aggregate is summed from the rollup's
         # pre-derived `total_*` columns, not the raw event columns.
-        for rollup_column in (
-            "total_cost_usd",
-            "total_input_tokens",
-            "total_output_tokens",
-            "total_cache_read_tokens",
-            "total_cache_write_tokens",
-        ):
-            self.assertIn("SUM({0})".format(rollup_column), sql)
+        assert_sql_fragments(
+            self,
+            sql,
+            tuple(
+                "SUM({0})".format(rollup_column)
+                for rollup_column in (
+                    "total_cost_usd",
+                    "total_input_tokens",
+                    "total_output_tokens",
+                    "total_cache_read_tokens",
+                    "total_cache_write_tokens",
+                )
+            ),
+        )
 
     def test_legacy_six_tuple_defaults_cache_to_zero(self) -> None:
         # Older fixtures still emit 6-tuple `(day, event, count,

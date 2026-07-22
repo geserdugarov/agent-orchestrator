@@ -10,11 +10,13 @@ from tests.analytics_read_helpers import (
     _reload_read,
 )
 
+_EXTENT_MAX_DAY = 28
+
 # Reused data-extent bounds; the year is pinned so the fixture
 # timestamps stay stable, the day components are incidental.
 _YEAR = 2026
 _EXTENT_MIN = datetime(_YEAR, 5, 1, tzinfo=timezone.utc)
-_EXTENT_MAX = datetime(_YEAR, 5, 28, tzinfo=timezone.utc)
+_EXTENT_MAX = datetime(_YEAR, 5, _EXTENT_MAX_DAY, tzinfo=timezone.utc)
 
 
 def _raise_network_error(_url: str) -> None:

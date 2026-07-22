@@ -10,21 +10,37 @@ from tests.analytics_read_helpers import (
     _reload_read,
 )
 
+_WINDOW_END_DAY = 28
+_REUSES_PASSED_CONN_TOTAL_COST_USD = 1.23
+_REUSES_PASSED_CONN_TOTAL_OUTPUT_TOKENS = 200
+_REUSES_PASSED_CONN_TOTAL_CACHE_READ_TOKENS = 50
+_REUSES_PASSED_CONN_TOTAL_CACHE_WRITE_TOKEN = 25
+
 # The summary CTE the combined query opens with, plus an all-zero
 # totals row that keeps the reader from short-circuiting when the
 # values themselves are irrelevant to the reuse assertions.
 _WIN_CTE = "WITH win AS"
 _ZERO_TOTALS_ROW = (
-    "t", None,
-    0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0,
+    "t",
+    None,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
 )
 
 # Non-null data-extent bounds for the `get_data_extent` fakes; the
 # reuse tests only assert they round-trip as non-None.
 _YEAR = 2026
 _WINDOW_START = datetime(_YEAR, 5, 1, tzinfo=timezone.utc)
-_WINDOW_END = datetime(_YEAR, 5, 28, tzinfo=timezone.utc)
+_WINDOW_END = datetime(_YEAR, 5, _WINDOW_END_DAY, tzinfo=timezone.utc)
 
 
 def _refuse_connect(_url: str) -> _FakeConnection:
@@ -89,11 +105,11 @@ class ConnReusePathTest(unittest.TestCase):
         self.assertEqual(conn.close_called, 0)
         # Each KPI scalar round-trips from its row column on the reused
         # connection.
-        self.assertEqual(prev_summary.total_cost_usd, 1.23)
+        self.assertEqual(prev_summary.total_cost_usd, _REUSES_PASSED_CONN_TOTAL_COST_USD)
         self.assertEqual(prev_summary.total_input_tokens, 100)
-        self.assertEqual(prev_summary.total_output_tokens, 200)
-        self.assertEqual(prev_summary.total_cache_read_tokens, 50)
-        self.assertEqual(prev_summary.total_cache_write_tokens, 25)
+        self.assertEqual(prev_summary.total_output_tokens, _REUSES_PASSED_CONN_TOTAL_OUTPUT_TOKENS)
+        self.assertEqual(prev_summary.total_cache_read_tokens, _REUSES_PASSED_CONN_TOTAL_CACHE_READ_TOKENS)
+        self.assertEqual(prev_summary.total_cache_write_tokens, _REUSES_PASSED_CONN_TOTAL_CACHE_WRITE_TOKEN)
         self.assertEqual(prev_summary.total_agent_runs, 3)
 
     def test_get_data_extent_reuses_passed_conn(self) -> None:
@@ -103,7 +119,8 @@ class ConnReusePathTest(unittest.TestCase):
             "data_min_ts": [(_WINDOW_START, _WINDOW_END)],
         }
         extent = analytics_read.get_data_extent(
-            connect=lambda url: _FakeConnection(), conn=conn,
+            connect=lambda url: _FakeConnection(),
+            conn=conn,
         )
         self.assertIsNotNone(extent.min_ts)
         self.assertIsNotNone(extent.max_ts)
@@ -128,11 +145,14 @@ class ConnReusePathTest(unittest.TestCase):
         }
         self.assertIsNotNone(
             analytics_read.get_data_extent(
-                conn=extent_conn, connect=_refuse_connect,
+                conn=extent_conn,
+                connect=_refuse_connect,
             ).min_ts,
         )
-        self.assertEqual(len(extent_conn.executed), 1)
-        self.assertEqual(extent_conn.close_called, 0)
+        self.assertEqual(
+            (len(extent_conn.executed), extent_conn.close_called),
+            (1, 0),
+        )
 
         # `get_filter_options` -- one unioned query on the same
         # connection. A fresh fake avoids needle collisions with
@@ -143,7 +163,8 @@ class ConnReusePathTest(unittest.TestCase):
         }
         self.assertEqual(
             analytics_read.get_filter_options(
-                conn=opts_conn, connect=_refuse_connect,
+                conn=opts_conn,
+                connect=_refuse_connect,
             ).repos,
             ("owner/a",),
         )
@@ -154,15 +175,19 @@ class ConnReusePathTest(unittest.TestCase):
         summary_conn = _FakeConnection()
         summary_conn.rows_for = {_WIN_CTE: [_ZERO_TOTALS_ROW]}
         analytics_read.get_summary(conn=summary_conn, connect=_refuse_connect)
-        self.assertEqual(len(summary_conn.executed), 1)
-        self.assertEqual(summary_conn.close_called, 0)
+        self.assertEqual(
+            (len(summary_conn.executed), summary_conn.close_called),
+            (1, 0),
+        )
 
         # `get_time_series` -- single query, exercises a view-free
         # base-table helper to round out the coverage.
         ts_conn = _FakeConnection()
         analytics_read.get_time_series(conn=ts_conn, connect=_refuse_connect)
-        self.assertEqual(len(ts_conn.executed), 1)
-        self.assertEqual(ts_conn.close_called, 0)
+        self.assertEqual(
+            (len(ts_conn.executed), ts_conn.close_called),
+            (1, 0),
+        )
 
     def test_none_uses_legacy_open_close_path(self) -> None:
         # Backwards-compat: callers that do not pass `conn=` still
