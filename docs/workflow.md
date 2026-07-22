@@ -29,15 +29,17 @@ use `codex` or `claude` and each carries its own optional CLI args.
 The defaults (`claude` decomposes, `claude` implements, `codex` reviews) use both backends; both CLIs need to be
 authenticated on the host before the orchestrator starts.
 
-The stage handlers themselves live under `orchestrator/stages/` (see the module map in
-[`architecture.md#top-level-layout`](architecture.md#top-level-layout)). The per-stage handler internals — entry
-checks, drift handling, post-agent dispositions, label transitions — are documented in
+The stable stage-handler names live on lazy facades under `orchestrator/stages/`; responsibility-named leaves own
+entry checks, session execution, drift handling, persistence, and terminal routing (see the module map in
+[`architecture.md#top-level-layout`](architecture.md#top-level-layout)). Cross-stage calls still resolve through
+`workflow.py`, preserving the historical patch surface. The per-stage behavior is documented in
 [`state-machine.md#stage-handlers`](state-machine.md#stage-handlers). What follows is the role-specific glue.
 
 - **Dev session reuse.** The implementer session is spawned once in `_handle_implementing` and then resumed by
   `_handle_documenting`, `_handle_validating`, `_handle_fixing`, and `_handle_resolving_conflict` whenever they need the
   dev to make a change. The locked `(backend, args)` spec is re-parsed on every resume from pinned `dev_agent` so a
-  config flip mid-flight cannot retarget the session.
+  config flip mid-flight cannot retarget the session. `_resume_dev_with_text` retains its historical call signature at
+  the facade, then binds those arguments into a typed request/context before executing the resume.
 - **Reviewer freshness.** `_handle_validating` spawns a fresh reviewer subprocess every round with no resume, so
   `REVIEW_AGENT` changes take effect on the next validating tick. The current value is recorded in `review_agent` for
   traceability only.

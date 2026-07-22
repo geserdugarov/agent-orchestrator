@@ -24,17 +24,14 @@ orchestrator process is stateless.
 
 ## Repository layout
 
-- `orchestrator/` — Python package: tick loop and entry point, label dispatcher / facade (`workflow.py`), per-stage
-  handlers (`stages/`), worktree-subsystem compatibility re-export hub (`worktrees.py`), worktree naming / layout /
-  creation / cleanup helpers (`worktree_lifecycle.py`, re-exported from `worktrees.py`), hardened git subprocess layer
-  (`git_plumbing.py`, re-exported from `worktrees.py`), local-verify runner (`verify.py`, re-exported from
-  `worktrees.py`), PR branch publication helpers (`branch_publication.py`, re-exported from `worktrees.py`), per-tick
-  base refresh and rebase routing (`base_sync.py`, re-exported from `worktrees.py`), per-tick repo skill-catalog
-  analytics collection (`skill_catalog.py`), process-local issue scheduler (`scheduler.py`), drift detection
-  (`workflow_drift.py`), prompt builders and parsers (`workflow_messages.py`), and stable runtime-core facades
-  (`main.py`, `agents.py`, `github.py`, `config.py`, `state_machine.py`). Focused private leaves use the matching
-  `_main_*`, `_agent_*`, `_github_*`, `_scheduler_*`, configuration, state-transition, and local-skill prefixes;
-  compatibility imports and patch points stay on the public modules.
+- `orchestrator/` — Python package: tick loop and label-dispatch compatibility facade (`workflow.py`), per-stage lazy
+  facades (`stages/`), worktree-subsystem compatibility hub (`worktrees.py`), and the `base_sync.py`,
+  `branch_publication.py`, `git_plumbing.py`, `verify.py`, `worktree_lifecycle.py`, `workflow_drift.py`, and
+  `workflow_messages.py` subsystem facades. Their immutable `_export_manifest.py` inventories and `_exports.py` hooks
+  route historical imports and patch points to responsibility-named private leaves (`_workflow_*`, `_base_sync_*`,
+  `_branch_*`, `_git_*`, `_verify_*`, `_worktree_*`, and stage-specific prefixes). The package also contains per-tick
+  repo skill-catalog analytics (`skill_catalog.py`), the process-local scheduler (`scheduler.py`), and stable
+  runtime-core facades (`main.py`, `agents.py`, `github.py`, `config.py`, `state_machine.py`).
   Full module-by-module map: [`docs/architecture.md`](docs/architecture.md#top-level-layout).
 - `tests/` — pytest suite. In-memory fakes in `tests/fakes.py`. Stage-handler tests in
   `tests/test_workflow_<stage>.py` (the validating stage is split across `tests/test_workflow_validating_*.py`, the

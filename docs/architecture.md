@@ -32,10 +32,10 @@ designed around that assumption.
 
 ## Top-level layout
 
-The `orchestrator/` package is split between a slim facade (`workflow.py`), per-stage handler modules under `stages/`,
-and a small set of supporting modules. Stage modules call back into the facade via
-`from orchestrator import workflow as _wf` at call time so test patches against `workflow.<helper>` still intercept
-calls made from inside a stage handler.
+The workflow and worktree subsystems expose stable lazy facades backed by immutable export manifests. Their
+implementations live in responsibility-named private leaves, while facade lookups preserve every historical import and
+object identity. Leaves call through the owning facade at runtime where patch interception is part of the compatibility
+contract, so `patch.object(workflow, "<helper>", ...)` still intercepts calls made from other workflow and stage leaves.
 
 ```
 orchestrator/
@@ -63,30 +63,38 @@ orchestrator/
   scheduler.py          stable `IssueScheduler` / `SubmissionRequest` surface
   _scheduler_*.py       typed legacy-call binding, scheduler views,
                         reservation, execution, and completion handling
-  workflow.py           per-repo tick loop, label dispatcher, pickup handler,
-                        shared cross-stage helpers (park, finalize-on-merge,
-                        finalize-on-close, drain-review-pr-terminals,
-                        run-agent-tracked), re-exports of stage handlers and
-                        cross-module helpers so existing test patches keep
-                        working
-  workflow_drift.py     user-content drift detection (hash, compute, route)
-  workflow_messages.py  prompt builders, parsers, comment / marker helpers,
-                        stderr redaction
+  workflow.py           lazy compatibility facade for tick, dispatch, shared
+                        helpers, and stage-handler patch points
+  _workflow_export_manifest.py / _workflow_exports.py
+                        immutable historical inventory and lazy resolver hooks
+  _workflow_dependencies.py
+                        import-time config/analytics bindings shared by leaves
+  _workflow_*.py        tick/scheduling, dispatch, pickup, terminal routing,
+                        prompts, comments, usage, and run-guard leaves
+  workflow_drift.py     lazy user-content-drift compatibility facade
+  _workflow_drift_*.py  drift hashing and stage-route leaves
+  workflow_messages.py  lazy prompt/parser/comment compatibility facade
+  _workflow_messages_*.py
+                        prompt, parser, redaction, and comment leaves
   comment_trust.py      shared trust helpers (is_trusted_author /
                         filter_trusted) gating comment authors on the
                         ALLOWED_ISSUE_AUTHORS allowlist
-  git_plumbing.py       hardened git subprocess layer: `_git` / `_git_hardened`,
-                        per-target-root locks, authed fetch / push helpers
-  verify.py             local-verify runner and worktree-state probes
-  worktree_lifecycle.py worktree naming, layout, creation, restoration, cleanup
-  branch_publication.py PR-branch publication helpers (reusable-prefix
-                        detection + repo-local prefix inference, ahead/behind
-                        probe, squash-and-force-push)
-  base_sync.py          per-tick base refresh, PR-aware rebase + push, crash
-                        recovery, and the conflict-only `resolving_conflict`
-                        route (clean rebases route directly to `validating`)
-  worktrees.py          compatibility re-export hub for the five worktree-
-                        subsystem modules above
+  git_plumbing.py       lazy hardened-git compatibility facade
+  _git_*.py             immutable command fragments, target-root lock registry,
+                        auth, fetch, command, and push leaves
+  verify.py             lazy local-verification compatibility facade
+  _verify_*.py          verify models, subprocess execution, and probes
+  worktree_lifecycle.py lazy naming/creation/cleanup compatibility facade
+  _worktree_*.py        paths, creation, recovery, and cleanup leaves
+  branch_publication.py lazy branch-publication compatibility facade
+  _branch_*.py          probes, squash planning, rewriting, and publication
+  base_sync.py          lazy base-refresh/rebase compatibility facade
+  _base_sync_*.py       refresh, typed rebase/recovery decisions, conflict
+                        routing, persistence, and publication leaves
+  worktrees.py          lazy compatibility hub over the five worktree
+                        subsystem facades above
+  _worktrees_export_manifest.py / _worktrees_exports.py
+                        immutable public inventory and lazy resolver hooks
   skill_catalog.py      per-tick repo skill-catalog collection: enumerate
                         SKILL.md definitions on the target base ref and
                         append one `repo_skill_catalog` analytics record;
@@ -95,32 +103,30 @@ orchestrator/
                         a codex trajectory's offered skills and tools
   _local_skills.py      per-run filesystem skill discovery and codex tool list
   stages/
-    decomposition.py    decomposing / ready / blocked / umbrella handlers and
-                        the decomposer-session lifecycle
-    implementing.py     implementing handler and the developer-session
-                        lifecycle (read / resume / retry budget / post-agent
-                        dispositions)
-    documenting.py      documenting handler — single docs pass on the existing
-                        PR worktree, reached only via the final-docs handoff
-    validating.py       validating handler and reviewer-session lifecycle,
-                        plus the local-verify gate park helper
-    in_review.py        in_review handler — manual-merge-only PR-watermark
-                        primitives, fresh-feedback route to `fixing`, HITL
-                        ping
-    fixing.py           fixing handler — PR-feedback quiet window, dev resume,
-                        hand-back-to-`validating`
-    conflicts.py        resolving_conflict handler and the rebase / dev-resume
-                        primitives
-    question.py         question handler — read-only Q&A with no PR
+    <stage>.py          lazy compatibility facade for each historical stage
+    _<stage>_exports.py / _<stage>_export_manifest.py
+                        stage-specific lazy hooks and complete inventories
+    _decomposition_*.py decomposer runs/sessions, child routing, recovery,
+                        cleanup, blocked parents, and umbrella handling
+    _implementing_*.py  handler entry, sessions, typed resume, recovery,
+                        publication, drift, and post-agent dispositions
+    _documenting_*.py   preconditions, run, persistence, drift, and outcomes
+    _validating_*.py    reviewer/verify flow, watermarks, approval, fixes,
+                        drift, and awaiting-human routes
+    _in_review_*.py     watermarks, fresh feedback, drift, and manual-merge tail
+    _fixing_*.py        bookmarks, quiet-window feedback, resume, and routing
+    _conflict_*.py      rebase guards/outcomes, resume, publish, and transitions
+    _question_*.py      read-only session, run, outcomes, and handler routing
 ```
 
-`worktrees.py` is a compatibility re-export hub over the five focused modules above; every name is re-exported so
-existing imports and `patch.object(worktrees, "_foo", ...)` test patches keep working. Test patches that need to
-intercept a call from inside `_refresh_base_and_worktrees` / `_sync_worktree_with_base` / `_squash_and_force_push` /
-`_first_commit_subject` must target the owning module (`base_sync` / `branch_publication`) directly because the call
-graph lives there.
+`workflow.py` and `worktrees.py` publish explicit sorted `__all__` inventories, `.pyi` surfaces, and immutable target
+registries. Resolution is lazy and cached on the facade, but the resolved object is the implementation object's exact
+identity. Existing direct imports, wildcard imports, and `patch.object` calls therefore keep working. Patches that need
+to intercept base-sync or publication internals still target their owning facade (`base_sync` or
+`branch_publication`), just as before the split. Config and analytics modules retain their original import-time identity
+through `_workflow_dependencies.py`, so a diagnostic reload does not silently rebind already-imported workflow leaves.
 
-Stage-private helpers stay private to their stage module (`_bump_in_review_watermarks`,
+Stage-private helpers stay private to their stage facade (`_bump_in_review_watermarks`,
 `_seed_legacy_in_review_watermarks`, `_emit_conflict_round_incremented`). Cross-stage helpers like `_comment_created_at`
 are re-exported from the facade because more than one stage reaches for them.
 

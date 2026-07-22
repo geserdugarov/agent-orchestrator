@@ -147,7 +147,7 @@ direct-launch command remain covered by tests.
 
 | Stage | Goal | Findings owned | Packages complete | Status |
 |---|---|---:|---:|---:|
-| 1 | Production cleanup | 223 | 1/3 | [ ] |
+| 1 | Production cleanup | 223 | 2/3 | [ ] |
 | 2 | Test cleanup | 1,350 | 0/7 | [ ] |
 | 3 | Final zero-finding validation | 0 | 0/1 | [ ] |
 
@@ -182,25 +182,25 @@ compatibility tests pass.
 ### Package 1.2 — Workflow, git, worktrees, and stages (54 findings, 17 files)
 
 Scope: `base_sync.py`, `branch_publication.py`, `git_plumbing.py`, `verify.py`, `worktree_lifecycle.py`, `worktrees.py`,
-`workflow.py`, `workflow_drift.py`, `workflow_messages.py`, and all seven `orchestrator/stages/*.py` handlers.
+`workflow.py`, `workflow_drift.py`, `workflow_messages.py`, and all eight `orchestrator/stages/*.py` handlers.
 
 Baseline: `WPS201` 12, `WPS202` 16, `WPS203` 3, `WPS204` 7, `WPS211` 4, `WPS226` 7, `WPS229` 1, `WPS407` 1,
 `WPS410` 2, and `WPS501` 1.
 
-- [ ] Read `docs/state-machine.md` and `docs/workflow.md` before changing this package.
-- [ ] Split git probing, synchronization decisions, state persistence, prompt construction, and each stage's routing,
+- [x] Read `docs/state-machine.md` and `docs/workflow.md` before changing this package.
+- [x] Split git probing, synchronization decisions, state persistence, prompt construction, and each stage's routing,
   execution, and terminal tails into cohesive leaves.
-- [ ] Convert `workflow.py` and `worktrees.py` to the tested compatibility export registry while keeping late-bound
+- [x] Convert `workflow.py` and `worktrees.py` to the tested compatibility export registry while keeping late-bound
   workflow patching intact.
-- [ ] Group base-sync, conflict-routing, recovery, and developer-resume arguments into typed context/result objects with
+- [x] Group base-sync, conflict-routing, recovery, and developer-resume arguments into typed context/result objects with
   legacy adapters.
-- [ ] Replace repeated terminal state writes with named transition decisions and persistence helpers.
-- [ ] Model git subcommands/flags as immutable command fragments close to the plumbing layer.
-- [ ] Replace the mutable target-root lock mapping with a registry object that preserves the current lock lifetime.
-- [ ] Extract the decompose work from its cleanup `try` and express decompose/main cleanup through tested context
+- [x] Replace repeated terminal state writes with named transition decisions and persistence helpers.
+- [x] Model git subcommands/flags as immutable command fragments close to the plumbing layer.
+- [x] Replace the mutable target-root lock mapping with a registry object that preserves the current lock lifetime.
+- [x] Extract the decompose work from its cleanup `try` and express decompose/main cleanup through tested context
   boundaries.
-- [ ] Update facade inventories, architecture docs, workflow docs, and module docstrings after every move.
-- [ ] Run the focused workflow/git/worktree/stage tests and reduce this package's 54 findings to zero.
+- [x] Update facade inventories, architecture docs, workflow docs, and module docstrings after every move.
+- [x] Run the focused workflow/git/worktree/stage tests and reduce this package's 54 findings to zero.
 
 Completion gate: labels, pinned state, comments, commands, locks, events, and patch targets are unchanged; all 17 scoped
 files and their new leaves scan clean.

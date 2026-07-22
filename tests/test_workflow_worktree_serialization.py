@@ -160,18 +160,24 @@ class WorktreePlumbingSerializationTest(unittest.TestCase):
     a real bare remote)."""
 
     def setUp(self) -> None:
-        # Clear the module-level lock dict so tests do not leak per-key
-        # locks across runs (a stale lock from a previous test pointing
-        # at a deleted tmp dir would still satisfy the API but would
-        # spuriously serialize against a different test's lookup key).
+        # Clear the process-local registry so tests do not retain per-key locks
+        # for temporary paths from earlier cases.
         worktrees._TARGET_ROOT_LOCKS.clear()
-        # Sanity: the guard lock itself is recreated, not reused. Tests
-        # do not need a fresh guard lock but `clear()` empties the dict
-        # under the existing guard, which is fine.
         self.assertIsInstance(
             worktrees._TARGET_ROOT_LOCKS_LOCK,
             type(threading.Lock()),
         )
+
+    def test_root_lock_registry_preserves_per_path_lock_identity(self) -> None:
+        target_root = Path("/tmp/orchestrator-test-stable-target-root")
+
+        first = worktrees._target_root_lock(target_root)
+        second = worktrees._target_root_lock(target_root)
+        other = worktrees._target_root_lock(target_root.with_name("other-root"))
+
+        self.assertIs(first, second)
+        self.assertIsNot(first, other)
+        self.assertNotIsInstance(worktrees._TARGET_ROOT_LOCKS, dict)
 
     def test_root_lock_serializes_callers(self) -> None:
         # Drive `_ensure_worktree` against the SAME `spec.target_root`
@@ -339,9 +345,7 @@ class EnsureWorktreeRealGitConcurrencyTest(unittest.TestCase):
     """
 
     def setUp(self) -> None:
-        # Fresh lock dict per test so a leftover entry pointing at a
-        # previously-deleted tmp dir cannot satisfy a lookup and
-        # accidentally serialize against an unrelated path.
+        # Fresh registry entries prevent temporary paths leaking across cases.
         worktrees._TARGET_ROOT_LOCKS.clear()
 
         self.tmpdir = Path(tempfile.mkdtemp(prefix="orch-ensure-real-"))
