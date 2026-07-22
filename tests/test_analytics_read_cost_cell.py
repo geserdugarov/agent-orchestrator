@@ -10,7 +10,7 @@ from orchestrator.analytics.read_rollup import _cost_cell as _rollup_cost_cell
 
 # The float zero every empty / null / zero cell collapses to, and a
 # populated Decimal cost with its float conversion.
-_ZERO_COST = 0.0
+_ZERO_COST = float()
 _POPULATED_COST = Decimal("12.50")
 _POPULATED_FLOAT = 12.5
 

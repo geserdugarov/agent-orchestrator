@@ -10,11 +10,14 @@ from tests.analytics_read_helpers import (
     _reload_read,
 )
 
+_EXTENT_MAX_DAY = 27
+_EXTENT_MAX_HOUR = 12
+
 # Earliest / latest timestamps the populated-extent fixture reports;
 # the year is pinned so the bounds stay stable across runs.
 _YEAR = 2026
 _EXTENT_MIN = datetime(_YEAR, 4, 1, tzinfo=timezone.utc)
-_EXTENT_MAX = datetime(_YEAR, 5, 27, 12, 0, tzinfo=timezone.utc)
+_EXTENT_MAX = datetime(_YEAR, 5, _EXTENT_MAX_DAY, _EXTENT_MAX_HOUR, 0, tzinfo=timezone.utc)
 
 
 class DataExtentTest(unittest.TestCase):

@@ -11,6 +11,9 @@ from tests.analytics_read_helpers import (
     _reload_read,
 )
 
+_WINDOW_END_DAY = 28
+_WEIGHTED_STAGE_DURATION_AVG_DURATION_S = 12.5
+
 # The rollup-backed scan and the two regressed base tables every
 # cutover assertion checks against, plus the filter literals the
 # readers thread through.
@@ -25,7 +28,7 @@ _REPO_SHORT = "owner/r"
 # components are the assertion surface rather than fixture noise.
 _YEAR = 2026
 _WINDOW_START = datetime(_YEAR, 5, 1, tzinfo=timezone.utc)
-_WINDOW_END = datetime(_YEAR, 5, 28, tzinfo=timezone.utc)
+_WINDOW_END = datetime(_YEAR, 5, _WINDOW_END_DAY, tzinfo=timezone.utc)
 _ISSUE = 42
 
 
@@ -90,7 +93,8 @@ class RollupReadCutoverTest(unittest.TestCase):
             with self.subTest(reader=reader.__name__):
                 conn = _FakeConnection()
                 reader(
-                    start=_WINDOW_START, end=_WINDOW_END,
+                    start=_WINDOW_START,
+                    end=_WINDOW_END,
                     connect=conn.as_connect,
                 )
                 sql, query_params = conn.first_query
@@ -190,8 +194,7 @@ class RollupReadColumnAccountingTest(unittest.TestCase):
         # cache_write / timed_out.
         conn.rows_for = {
             "WITH win AS": [
-                ("t", None, 200, 24, 3,
-                 4.5, 12_000, 8_000, 35, 6, 3_000, 1_500, 11),
+                ("t", None, 200, 24, 3, 4.5, 12_000, 8_000, 35, 6, 3_000, 1_500, 11),
             ],
         }
         summary = analytics_read.get_summary(connect=conn.as_connect)
@@ -229,7 +232,7 @@ class RollupReadColumnAccountingTest(unittest.TestCase):
         }
         rows = analytics_read.get_stage_breakdown(connect=conn.as_connect)
         self.assertEqual(rows[0].stage, "implementing")
-        self.assertEqual(rows[0].avg_duration_s, 12.5)
+        self.assertEqual(rows[0].avg_duration_s, _WEIGHTED_STAGE_DURATION_AVG_DURATION_S)
         # NULL preserved when no row in the window carried a
         # duration -- the dashboard hides the column rather than
         # showing a misleading zero.
@@ -259,7 +262,8 @@ class RollupReadColumnAccountingTest(unittest.TestCase):
         # from the multiselect: no SQL emitted.
         conn = _FakeConnection()
         rows = analytics_read.get_backend_efficiency(
-            events=[_STAGE_ENTER], connect=conn.as_connect,
+            events=[_STAGE_ENTER],
+            connect=conn.as_connect,
         )
         self.assertEqual(rows, [])
         self.assertEqual(conn.executed, [])
@@ -274,8 +278,11 @@ class RollupReadColumnAccountingTest(unittest.TestCase):
         analytics_read = _reload_read()
         conn = _FakeConnection()
         analytics_read.get_throughput_breakdown(
-            start=_WINDOW_START, end=_WINDOW_END, repo=_REPO_SHORT,
-            issue=_ISSUE, connect=conn.as_connect,
+            start=_WINDOW_START,
+            end=_WINDOW_END,
+            repo=_REPO_SHORT,
+            issue=_ISSUE,
+            connect=conn.as_connect,
         )
         sql, query_params = conn.first_query
         self.assertIn(_ROLLUP_SCAN, sql)
