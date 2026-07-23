@@ -457,8 +457,9 @@ internals, read-model split, dashboard layout, and the in-app empty / error bann
 ## Continuous integration
 
 [`../.github/workflows/ci.yml`](../.github/workflows/ci.yml) runs `ruff check orchestrator tests`,
-`flake8 orchestrator tests --select=WPS`, and `pytest` as three separate mandatory steps on Python 3.12 for every push
-to `main` and every pull request, installing from the committed [`../uv.lock`](../uv.lock) via `uv sync --locked`.
+`flake8 orchestrator tests --select=WPS`, and `pytest tests` as three separate mandatory steps on Python 3.12 for
+every push to `main` and every pull request, installing from the committed [`../uv.lock`](../uv.lock) via
+`uv sync --locked`.
 Ruff rules live in [`../pyproject.toml`](../pyproject.toml) under `[tool.ruff.lint]`; WPS is selected inline so Flake8
 does not duplicate Ruff's checks; dev tools are declared in `[dependency-groups]`.
 
