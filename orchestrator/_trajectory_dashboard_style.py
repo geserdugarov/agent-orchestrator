@@ -38,6 +38,12 @@ EXTRA_CSS = f"""
     padding: 2px 10px; font-size: 12px;
     font-family: {theme.MONO_FONT_FAMILY};
   }}
+  /* Empty-state marker: dims and dashes the chip so a "none" reads as
+     "no skill fired" rather than a skill literally named none. */
+  .orch-traj-chip.none {{
+    background: transparent; color: var(--orch-muted-soft);
+    border-style: dashed; font-style: italic;
+  }}
   .orch-traj-table {{
     width: 100%; border-collapse: collapse; font-size: 12.5px;
     font-family: {theme.FONT_FAMILY};

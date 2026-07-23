@@ -35,13 +35,20 @@ def _meta_html(run: TrajectoryRun) -> str:
     return '<div class="orch-traj-meta">{0}</div>'.format("".join(cells))
 
 
-def _labeled_chips_html(label: str, names: Sequence[str]) -> str:
-    if not names:
+def _labeled_chips_html(
+    label: str,
+    names: Sequence[str],
+    empty_marker: str = "",
+) -> str:
+    if names:
+        chips = "".join(
+            f'<span class="orch-traj-chip">{html.escape(name)}</span>'
+            for name in names
+        )
+    elif empty_marker:
+        chips = f'<span class="orch-traj-chip none">{html.escape(empty_marker)}</span>'
+    else:
         return ""
-    chips = "".join(
-        f'<span class="orch-traj-chip">{html.escape(name)}</span>'
-        for name in names
-    )
     return (
         '<div class="orch-traj-chips">'
         f'<span class="lbl">{html.escape(label)}</span>{chips}</div>'
