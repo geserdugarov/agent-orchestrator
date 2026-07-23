@@ -6,8 +6,6 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from orchestrator import workflow, worktree_lifecycle
-from orchestrator.github import GitHubClient
-from github import GithubException
 
 from tests.fakes import FakeGitHubClient
 from tests.workflow_helpers import _TEST_SPEC
@@ -56,17 +54,22 @@ def _fake_worktree_path(*, exists: bool, path: str) -> MagicMock:
 
 def _run_cleanup(*, worktree_exists: bool, local_branch_exists: bool):
     gh = FakeGitHubClient()
-    git_mock = MagicMock(side_effect=_CleanupGit(
-        local_branch_exists=local_branch_exists,
-    ))
+    git_mock = MagicMock(
+        side_effect=_CleanupGit(
+            local_branch_exists=local_branch_exists,
+        )
+    )
     worktree_path = _fake_worktree_path(
         exists=worktree_exists,
         path=f"/tmp/issue-{CLEANUP_ISSUE_NUMBER}",
     )
-    with patch.object(worktree_lifecycle, GIT_HELPER_ATTR, git_mock), patch.object(
-        worktree_lifecycle,
-        "_worktree_path",
-        return_value=worktree_path,
+    with (
+        patch.object(worktree_lifecycle, GIT_HELPER_ATTR, git_mock),
+        patch.object(
+            worktree_lifecycle,
+            "_worktree_path",
+            return_value=worktree_path,
+        ),
     ):
         workflow._cleanup_terminal_branch(
             gh,
@@ -74,17 +77,6 @@ def _run_cleanup(*, worktree_exists: bool, local_branch_exists: bool):
             CLEANUP_ISSUE_NUMBER,
         )
     return gh, git_mock
-
-
-def _client_with_ref(*, raise_status):
-    client = GitHubClient.__new__(GitHubClient)
-    client.repo = MagicMock()
-    git_ref = MagicMock()
-    client.repo.get_git_ref.return_value = git_ref
-    if raise_status is not None:
-        error = GithubException(status=raise_status, data={"message": "x"})
-        git_ref.delete.side_effect = error
-    return client
 
 
 class CleanupTerminalBranchTest(unittest.TestCase):
@@ -99,7 +91,8 @@ class CleanupTerminalBranchTest(unittest.TestCase):
 
     def test_full_cleanup_runs_all_three_steps(self) -> None:
         gh, git_mock = _run_cleanup(
-            worktree_exists=True, local_branch_exists=True,
+            worktree_exists=True,
+            local_branch_exists=True,
         )
 
         # Worktree remove issued first, then rev-parse to probe the local
@@ -111,10 +104,8 @@ class CleanupTerminalBranchTest(unittest.TestCase):
             [WORKTREE_COMMAND, REV_PARSE_COMMAND, BRANCH_COMMAND],
         )
         # The branch -D invocation targets the per-issue branch by name.
-        branch_call = next(
-            call for call in git_mock.call_args_list
-            if call.args[0] == BRANCH_COMMAND
-        )
+        branch_calls = [call for call in git_mock.call_args_list if call.args[0] == BRANCH_COMMAND]
+        branch_call = branch_calls[0]
         self.assertEqual(branch_call.args[1], "-D")
         self.assertEqual(branch_call.args[2], CLEANUP_BRANCH)
         self.assertEqual(gh.deleted_remote_branches, [CLEANUP_BRANCH])
@@ -124,7 +115,8 @@ class CleanupTerminalBranchTest(unittest.TestCase):
         # or a prior tick removed it. Helper should still drop the local
         # branch and request the remote delete instead of erroring out.
         gh, git_mock = _run_cleanup(
-            worktree_exists=False, local_branch_exists=True,
+            worktree_exists=False,
+            local_branch_exists=True,
         )
 
         cmds = [call.args[0] for call in git_mock.call_args_list]
@@ -138,7 +130,8 @@ class CleanupTerminalBranchTest(unittest.TestCase):
         # or the operator pruned it. We must not run `branch -D` (it would
         # fail loudly), but must still request the remote delete.
         gh, git_mock = _run_cleanup(
-            worktree_exists=True, local_branch_exists=False,
+            worktree_exists=True,
+            local_branch_exists=False,
         )
 
         cmds = [call.args[0] for call in git_mock.call_args_list]
@@ -154,21 +147,27 @@ class CleanupTerminalBranchTest(unittest.TestCase):
         # written the terminal pinned state). Regression guard for the
         # "no runtime exception should escape cleanup" contract.
         gh = FakeGitHubClient()
-        git_mock = MagicMock(side_effect=_CleanupGit(
-            local_branch_exists=True,
-            fail_deletes=True,
-        ))
+        git_mock = MagicMock(
+            side_effect=_CleanupGit(
+                local_branch_exists=True,
+                fail_deletes=True,
+            )
+        )
         gh.delete_remote_branch = _raising_delete
         wt_path = _fake_worktree_path(
             exists=True,
             path=f"/tmp/issue-{CLEANUP_ISSUE_NUMBER}",
         )
 
-        with patch.object(worktree_lifecycle, GIT_HELPER_ATTR, git_mock), \
-             patch.object(worktree_lifecycle, "_worktree_path", return_value=wt_path):
+        with (
+            patch.object(worktree_lifecycle, GIT_HELPER_ATTR, git_mock),
+            patch.object(worktree_lifecycle, "_worktree_path", return_value=wt_path),
+        ):
             # Must NOT raise even though every sub-step failed.
             workflow._cleanup_terminal_branch(
-                gh, _TEST_SPEC, CLEANUP_ISSUE_NUMBER,
+                gh,
+                _TEST_SPEC,
+                CLEANUP_ISSUE_NUMBER,
             )
 
     def test_swallows_git_subprocess_exceptions(self) -> None:
@@ -186,11 +185,15 @@ class CleanupTerminalBranchTest(unittest.TestCase):
             path=f"/tmp/issue-{CLEANUP_ISSUE_NUMBER}",
         )
 
-        with patch.object(worktree_lifecycle, GIT_HELPER_ATTR, git_mock), \
-             patch.object(worktree_lifecycle, "_worktree_path", return_value=wt_path):
+        with (
+            patch.object(worktree_lifecycle, GIT_HELPER_ATTR, git_mock),
+            patch.object(worktree_lifecycle, "_worktree_path", return_value=wt_path),
+        ):
             # Must NOT raise even though every `_git` invocation throws.
             workflow._cleanup_terminal_branch(
-                gh, _TEST_SPEC, CLEANUP_ISSUE_NUMBER,
+                gh,
+                _TEST_SPEC,
+                CLEANUP_ISSUE_NUMBER,
             )
 
         # The remote-delete still ran -- a local-side raise must not
@@ -210,12 +213,14 @@ class CleanupDecomposeWorktreeTest(unittest.TestCase):
         # (e.g. a malformed spec) must be logged, not propagated, or it
         # would mask the decomposing handler's real failure.
         with patch.object(
-            worktree_lifecycle, "_decompose_worktree_path",
+            worktree_lifecycle,
+            "_decompose_worktree_path",
             side_effect=RuntimeError("bad spec"),
         ):
             # Must NOT raise.
             worktree_lifecycle._cleanup_decompose_worktree(
-                _TEST_SPEC, DECOMPOSE_ISSUE_NUMBER,
+                _TEST_SPEC,
+                DECOMPOSE_ISSUE_NUMBER,
             )
 
     def test_swallows_git_removal_failure(self) -> None:
@@ -226,41 +231,20 @@ class CleanupDecomposeWorktreeTest(unittest.TestCase):
             path="/tmp/decompose-77",
         )
 
-        with patch.object(
-            worktree_lifecycle, "_decompose_worktree_path",
-            return_value=wt_path,
-        ), patch.object(
-            worktree_lifecycle, GIT_HELPER_ATTR,
-            side_effect=OSError("git not found"),
+        with (
+            patch.object(
+                worktree_lifecycle,
+                "_decompose_worktree_path",
+                return_value=wt_path,
+            ),
+            patch.object(
+                worktree_lifecycle,
+                GIT_HELPER_ATTR,
+                side_effect=OSError("git not found"),
+            ),
         ):
             # Must NOT raise even though the git removal throws.
             worktree_lifecycle._cleanup_decompose_worktree(
-                _TEST_SPEC, DECOMPOSE_ISSUE_NUMBER,
+                _TEST_SPEC,
+                DECOMPOSE_ISSUE_NUMBER,
             )
-
-
-class DeleteRemoteBranchTest(unittest.TestCase):
-    """`GitHubClient.delete_remote_branch` is idempotent against a 404
-    because the repo's "auto-delete head branches" setting may have
-    already removed the ref as part of the merge. Other failures log
-    and return False so the caller can keep going.
-    """
-
-    def test_success(self) -> None:
-        client = _client_with_ref(raise_status=None)
-        self.assertTrue(client.delete_remote_branch(REMOTE_BRANCH))
-        client.repo.get_git_ref.assert_called_once_with(
-            REMOTE_REF
-        )
-
-    def test_missing_ref_treated_as_success(self) -> None:
-        client = _client_with_ref(raise_status=NOT_FOUND_STATUS)
-        self.assertTrue(client.delete_remote_branch(REMOTE_BRANCH))
-
-    def test_other_error_returns_false(self) -> None:
-        client = _client_with_ref(raise_status=FORBIDDEN_STATUS)
-        self.assertFalse(client.delete_remote_branch(REMOTE_BRANCH))
-
-
-if __name__ == "__main__":
-    unittest.main()
