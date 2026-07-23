@@ -148,8 +148,8 @@ direct-launch command remain covered by tests.
 | Stage | Goal | Findings owned | Packages complete | Status |
 |---|---|---:|---:|---:|
 | 1 | Production cleanup | 223 | 3/3 | [x] |
-| 2 | Test cleanup | 1,350 | 6/7 | [ ] |
-| 3 | Final zero-finding validation | 0 | 0/1 | [ ] |
+| 2 | Test cleanup | 1,350 | 7/7 | [x] |
+| 3 | Final zero-finding validation | 0 | 1/1 | [x] |
 
 Package counts are ownership counts from the baseline scan. Refactoring can move line numbers or expose a new finding,
 but no package may use that drift to drop an item: new findings belong to the package that introduced them and must be
@@ -340,33 +340,50 @@ Baseline: `WPS201` 1, `WPS202` 12, `WPS204` 27, `WPS210` 37, `WPS211` 5, `WPS213
 - [x] Split remaining large modules/classes and simplify scenario setup without hiding state/event assertions.
 - [x] Reduce all 114 findings to zero and rerun every workflow suite because these helpers are shared broadly.
 
-Stage 2 completion gate: the complete `tests/` tree has zero findings, all 2,207 baseline tests remain accounted for,
-and no helper erases materially different setup or assertions.
+Test accounting: 2,231 collected tests before and after the package; no behavior case or subtest was removed.
+
+Stage 2 completion gate: the complete `tests/` tree has zero findings, all 2,207 baseline tests remain accounted for
+within the current 2,231-test collection, and no helper erases materially different setup or assertions.
 
 ## Stage 3 — Final validation
 
 ### Package 3.1 — Zero-finding repository gate
 
-- [ ] Start from a clean worktree and run the exact baseline Flake8 command; require exit code 0 and empty output.
-- [ ] Confirm the rule inventory has 0 production findings, 0 test findings, and no newly exposed rule family.
-- [ ] Run `.venv/bin/python -m ruff check orchestrator tests`.
-- [ ] Run `git diff --check origin/main...HEAD` and `git diff --check`.
-- [ ] Run `.venv/bin/python -m pytest tests`; require every tracked test to pass apart from the three explicitly skipped
+- [x] Start from a clean worktree and run the exact baseline Flake8 command; require exit code 0 and empty output.
+- [x] Confirm the rule inventory has 0 production findings, 0 test findings, and no newly exposed rule family.
+- [x] Run `.venv/bin/python -m ruff check orchestrator tests`.
+- [x] Run `git diff --check origin/main...HEAD` and `git diff --check`.
+- [x] Run `.venv/bin/python -m pytest tests`; require every tracked test to pass apart from the three explicitly skipped
   live-Postgres integration tests when `ANALYTICS_TEST_DB_URL` is unset.
-- [ ] Audit test collection against the 2,207-test baseline and explain every added, removed, or parameterized case.
-- [ ] Run re-export, direct-launch, public-signature, serialized-shape, and real-git focused suites once more.
-- [ ] Update this plan's progress tables and close all packages only after the zero-finding scan passes.
+- [x] Audit test collection against the 2,207-test baseline and explain every added, removed, or parameterized case.
+- [x] Run re-export, direct-launch, public-signature, serialized-shape, and real-git focused suites once more.
+- [x] Update this plan's progress tables and close all packages only after the zero-finding scan passes.
 
 Completion gate: 0 parsed findings, 0 unique findings, Ruff clean, diff checks clean, and the complete tracked test
 suite green.
 
 ## Validation gate for every package
 
-- [ ] The package's scoped scan reaches zero findings.
-- [ ] A repository-wide scan shows no new finding and no increase outside the package.
-- [ ] Focused tests for every changed behavior pass.
-- [ ] Ruff and both diff checks pass.
-- [ ] The full tracked test suite passes after a production contract/facade change and at each stage boundary.
-- [ ] Added or modified tests protect distinct behavior and avoid duplicated setup.
-- [ ] Comments and test docstrings describe current invariants rather than the refactor history.
-- [ ] Documentation and compatibility inventories match every moved symbol.
+- [x] The package's scoped scan reaches zero findings.
+- [x] A repository-wide scan shows no new finding and no increase outside the package.
+- [x] Focused tests for every changed behavior pass.
+- [x] Ruff and both diff checks pass.
+- [x] The full tracked test suite passes after a production contract/facade change and at each stage boundary.
+- [x] Added or modified tests protect distinct behavior and avoid duplicated setup.
+- [x] Comments and test docstrings describe current invariants rather than the refactor history.
+- [x] Documentation and compatibility inventories match every moved symbol.
+
+## Final validation record
+
+The 2026-07-23 clean-worktree run of the exact Flake8 command completed with empty output: 0 production findings,
+0 test findings, and no newly exposed rule family. Ruff and both diff checks passed. The compatibility-focused
+re-export, direct-launch, public-signature, serialized-shape, and real-git selection passed 109 tests and 964
+subtests. The complete tracked suite collected 2,231 tests and finished with 2,228 passed plus the three expected
+live-Postgres skips.
+
+The collection audit compared the 2,207-test baseline with the production-package boundary before the test-only
+splits. One analytics-sync extraction test was renamed to describe responsibility-named leaves. Production
+compatibility work added 24 distinct cases: five lazy-facade registry cases, 13 runtime-core compatibility cases,
+five workflow compatibility-adapter cases, and one target-root lock-registry identity case. The Stage 2 package
+accounting records unchanged collected-test and subtest inventories through the test-only splits; no case was removed
+or parameterized away.
