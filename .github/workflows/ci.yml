@@ -26,5 +26,8 @@ jobs:
       - name: Lint (ruff)
         run: uv run ruff check orchestrator tests
 
+      - name: Lint (wemake-python-styleguide)
+        run: uv run flake8 orchestrator tests --select=WPS
+
       - name: Tests (pytest)
         run: uv run python -m pytest

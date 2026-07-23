@@ -983,12 +983,12 @@ reads have a different error story and injection shape.
 ### Dashboard (`orchestrator/dashboard.py`)
 
 Streamlit app over the read model. Opt-in via the `dashboard` dependency group so the default `uv sync --locked` keeps
-installing only the polling runtime plus `pytest` / `ruff`. Streamlit (and its transitive pandas), `plotly`, the Plotly
-figure builders in `orchestrator/dashboard_charts.py`, and the plotly-free theme tokens in
+installing only the polling runtime plus `pytest`, `ruff`, and `wemake-python-styleguide`. Streamlit (and its transitive
+pandas), `plotly`, the Plotly figure builders in `orchestrator/dashboard_charts.py`, and the plotly-free theme tokens in
 `orchestrator/dashboard_theme.py` are imported lazily inside `main()` — importing `orchestrator.dashboard` from a test
-or non-dashboard caller does not require the group to be installed. A regression-guard test in `tests/test_dashboard.py`
-asserts that loading `orchestrator.dashboard` keeps `streamlit`, `pandas`, `plotly`, and `orchestrator.dashboard_charts`
-out of `sys.modules`.
+or non-dashboard caller does not require the group to be installed. A regression-guard test in
+`tests/test_dashboard.py` asserts that loading `orchestrator.dashboard` keeps `streamlit`, `pandas`, `plotly`, and
+`orchestrator.dashboard_charts` out of `sys.modules`.
 
 **Module layout.** `orchestrator/dashboard.py` is a manifest-backed lazy compatibility facade with a complete
 `dashboard.pyi`. `_dashboard_facade_bootstrap.py` owns both package import and direct-script setup, while

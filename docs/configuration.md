@@ -456,16 +456,17 @@ internals, read-model split, dashboard layout, and the in-app empty / error bann
 
 ## Continuous integration
 
-[`../.github/workflows/ci.yml`](../.github/workflows/ci.yml) runs `ruff check orchestrator tests` and `pytest` on Python
-3.12 for every push to `main` and every pull request, installing from the committed [`../uv.lock`](../uv.lock) via
-`uv sync --locked`. Lint rules live in [`../pyproject.toml`](../pyproject.toml) under `[tool.ruff.lint]`; dev tools are
-declared in `[dependency-groups]`.
+[`../.github/workflows/ci.yml`](../.github/workflows/ci.yml) runs `ruff check orchestrator tests`,
+`flake8 orchestrator tests --select=WPS`, and `pytest` as three separate mandatory steps on Python 3.12 for every push
+to `main` and every pull request, installing from the committed [`../uv.lock`](../uv.lock) via `uv sync --locked`.
+Ruff rules live in [`../pyproject.toml`](../pyproject.toml) under `[tool.ruff.lint]`; WPS is selected inline so Flake8
+does not duplicate Ruff's checks; dev tools are declared in `[dependency-groups]`.
 
-Both steps enforce a repository-wide 120-column line-length target set once as `line-length` under `[tool.ruff]` in
-[`../pyproject.toml`](../pyproject.toml). Ruff applies it to Python via the opted-in `E501` rule; the first-party
-[`../tests/test_line_length.py`](../tests/test_line_length.py) reads the same value and applies it to tracked
-Markdown/text files, exempting fenced code blocks, single unbreakable tokens (e.g. long URLs), binary assets, the
-lockfile, and the verbatim `LICENSE`.
+Ruff and the line-length test enforce a repository-wide 120-column target set once as `line-length` under
+`[tool.ruff]` in [`../pyproject.toml`](../pyproject.toml). Ruff applies it to Python via the opted-in `E501` rule; the
+first-party [`../tests/test_line_length.py`](../tests/test_line_length.py) reads the same value and applies it to
+tracked Markdown/text files, exempting fenced code blocks, single unbreakable tokens (e.g. long URLs), binary assets,
+the lockfile, and the verbatim `LICENSE`.
 
 The workflow declares `permissions: contents: read` so the run's `GITHUB_TOKEN` is read-only and cannot publish
 artifacts, push tags, or comment on PRs. The job uses no repository secrets, so PRs from forks run safely under the same
