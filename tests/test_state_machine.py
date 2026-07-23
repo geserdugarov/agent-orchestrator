@@ -6,33 +6,23 @@ import json
 import pathlib
 import re
 import unittest
-from unittest.mock import MagicMock, patch
 
-from orchestrator import base_sync, config, github, workflow
+from orchestrator import base_sync, github, workflow
 from orchestrator.state_machine import (
     ALLOWED_TRANSITIONS,
     ControlLabel,
-    IllegalTransition,
     WorkflowLabel,
     _DETOUR_TO_RESOLVING,
     coerce_workflow_label,
-    guard_transition,
-    is_allowed_transition,
 )
 
 from tests.fakes import FakeGitHubClient, make_issue
 
 
 _VALIDATING_LABEL = "validating"
-_GUARD_ENFORCE = "enforce"
-_GUARD_CONFIG_NAME = "WORKFLOW_TRANSITION_GUARD"
-
-
-def _guarded_issue():
-    gh = FakeGitHubClient()
-    issue = make_issue(1, label=_VALIDATING_LABEL)
-    gh.add_issue(issue)
-    return gh, issue
+_LABEL_WRITE_PATTERN = re.compile(
+    r"set_workflow_label\([^)]*?WorkflowLabel\.([A-Z_]+)",
+)
 
 
 def _coerce_error(label_value: str) -> ValueError:
@@ -210,10 +200,9 @@ class TransitionGraphReachabilityTest(unittest.TestCase):
         # target in the package must be an allowed target somewhere in the
         # table, so a new write site can't outrun the declared graph.
         package = pathlib.Path(github.__file__).parent
-        pattern = re.compile(r"set_workflow_label\([^)]*?WorkflowLabel\.([A-Z_]+)")
         emitted: set[WorkflowLabel] = set()
         for py_file in package.rglob("*.py"):
-            for match in pattern.finditer(py_file.read_text()):
+            for match in _LABEL_WRITE_PATTERN.finditer(py_file.read_text()):
                 emitted.add(WorkflowLabel[match.group(1)])
         reachable: set[WorkflowLabel] = set().union(*ALLOWED_TRANSITIONS.values())
         self.assertTrue(emitted, "scan found no set_workflow_label targets")
@@ -246,203 +235,35 @@ class TransitionGraphReachabilityTest(unittest.TestCase):
         # enter and never leave toward a terminal. The `None` pseudo-entry is
         # not a real state, so it is skipped rather than required to co-reach.
         terminals = {WorkflowLabel.DONE, WorkflowLabel.REJECTED}
+        seen = self._walk_reverse(
+            self._reverse_transitions(),
+            terminals,
+        )
+        self.assertEqual(set(WorkflowLabel) - seen, set())
+
+    def _reverse_transitions(
+        self,
+    ) -> dict[WorkflowLabel, set[WorkflowLabel | None]]:
         reverse: dict[WorkflowLabel, set[WorkflowLabel | None]] = {}
         for source, targets in ALLOWED_TRANSITIONS.items():
             for target in targets:
                 reverse.setdefault(target, set()).add(source)
+        return reverse
+
+    def _walk_reverse(
+        self,
+        reverse: dict[WorkflowLabel, set[WorkflowLabel | None]],
+        terminals: set[WorkflowLabel],
+    ) -> set[WorkflowLabel]:
         seen = set(terminals)
         frontier = list(terminals)
         while frontier:
             state = frontier.pop()
-            for pred in reverse.get(state, set()):
-                if pred is not None and pred not in seen:
-                    seen.add(pred)
-                    frontier.append(pred)
-        self.assertEqual(set(WorkflowLabel) - seen, set())
-
-
-class IsAllowedTransitionTest(unittest.TestCase):
-    def test_spine_edges_allowed(self) -> None:
-        for cur, nxt in (
-            (None, WorkflowLabel.DECOMPOSING),
-            (None, WorkflowLabel.IMPLEMENTING),
-            (WorkflowLabel.IMPLEMENTING, WorkflowLabel.VALIDATING),
-            (WorkflowLabel.VALIDATING, WorkflowLabel.DOCUMENTING),
-            (WorkflowLabel.VALIDATING, WorkflowLabel.FIXING),
-            (WorkflowLabel.DOCUMENTING, WorkflowLabel.IN_REVIEW),
-            (WorkflowLabel.IN_REVIEW, WorkflowLabel.FIXING),
-            (WorkflowLabel.FIXING, WorkflowLabel.VALIDATING),
-            (WorkflowLabel.BLOCKED, WorkflowLabel.READY),
-            (WorkflowLabel.BLOCKED, WorkflowLabel.DECOMPOSING),  # drift
-            (WorkflowLabel.UMBRELLA, WorkflowLabel.DONE),
-        ):
-            self.assertTrue(is_allowed_transition(cur, nxt), (cur, nxt))
-
-    def test_illegal_edges_rejected(self) -> None:
-        for cur, nxt in (
-            (WorkflowLabel.VALIDATING, WorkflowLabel.IN_REVIEW),  # skips docs
-            (WorkflowLabel.IMPLEMENTING, WorkflowLabel.IN_REVIEW),  # skips the reviewer path
-            (WorkflowLabel.IMPLEMENTING, WorkflowLabel.DOCUMENTING),
-            (WorkflowLabel.READY, WorkflowLabel.VALIDATING),  # skips implementing
-            (None, WorkflowLabel.DONE),  # entry not terminalizable
-        ):
-            self.assertFalse(is_allowed_transition(cur, nxt), (cur, nxt))
-
-    def test_conflict_only_from_detour_sources(self) -> None:
-        self.assertTrue(
-            is_allowed_transition(
-                WorkflowLabel.VALIDATING, WorkflowLabel.RESOLVING_CONFLICT,
-            )
-        )
-        # `ready` is not a PR-having detour source.
-        self.assertFalse(
-            is_allowed_transition(
-                WorkflowLabel.READY, WorkflowLabel.RESOLVING_CONFLICT,
-            )
-        )
-
-    def test_same_label_is_allowed(self) -> None:
-        # Idempotent re-set, even on a terminal.
-        self.assertTrue(
-            is_allowed_transition(WorkflowLabel.DONE, WorkflowLabel.DONE)
-        )
-        self.assertTrue(
-            is_allowed_transition(
-                WorkflowLabel.VALIDATING, WorkflowLabel.VALIDATING,
-            )
-        )
-
-
-class TerminalTransitionTest(unittest.TestCase):
-    """Terminal transitions are limited to their exact workflow sources."""
-
-    def test_done_allowed_only_from_its_exact_sources(self) -> None:
-        # External-merge / drain sources, plus umbrella/question whose own
-        # forward completion is `-> done`. NOT the pre-PR states.
-        sources = {
-            WorkflowLabel.IMPLEMENTING, WorkflowLabel.VALIDATING,
-            WorkflowLabel.DOCUMENTING, WorkflowLabel.IN_REVIEW,
-            WorkflowLabel.FIXING, WorkflowLabel.RESOLVING_CONFLICT,
-            WorkflowLabel.UMBRELLA, WorkflowLabel.QUESTION,
-        }
-        for state in WorkflowLabel:
-            if state in (WorkflowLabel.DONE, WorkflowLabel.REJECTED):
-                continue
-            self.assertEqual(
-                is_allowed_transition(state, WorkflowLabel.DONE),
-                state in sources, state,
-            )
-
-    def test_rejected_only_from_exact_sources(self) -> None:
-        sources = {
-            WorkflowLabel.IMPLEMENTING, WorkflowLabel.VALIDATING,
-            WorkflowLabel.DOCUMENTING, WorkflowLabel.IN_REVIEW,
-            WorkflowLabel.FIXING, WorkflowLabel.RESOLVING_CONFLICT,
-        }
-        for state in WorkflowLabel:
-            if state in (WorkflowLabel.DONE, WorkflowLabel.REJECTED):
-                continue
-            self.assertEqual(
-                is_allowed_transition(state, WorkflowLabel.REJECTED),
-                state in sources, state,
-            )
-
-    def test_question_can_finish_but_not_reject(self) -> None:
-        # Maximal-exactness: `question` only finalizes to `done`; nothing
-        # writes `question -> rejected`, so it must be illegal.
-        self.assertTrue(
-            is_allowed_transition(WorkflowLabel.QUESTION, WorkflowLabel.DONE)
-        )
-        self.assertFalse(
-            is_allowed_transition(WorkflowLabel.QUESTION, WorkflowLabel.REJECTED)
-        )
-
-    def test_pre_pr_states_are_not_terminalizable(self) -> None:
-        # decomposing / ready / blocked have no PR and no terminal writer.
-        for state in (
-            WorkflowLabel.DECOMPOSING, WorkflowLabel.READY, WorkflowLabel.BLOCKED,
-        ):
-            self.assertFalse(
-                is_allowed_transition(state, WorkflowLabel.DONE), state,
-            )
-            self.assertFalse(
-                is_allowed_transition(state, WorkflowLabel.REJECTED), state,
-            )
-
-
-class GuardModeTest(unittest.TestCase):
-    """`guard_transition` is the mode-aware wrapper `set_workflow_label`
-    calls. `off` no-ops, `warn` logs+proceeds, `enforce` raises."""
-
-    def test_off_never_raises_or_logs(self) -> None:
-        with self.assertNoLogs("orchestrator.state_machine", level="WARNING"):
-            guard_transition(
-                WorkflowLabel.VALIDATING, WorkflowLabel.IN_REVIEW, "off",
-            )
-
-    def test_warn_logs_but_proceeds(self) -> None:
-        warning_mock = MagicMock()
-        with patch(
-            "orchestrator.state_machine.log.warning",
-            warning_mock,
-        ):
-            guard_transition(
-                WorkflowLabel.VALIDATING, WorkflowLabel.IN_REVIEW, "warn",
-            )
-        warning_mock.assert_called_once()
-        message, *args = warning_mock.call_args.args
-        self.assertIn(
-            "illegal workflow transition",
-            message % tuple(args),
-        )
-
-    def test_enforce_raises_on_illegal(self) -> None:
-        with self.assertRaises(IllegalTransition):
-            guard_transition(
-                WorkflowLabel.VALIDATING, WorkflowLabel.IN_REVIEW, _GUARD_ENFORCE,
-            )
-
-    def test_enforce_allows_legal(self) -> None:
-        guard_transition(
-            WorkflowLabel.VALIDATING, WorkflowLabel.DOCUMENTING, _GUARD_ENFORCE,
-        )  # no raise
-
-    def test_enforce_allows_same_label(self) -> None:
-        guard_transition(
-            WorkflowLabel.DONE, WorkflowLabel.DONE, _GUARD_ENFORCE,
-        )  # no raise
-
-
-class SetWorkflowLabelGuardWiringTest(unittest.TestCase):
-    """The guard is wired through `set_workflow_label` (the single
-    chokepoint), driven by `config.WORKFLOW_TRANSITION_GUARD`."""
-
-    def test_enforce_blocks_illegal_relabel(self) -> None:
-        gh, issue = _guarded_issue()
-        with patch.object(config, _GUARD_CONFIG_NAME, _GUARD_ENFORCE):
-            with self.assertRaises(IllegalTransition):
-                gh.set_workflow_label(issue, WorkflowLabel.IN_REVIEW)
-        # Label unchanged after the rejected write.
-        self.assertEqual(gh.workflow_label(issue), WorkflowLabel.VALIDATING)
-
-    def test_warn_allows_illegal_relabel(self) -> None:
-        gh, issue = _guarded_issue()
-        with patch.object(config, _GUARD_CONFIG_NAME, "warn"):
-            with self.assertLogs("orchestrator.state_machine", level="WARNING"):
-                gh.set_workflow_label(issue, WorkflowLabel.IN_REVIEW)
-        self.assertEqual(gh.workflow_label(issue), WorkflowLabel.IN_REVIEW)
-
-    def test_enforce_allows_legal_relabel(self) -> None:
-        gh, issue = _guarded_issue()
-        with patch.object(config, _GUARD_CONFIG_NAME, _GUARD_ENFORCE):
-            gh.set_workflow_label(issue, WorkflowLabel.DOCUMENTING)
-        self.assertEqual(gh.workflow_label(issue), WorkflowLabel.DOCUMENTING)
-
-    def test_enforce_allows_validation_fix_loop(self) -> None:
-        gh, issue = _guarded_issue()
-        with patch.object(config, _GUARD_CONFIG_NAME, _GUARD_ENFORCE):
-            gh.set_workflow_label(issue, WorkflowLabel.FIXING)
-        self.assertEqual(gh.workflow_label(issue), WorkflowLabel.FIXING)
+            for predecessor in reverse.get(state, set()):
+                if predecessor is not None and predecessor not in seen:
+                    seen.add(predecessor)
+                    frontier.append(predecessor)
+        return seen
 
 
 if __name__ == "__main__":

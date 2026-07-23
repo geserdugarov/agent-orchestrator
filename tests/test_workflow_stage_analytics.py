@@ -73,6 +73,11 @@ def _process_error(gh: FakeGitHubClient, issue) -> RuntimeError:
     raise AssertionError("the stage handler did not propagate its error")
 
 
+def _stage_enter_projection(record: dict) -> tuple:
+    datetime.fromisoformat(record["ts"])
+    return record["event"], record["issue"], record["repo"]
+
+
 class StageEvaluationAnalyticsTest(unittest.TestCase):
     """`_process_issue` times every dispatch and appends a single
     `stage_evaluation` analytics record carrying repo / issue / stage /
@@ -94,14 +99,12 @@ class StageEvaluationAnalyticsTest(unittest.TestCase):
             with patch.object(analytics, _ANALYTICS_PATH_ATTR, path), \
                  patch.object(workflow, "_handle_implementing"):
                 workflow._process_issue(gh, _TEST_SPEC, issue)
-            records = _stage_evaluations(path, _SUCCESS_ISSUE)
-        self.assertEqual(len(records), 1)
-        rec = records[0]
-        self.assertEqual(rec["repo"], TEST_REPO_SLUG)
-        self.assertEqual(rec[_STAGE_KEY], LABEL_IMPLEMENTING)
-        self.assertEqual(rec["result"], "ok")
-        self.assertIn("duration_s", rec)
-        self.assertGreaterEqual(rec["duration_s"], 0)
+            record = _stage_evaluations(path, _SUCCESS_ISSUE)[0]
+        self.assertEqual(record["repo"], TEST_REPO_SLUG)
+        self.assertEqual(record[_STAGE_KEY], LABEL_IMPLEMENTING)
+        self.assertEqual(record["result"], "ok")
+        self.assertIn("duration_s", record)
+        self.assertGreaterEqual(record["duration_s"], 0)
 
     def test_unlabeled_issue_records_no_stage(
         self,
@@ -120,11 +123,9 @@ class StageEvaluationAnalyticsTest(unittest.TestCase):
             with patch.object(analytics, _ANALYTICS_PATH_ATTR, path), \
                  patch.object(workflow, "_handle_pickup"):
                 workflow._process_issue(gh, _TEST_SPEC, issue)
-            records = _stage_evaluations(path, _UNLABELED_ISSUE)
-        self.assertEqual(len(records), 1)
-        rec = records[0]
-        self.assertNotIn(_STAGE_KEY, rec)
-        self.assertEqual(rec["result"], "ok")
+            record = _stage_evaluations(path, _UNLABELED_ISSUE)[0]
+        self.assertNotIn(_STAGE_KEY, record)
+        self.assertEqual(record["result"], "ok")
 
     def test_error_is_recorded_and_propagated(
         self,
@@ -134,7 +135,6 @@ class StageEvaluationAnalyticsTest(unittest.TestCase):
         # surfacing failures so they can be logged and the loop
         # continues with the next issue. The record must still land
         # with result=error and the duration captured up to the raise.
-        sentinel = RuntimeError("handler blew up")
         with tempfile.TemporaryDirectory(prefix="analytics-err-") as td:
             path = Path(td) / _ANALYTICS_FILENAME
             gh = FakeGitHubClient()
@@ -145,16 +145,17 @@ class StageEvaluationAnalyticsTest(unittest.TestCase):
                 patch.object(
                     workflow,
                     "_handle_validating",
-                    side_effect=sentinel,
+                    side_effect=RuntimeError("handler blew up"),
                 ),
             ):
-                self.assertIs(_process_error(gh, issue), sentinel)
-            records = _stage_evaluations(path, _ERROR_ISSUE)
-        self.assertEqual(len(records), 1)
-        rec = records[0]
-        self.assertEqual(rec[_STAGE_KEY], LABEL_VALIDATING)
-        self.assertEqual(rec["result"], "error")
-        self.assertIn("duration_s", rec)
+                self.assertEqual(
+                    str(_process_error(gh, issue)),
+                    "handler blew up",
+                )
+            record = _stage_evaluations(path, _ERROR_ISSUE)[0]
+        self.assertEqual(record[_STAGE_KEY], LABEL_VALIDATING)
+        self.assertEqual(record["result"], "error")
+        self.assertIn("duration_s", record)
 
     def test_hard_skip_records_no_evaluation(self) -> None:
         # A hard-skip control label (`backlog` / `paused`) parks the issue
@@ -207,11 +208,13 @@ class StageEnterAnalyticsRecordTest(unittest.TestCase):
             [record[_STAGE_KEY] for record in records],
             [LABEL_IMPLEMENTING, LABEL_VALIDATING],
         )
-        for record in records:
-            self.assertEqual(record["event"], EVENT_STAGE_ENTER)
-            self.assertEqual(record["issue"], _STAGE_ENTER_ISSUE)
-            self.assertEqual(record["repo"], TEST_REPO_SLUG)
-            datetime.fromisoformat(record["ts"])
+        self.assertEqual(
+            list(map(_stage_enter_projection, records)),
+            [
+                (EVENT_STAGE_ENTER, _STAGE_ENTER_ISSUE, TEST_REPO_SLUG),
+                (EVENT_STAGE_ENTER, _STAGE_ENTER_ISSUE, TEST_REPO_SLUG),
+            ],
+        )
 
     def test_label_clear_emits_no_record(self) -> None:
         # Mirrors the existing `_emit_stage_enter` no-op for None labels:

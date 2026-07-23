@@ -41,15 +41,13 @@ class ListPollableIssuesTest(unittest.TestCase):
         self.assertEqual({issue.number for issue in out}, {1, 2})
 
     def test_closed_review_included_for_merge_finish(self) -> None:
-        gh = FakeGitHubClient()
         open_issue = make_issue(1, label=_IMPLEMENTING_LABEL)
         closed_in_review = make_issue(7, label="in_review")
         closed_in_review.closed = True
         # Closed but no in_review label: must be skipped (already finalized).
         closed_done = make_issue(8, label="done")
         closed_done.closed = True
-        for seeded_issue in (open_issue, closed_in_review, closed_done):
-            gh.add_issue(seeded_issue)
+        gh = FakeGitHubClient((open_issue, closed_in_review, closed_done))
         out = {
             pollable_issue.number
             for pollable_issue in gh.list_pollable_issues()

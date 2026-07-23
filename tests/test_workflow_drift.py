@@ -1,84 +1,13 @@
 # Copyright 2026 Geser Dugarov
 # SPDX-License-Identifier: Apache-2.0
+"""User-content hash and drift detection tests."""
 from __future__ import annotations
 
 import unittest
-from unittest.mock import patch
 
-from orchestrator import config, workflow
+from orchestrator import workflow
 
-from tests.fakes import (
-    FakeComment,
-    FakeGitHubClient,
-    FakePR,
-    FakeUser,
-    make_issue,
-)
-from tests.workflow_helpers import (
-    BACKEND_CLAUDE,
-    KEY_AWAITING_HUMAN,
-    KEY_LAST_ACTION_COMMENT_ID,
-    LABEL_BLOCKED,
-    LABEL_IMPLEMENTING,
-    LABEL_IN_REVIEW,
-    LABEL_RESOLVING_CONFLICT,
-    LABEL_VALIDATING,
-    _PatchedWorkflowMixin,
-    _TEST_SPEC,
-    _agent,
-)
-
-KEY_USER_CONTENT_HASH = "user_content_hash"
-
-TRUSTED_AUTHOR = "alice"
-DEV_SESSION = "dev-sess"
-STALE_HASH = "stale-hash"
-SAME_SHA = "same-sha"
-SHA_AFTER = "after"
-
-CONTINUE_COMMAND = "/orchestrator continue"
-NEW_BODY = "new body"
-CLARIFIED_BODY = "clarified body"
-EXISTING_WORK_MESSAGE = "existing work satisfies the edit"
-PARK_AGENT_SILENT = "agent_silent"
-UNCHANGED_SHA = "same"
-
-_BOT_COMMENT_ID = 200
-_PINNED_COMMENT_ID = 300
-_GUIDED_CONTINUE_COMMENT_ID = 101
-_PROMPT_COMMENT_ID = 500
-_INITIAL_LAST_ACTION_COMMENT_ID = 500
-_BLOCKED_CHILD_ISSUE_NUMBER = 200
-_BLOCKED_PARENT_ISSUE_NUMBER = 199
-_VALIDATING_ACK_ISSUE_NUMBER = 600
-_VALIDATING_ACK_PR_NUMBER = 6000
-_IN_REVIEW_ACK_ISSUE_NUMBER = 700
-_IN_REVIEW_ACK_PR_NUMBER = 7000
-_VALIDATING_WATERMARK_ISSUE_NUMBER = 900
-_VALIDATING_WATERMARK_PR_NUMBER = 9000
-_VALIDATING_WATERMARK_COMMENT_ID = 5000
-_IN_REVIEW_WATERMARK_ISSUE_NUMBER = 910
-_IN_REVIEW_WATERMARK_PR_NUMBER = 9100
-_IN_REVIEW_WATERMARK_COMMENT_ID = 6000
-_IMPLEMENTING_WATERMARK_ISSUE_NUMBER = 920
-_IMPLEMENTING_WATERMARK_COMMENT_ID = 7000
-_CONFLICT_WATERMARK_ISSUE_NUMBER = 930
-_CONFLICT_WATERMARK_PR_NUMBER = 9300
-_CONFLICT_WATERMARK_COMMENT_ID = 8000
-_EVICTED_BOT_COMMENT_ID = 12345
-_HUMAN_COMMENT_ID = 12346
-_BOT_FILTER_HUMAN_COMMENT_ID = 900
-_BOT_FILTER_BOT_COMMENT_ID = 901
-_TYPED_HUMAN_COMMENT_ID = 910
-_VALIDATING_CLARIFICATION_ISSUE_NUMBER = 601
-_VALIDATING_CLARIFICATION_PR_NUMBER = 6001
-_IN_REVIEW_CLARIFICATION_ISSUE_NUMBER = 701
-_IN_REVIEW_CLARIFICATION_PR_NUMBER = 7001
-_IMPLEMENTING_CLARIFICATION_ISSUE_NUMBER = 602
-
-
-def _continue_comment(body: str) -> FakeComment:
-    return FakeComment(id=1, body=body, user=FakeUser(TRUSTED_AUTHOR))
+from tests import workflow_drift_test_support as support
 
 
 class ComputeUserContentHashTest(unittest.TestCase):
@@ -89,16 +18,16 @@ class ComputeUserContentHashTest(unittest.TestCase):
     often shared with a human reviewer's GitHub account."""
 
     def test_hash_changes_when_body_changes(self) -> None:
-        issue_a = make_issue(1, body="old body")
-        issue_b = make_issue(1, body=NEW_BODY)
+        issue_a = support.make_issue(1, body="old body")
+        issue_b = support.make_issue(1, body=support.NEW_BODY)
         self.assertNotEqual(
             workflow._compute_user_content_hash(issue_a, set()),
             workflow._compute_user_content_hash(issue_b, set()),
         )
 
     def test_hash_changes_when_title_changes(self) -> None:
-        issue_a = make_issue(1, title="old", body="b")
-        issue_b = make_issue(1, title="new", body="b")
+        issue_a = support.make_issue(1, title="old", body="b")
+        issue_b = support.make_issue(1, title="new", body="b")
         self.assertNotEqual(
             workflow._compute_user_content_hash(issue_a, set()),
             workflow._compute_user_content_hash(issue_b, set()),
@@ -107,22 +36,26 @@ class ComputeUserContentHashTest(unittest.TestCase):
     def test_orchestrator_comments_filtered_by_id(self) -> None:
         # A human comment with the same body as a bot comment must still
         # affect the hash; only the recorded bot id is filtered.
-        human = FakeComment(id=100, body="please retry", user=FakeUser(TRUSTED_AUTHOR))
-        bot = FakeComment(
-            id=_BOT_COMMENT_ID,
-            body="picking this up",
-            user=FakeUser(TRUSTED_AUTHOR),
+        human = support.FakeComment(
+            id=100,
+            body="please retry",
+            user=support.FakeUser(support.TRUSTED_AUTHOR),
         )
-        issue_with_human = make_issue(1, comments=[human])
-        issue_with_both = make_issue(1, comments=[human, bot])
+        bot = support.FakeComment(
+            id=support._BOT_COMMENT_ID,
+            body="picking this up",
+            user=support.FakeUser(support.TRUSTED_AUTHOR),
+        )
+        issue_with_human = support.make_issue(1, comments=[human])
+        issue_with_both = support.make_issue(1, comments=[human, bot])
         self.assertEqual(
             workflow._compute_user_content_hash(
                 issue_with_human,
-                {_BOT_COMMENT_ID},
+                {support._BOT_COMMENT_ID},
             ),
             workflow._compute_user_content_hash(
                 issue_with_both,
-                {_BOT_COMMENT_ID},
+                {support._BOT_COMMENT_ID},
             ),
         )
         # Without filtering the bot comment, the hash differs.
@@ -132,12 +65,12 @@ class ComputeUserContentHashTest(unittest.TestCase):
         )
 
     def test_state_marker_filtered_by_marker(self) -> None:
-        pinned = FakeComment(
-            id=_PINNED_COMMENT_ID,
+        pinned = support.FakeComment(
+            id=support._PINNED_COMMENT_ID,
             body="<!--orchestrator-state {\"k\": 1}-->",
         )
-        issue = make_issue(1)
-        issue_with_pinned = make_issue(1, comments=[pinned])
+        issue = support.make_issue(1)
+        issue_with_pinned = support.make_issue(1, comments=[pinned])
         # Pinned-state comment id is NOT in orchestrator_ids but its marker
         # body causes it to be filtered.
         self.assertEqual(
@@ -153,25 +86,25 @@ class ComputeUserContentHashTest(unittest.TestCase):
         # through generic drift handling instead of the intentional
         # session-limit retry, issue #729). The same command carrying real
         # guidance is NOT bare, so it still shifts the hash.
-        issue = make_issue(1)
-        bare = FakeComment(
-            id=100, body=CONTINUE_COMMAND, user=FakeUser(TRUSTED_AUTHOR),
+        issue = support.make_issue(1)
+        bare = support.FakeComment(
+            id=100, body=support.CONTINUE_COMMAND, user=support.FakeUser(support.TRUSTED_AUTHOR),
         )
-        guided = FakeComment(
-            id=_GUIDED_CONTINUE_COMMENT_ID,
+        guided = support.FakeComment(
+            id=support._GUIDED_CONTINUE_COMMENT_ID,
             body="/orchestrator continue\nalso rename the flag",
-            user=FakeUser(TRUSTED_AUTHOR),
+            user=support.FakeUser(support.TRUSTED_AUTHOR),
         )
         self.assertEqual(
             workflow._compute_user_content_hash(issue, set()),
             workflow._compute_user_content_hash(
-                make_issue(1, comments=[bare]), set()
+                support.make_issue(1, comments=[bare]), set()
             ),
         )
         self.assertNotEqual(
             workflow._compute_user_content_hash(issue, set()),
             workflow._compute_user_content_hash(
-                make_issue(1, comments=[guided]), set()
+                support.make_issue(1, comments=[guided]), set()
             ),
         )
 
@@ -184,11 +117,11 @@ class ContinueCommandActionTest(unittest.TestCase):
     guidance) passes through to the normal resume / drift path."""
 
     def test_retryable_park_bare_continue_retries(self) -> None:
-        for reason in (PARK_AGENT_SILENT, "agent_timeout"):
+        for reason in (support.PARK_AGENT_SILENT, "agent_timeout"):
             with self.subTest(reason=reason):
                 self.assertEqual(
                     workflow._continue_command_action(
-                        [_continue_comment(CONTINUE_COMMAND)], reason,
+                        [support._continue_comment(support.CONTINUE_COMMAND)], reason,
                     ),
                     "retry",
                 )
@@ -198,7 +131,7 @@ class ContinueCommandActionTest(unittest.TestCase):
             with self.subTest(reason=reason):
                 self.assertEqual(
                     workflow._continue_command_action(
-                        [_continue_comment(CONTINUE_COMMAND)], reason,
+                        [support._continue_comment(support.CONTINUE_COMMAND)], reason,
                     ),
                     "refuse",
                 )
@@ -208,8 +141,8 @@ class ContinueCommandActionTest(unittest.TestCase):
         # the normal resume/drift path should feed that guidance to the dev.
         self.assertEqual(
             workflow._continue_command_action(
-                [_continue_comment("/orchestrator continue\nrename the flag")],
-                PARK_AGENT_SILENT,
+                [support._continue_comment("/orchestrator continue\nrename the flag")],
+                support.PARK_AGENT_SILENT,
             ),
             "passthrough",
         )
@@ -217,7 +150,7 @@ class ContinueCommandActionTest(unittest.TestCase):
     def test_no_command_passes_through(self) -> None:
         self.assertEqual(
             workflow._continue_command_action(
-                [_continue_comment("just a normal reply")], PARK_AGENT_SILENT,
+                [support._continue_comment("just a normal reply")], support.PARK_AGENT_SILENT,
             ),
             "passthrough",
         )
@@ -228,28 +161,28 @@ class DetectUserContentChangeTest(unittest.TestCase):
         # The first encounter has no baseline; we record the current value
         # AND write pinned state immediately so a parked/idle tick can't
         # silently absorb a later edit as the new baseline.
-        gh = FakeGitHubClient()
-        issue = make_issue(1)
+        gh = support.FakeGitHubClient()
+        issue = support.make_issue(1)
         gh.add_issue(issue)
         state = gh.read_pinned_state(issue)
         before = gh.write_state_calls
         detected_hash = workflow._detect_user_content_change(gh, issue, state)
         self.assertIsNone(detected_hash)
         self.assertEqual(
-            state.get(KEY_USER_CONTENT_HASH),
+            state.get(support.KEY_USER_CONTENT_HASH),
             workflow._compute_user_content_hash(issue, set()),
         )
         # Durably written so a later edit after an early-return tick is
         # correctly classified as drift, not absorbed as the new baseline.
         self.assertEqual(gh.write_state_calls, before + 1)
         self.assertEqual(
-            gh.pinned_data(1).get(KEY_USER_CONTENT_HASH),
-            state.get(KEY_USER_CONTENT_HASH),
+            gh.pinned_data(1).get(support.KEY_USER_CONTENT_HASH),
+            state.get(support.KEY_USER_CONTENT_HASH),
         )
 
     def test_unchanged_returns_none(self) -> None:
-        gh = FakeGitHubClient()
-        issue = make_issue(1)
+        gh = support.FakeGitHubClient()
+        issue = support.make_issue(1)
         gh.add_issue(issue)
         prior_hash = workflow._compute_user_content_hash(issue, set())
         gh.seed_state(1, user_content_hash=prior_hash)
@@ -264,25 +197,25 @@ class DetectUserContentChangeTest(unittest.TestCase):
     def test_body_change_returns_hash_without_persist(
         self,
     ) -> None:
-        gh = FakeGitHubClient()
-        issue_a = make_issue(1, body="old")
-        prior = workflow._compute_user_content_hash(issue_a, set())
-        issue_b = make_issue(1, body=NEW_BODY)
-        gh.add_issue(issue_b)
-        gh.seed_state(1, user_content_hash=prior)
-        state = gh.read_pinned_state(issue_b)
-        before = gh.write_state_calls
-        detected_hash = workflow._detect_user_content_change(gh, issue_b, state)
-        self.assertEqual(
-            detected_hash,
-            workflow._compute_user_content_hash(issue_b, set()),
+        context = support._content_change_case("old", support.NEW_BODY)
+        detected_hash = workflow._detect_user_content_change(
+            context.github,
+            context.issue,
+            context.state,
         )
-        self.assertNotEqual(detected_hash, prior)
+        self.assertEqual(detected_hash, context.current_hash)
+        self.assertNotEqual(detected_hash, context.prior_hash)
         # The helper does NOT auto-persist on a real change; the caller
         # decides whether to act and persist (so the routing branches can
         # use the comparison without committing to a state write).
-        self.assertEqual(gh.write_state_calls, before)
-        self.assertEqual(state.get(KEY_USER_CONTENT_HASH), prior)
+        self.assertEqual(
+            context.github.write_state_calls,
+            context.before_writes,
+        )
+        self.assertEqual(
+            context.state.get(support.KEY_USER_CONTENT_HASH),
+            context.prior_hash,
+        )
 
     def test_legacy_bare_continue_baseline_absorbs(
         self,
@@ -293,867 +226,57 @@ class DetectUserContentChangeTest(unittest.TestCase):
         # not change. `_detect_user_content_change` must recognize the stored
         # baseline as the legacy hash and absorb it (persist the new baseline,
         # report no drift) rather than firing one false "issue body changed".
-        gh = FakeGitHubClient()
-        cont = FakeComment(
-            id=100, body=CONTINUE_COMMAND, user=FakeUser("dave"),
+        continue_comment = support.FakeComment(
+            id=100, body=support.CONTINUE_COMMAND, user=support.FakeUser("dave"),
         )
-        issue = make_issue(1, comments=[cont])
-        gh.add_issue(issue)
-        legacy_hash = workflow._compute_user_content_hash(
-            issue, set(), include_bare_continue=True,
+        context = support._content_change_case(
+            "",
+            "",
+            comments=(continue_comment,),
+            include_bare_continue=True,
         )
-        new_hash = workflow._compute_user_content_hash(issue, set())
-        self.assertNotEqual(legacy_hash, new_hash)  # the algorithm changed
-        gh.seed_state(1, user_content_hash=legacy_hash)
-        state = gh.read_pinned_state(issue)
+        self.assertNotEqual(
+            context.prior_hash,
+            context.current_hash,
+        )
 
-        detected_hash = workflow._detect_user_content_change(gh, issue, state)
+        detected_hash = workflow._detect_user_content_change(
+            context.github,
+            context.issue,
+            context.state,
+        )
 
         # No drift reported; the baseline is normalized to the new algorithm
         # and durably persisted so the next tick is stable.
         self.assertIsNone(detected_hash)
-        self.assertEqual(state.get(KEY_USER_CONTENT_HASH), new_hash)
-        self.assertEqual(gh.pinned_data(1).get(KEY_USER_CONTENT_HASH), new_hash)
+        self.assertEqual(
+            context.state.get(support.KEY_USER_CONTENT_HASH),
+            context.current_hash,
+        )
+        self.assertEqual(
+            context.github.pinned_data(1).get(support.KEY_USER_CONTENT_HASH),
+            context.current_hash,
+        )
 
     def test_real_edit_with_bare_continue_drifts(self) -> None:
         # The legacy-normalization path must not swallow a genuine edit: when
         # the body actually changed AND a bare continue is present, the legacy
         # hash (old algorithm over the NEW content) still differs from the
         # stored baseline, so drift is reported.
-        cont = FakeComment(
-            id=100, body=CONTINUE_COMMAND, user=FakeUser("dave"),
+        continue_comment = support.FakeComment(
+            id=100, body=support.CONTINUE_COMMAND, user=support.FakeUser("dave"),
         )
-        old_issue = make_issue(1, body="old", comments=[cont])
-        prior = workflow._compute_user_content_hash(
-            old_issue, set(), include_bare_continue=True,
+        context = support._content_change_case(
+            "old",
+            support.NEW_BODY,
+            comments=(continue_comment,),
+            include_bare_continue=True,
         )
-        new_issue = make_issue(1, body=NEW_BODY, comments=[cont])
-        gh = FakeGitHubClient()
-        gh.add_issue(new_issue)
-        gh.seed_state(1, user_content_hash=prior)
-        state = gh.read_pinned_state(new_issue)
-
         detected_hash = workflow._detect_user_content_change(
-            gh,
-            new_issue,
-            state,
+            context.github,
+            context.issue,
+            context.state,
         )
 
-        self.assertEqual(
-            detected_hash,
-            workflow._compute_user_content_hash(new_issue, set()),
-        )
+        self.assertEqual(detected_hash, context.current_hash)
         self.assertIsNotNone(detected_hash)
-
-
-class HandlePickupInitializesUserContentHashTest(
-    unittest.TestCase, _PatchedWorkflowMixin,
-):
-    def test_pickup_with_decompose_off_seeds_hash(self) -> None:
-        gh = FakeGitHubClient()
-        issue = make_issue(1)
-        gh.add_issue(issue)
-
-        with patch.object(config, "DECOMPOSE", False):
-            self._run(
-                lambda: workflow._handle_pickup(gh, _TEST_SPEC, issue),
-                run_agent=_agent(last_message="q"),
-                has_new_commits=False,
-            )
-
-        state = gh.pinned_data(1)
-        self.assertIn(KEY_USER_CONTENT_HASH, state)
-        # Hash filters the pickup comment by id (it has been recorded in
-        # `orchestrator_comment_ids`), so it should match a re-computation
-        # over the same set.
-        orch_ids = set(state.get("orchestrator_comment_ids") or [])
-        self.assertEqual(
-            state[KEY_USER_CONTENT_HASH],
-            workflow._compute_user_content_hash(issue, orch_ids),
-        )
-
-    def test_pickup_with_decompose_on_seeds_hash(self) -> None:
-        gh = FakeGitHubClient()
-        issue = make_issue(2)
-        gh.add_issue(issue)
-
-        with patch.object(config, "DECOMPOSE", True):
-            self._run(
-                lambda: workflow._handle_pickup(gh, _TEST_SPEC, issue),
-                run_agent=_agent(
-                    session_id="dec-sess",
-                    last_message=(
-                        "fits one\n\n```orchestrator-manifest\n"
-                        '{"decision": "single", "rationale": "small"}\n'
-                        "```"
-                    ),
-                ),
-            )
-
-        state = gh.pinned_data(2)
-        self.assertIn(KEY_USER_CONTENT_HASH, state)
-
-
-class UserContentChangePromptIncludesCommentsTest(unittest.TestCase):
-    """A drift triggered by a NEW human comment (not a body edit) must
-    surface that comment to the dev. Quoting only title/body would leave
-    the dev unaware of the acceptance criterion the human just posted."""
-
-    def test_recent_comments_quoted_in_resume_prompt(self) -> None:
-        issue = make_issue(1, title="t", body="b")
-        issue.comments.append(FakeComment(
-            id=_PROMPT_COMMENT_ID,
-            body="new acceptance criterion: handle empty input",
-            user=FakeUser(TRUSTED_AUTHOR),
-        ))
-        comments_text = workflow._recent_comments_text(issue)
-        prompt = workflow._build_user_content_change_prompt(
-            issue, comments_text,
-        )
-        self.assertIn("new acceptance criterion", prompt)
-        self.assertIn("Conversation so far", prompt)
-        self.assertIn("Updated issue body", prompt)
-
-
-class FirstTimeHashSeedingIsDurableTest(
-    unittest.TestCase, _PatchedWorkflowMixin,
-):
-    """Reviewer point 3: `_detect_user_content_change` must persist the
-    first-time baseline via `gh.write_pinned_state` immediately, so a
-    later edit after a parked/idle tick is not silently absorbed as the
-    new baseline."""
-
-    def test_validating_no_reply_persists_baseline(
-        self,
-    ) -> None:
-        # Legacy state (no `user_content_hash`) parked on awaiting_human
-        # with no new comments. `_handle_validating`'s awaiting-human
-        # path returns without writing state on a real no-reply tick;
-        # the durability fix in `_detect_user_content_change` must still
-        # have written the baseline by then.
-        gh = FakeGitHubClient()
-        issue = make_issue(100, label=LABEL_VALIDATING, body="initial body")
-        gh.add_issue(issue)
-        pr = FakePR(number=1000, head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-100")
-        gh.add_pr(pr)
-        gh.seed_state(
-            100,
-            pr_number=pr.number,
-            awaiting_human=True,
-            last_action_comment_id=_INITIAL_LAST_ACTION_COMMENT_ID,
-            review_round=1,
-        )
-
-        # Tick: no new comments and no hash baseline. Park branch
-        # returns early without writing state.
-        self._run(
-            lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
-            run_agent=_agent(),
-        )
-
-        # Baseline durably persisted by the first-call branch in
-        # `_detect_user_content_change`.
-        state = gh.pinned_data(100)
-        self.assertIsNotNone(state.get(KEY_USER_CONTENT_HASH))
-
-    def test_blocked_child_no_op_persists_baseline(self) -> None:
-        # A `blocked` child waiting on a sibling is a per-tick no-op.
-        # Without the durability fix, a later edit during the wait would
-        # silently become the new baseline because the no-op branch
-        # returns without `write_pinned_state`.
-        gh = FakeGitHubClient()
-        child = make_issue(
-            _BLOCKED_CHILD_ISSUE_NUMBER,
-            label=LABEL_BLOCKED,
-            body="child body",
-        )
-        gh.add_issue(child)
-        gh.seed_state(
-            _BLOCKED_CHILD_ISSUE_NUMBER,
-            parent_number=_BLOCKED_PARENT_ISSUE_NUMBER,
-        )
-
-        self._run(
-            lambda: workflow._handle_blocked(gh, _TEST_SPEC, child),
-            run_agent=_agent(),
-        )
-
-        state = gh.pinned_data(_BLOCKED_CHILD_ISSUE_NUMBER)
-        self.assertIsNotNone(state.get(KEY_USER_CONTENT_HASH))
-
-
-class NoCommitAckDoesNotParkTest(
-    unittest.TestCase, _PatchedWorkflowMixin,
-):
-    """Reviewer point 4: a harmless clarification edit can elicit a
-    no-commit reply from the dev ('existing work satisfies'). The
-    validating / in_review / resolving_conflict drift paths must treat
-    that as an ack rather than parking awaiting_human."""
-
-    def test_validating_ack_does_not_park(self) -> None:
-        gh = FakeGitHubClient()
-        issue = make_issue(
-            _VALIDATING_ACK_ISSUE_NUMBER,
-            label=LABEL_VALIDATING,
-            body=CLARIFIED_BODY,
-        )
-        gh.add_issue(issue)
-        pr = FakePR(
-            number=_VALIDATING_ACK_PR_NUMBER,
-            head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-600",
-        )
-        gh.add_pr(pr)
-        gh.seed_state(
-            _VALIDATING_ACK_ISSUE_NUMBER,
-            pr_number=pr.number,
-            dev_agent=BACKEND_CLAUDE,
-            dev_session_id=DEV_SESSION,
-            user_content_hash=STALE_HASH,
-            review_round=1,
-            branch="orchestrator/geserdugarov__agent-orchestrator/issue-600",
-        )
-
-        self._run(
-            lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
-            run_agent=_agent(
-                session_id=DEV_SESSION,
-                last_message=(
-                    "Reviewed the clarified body.\n\n"
-                    "ACK: existing commits already cover the clarified body"
-                ),
-            ),
-            has_new_commits=False,
-            dirty_files=(),
-            head_shas=[SAME_SHA, SAME_SHA],
-        )
-
-        state = gh.pinned_data(_VALIDATING_ACK_ISSUE_NUMBER)
-        # Crucial: must NOT park as a question.
-        self.assertFalse(state.get(KEY_AWAITING_HUMAN))
-        # Dev's ACK justification was posted on the issue as an FYI.
-        self.assertTrue(any(
-            EXISTING_WORK_MESSAGE in body
-            for _, body in gh.posted_comments
-        ))
-
-    def test_in_review_ack_routes_to_validating(
-        self,
-    ) -> None:
-        # A no-commit "ack" reply from the dev on an in_review drift
-        # MUST bounce DIRECTLY back to `validating` (same destination
-        # as the pushed-fix exit; docs do not run on the drift exit,
-        # the single docs pass runs after reviewer approval before
-        # `in_review` via the final-docs handoff). `review_round`
-        # resets so the validating cap counts fresh rounds.
-        gh = FakeGitHubClient()
-        issue = make_issue(
-            _IN_REVIEW_ACK_ISSUE_NUMBER,
-            label=LABEL_IN_REVIEW,
-            body=CLARIFIED_BODY,
-        )
-        gh.add_issue(issue)
-        pr = FakePR(
-            number=_IN_REVIEW_ACK_PR_NUMBER,
-            head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-700",
-        )
-        gh.add_pr(pr)
-        gh.seed_state(
-            _IN_REVIEW_ACK_ISSUE_NUMBER,
-            pr_number=pr.number,
-            dev_agent=BACKEND_CLAUDE,
-            dev_session_id=DEV_SESSION,
-            user_content_hash=STALE_HASH,
-            pr_last_comment_id=0,
-            pr_last_review_comment_id=0,
-            pr_last_review_summary_id=0,
-            branch="orchestrator/geserdugarov__agent-orchestrator/issue-700",
-        )
-
-        self._run(
-            lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
-            run_agent=_agent(
-                session_id=DEV_SESSION,
-                last_message="ACK: no additional code change needed",
-            ),
-            has_new_commits=False,
-            dirty_files=(),
-            head_shas=[UNCHANGED_SHA, UNCHANGED_SHA],
-        )
-
-        state = gh.pinned_data(_IN_REVIEW_ACK_ISSUE_NUMBER)
-        # Must NOT park (the dev acknowledged, not asked a question).
-        self.assertFalse(state.get(KEY_AWAITING_HUMAN))
-        # MUST bounce directly to validating (no documenting hop) so
-        # the reviewer re-evaluates against the updated body.
-        self.assertIn(
-            (_IN_REVIEW_ACK_ISSUE_NUMBER, LABEL_VALIDATING),
-            gh.label_history,
-        )
-        # And NOT through documenting -- no commit landed.
-        self.assertNotIn(
-            (_IN_REVIEW_ACK_ISSUE_NUMBER, "documenting"),
-            gh.label_history,
-        )
-        # review_round reset so the validating cap counts fresh rounds.
-        self.assertEqual(state.get("review_round"), 0)
-        # Dev's reply still posted on the issue as an FYI.
-        self.assertTrue(any(
-            EXISTING_WORK_MESSAGE in body
-            for _, body in gh.posted_comments
-        ))
-
-
-class DriftMarksCommentsConsumedTest(
-    unittest.TestCase, _PatchedWorkflowMixin,
-):
-    """Reviewer point 1: the drift paths feed the dev session the full
-    issue thread via `_recent_comments_text`, so `last_action_comment_id`
-    must advance past every visible comment. Otherwise the next
-    validating->in_review handoff's `_seed_watermark_past_self` stops at
-    the same human comment and replays it as fresh PR feedback,
-    triggering a duplicate dev resume."""
-
-    def test_validating_bumps_past_human_comment(
-        self,
-    ) -> None:
-        gh = FakeGitHubClient()
-        issue = make_issue(
-            _VALIDATING_WATERMARK_ISSUE_NUMBER,
-            label=LABEL_VALIDATING,
-            body=NEW_BODY,
-        )
-        # Pre-existing human comment with a high id -- representing the
-        # comment that arrived at the same time as the body edit.
-        human = FakeComment(
-            id=_VALIDATING_WATERMARK_COMMENT_ID,
-            body="add this acceptance criterion",
-            user=FakeUser(TRUSTED_AUTHOR),
-        )
-        issue.comments.append(human)
-        gh.add_issue(issue)
-        pr = FakePR(
-            number=_VALIDATING_WATERMARK_PR_NUMBER,
-            head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-900",
-        )
-        gh.add_pr(pr)
-        gh.seed_state(
-            _VALIDATING_WATERMARK_ISSUE_NUMBER,
-            pr_number=pr.number,
-            dev_agent=BACKEND_CLAUDE,
-            dev_session_id=DEV_SESSION,
-            user_content_hash=STALE_HASH,
-            review_round=1,
-            branch="orchestrator/geserdugarov__agent-orchestrator/issue-900",
-            last_action_comment_id=100,
-        )
-
-        self._run(
-            lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
-            run_agent=_agent(
-                session_id=DEV_SESSION, last_message="fixed"
-            ),
-            has_new_commits=True,
-            dirty_files=(),
-            push_branch=True,
-            head_shas=["before", SHA_AFTER],
-        )
-
-        state = gh.pinned_data(_VALIDATING_WATERMARK_ISSUE_NUMBER)
-        # last_action_comment_id advanced past the human comment so the
-        # eventual handoff to in_review does not classify it as fresh
-        # feedback.
-        self.assertGreaterEqual(
-            int(state.get(KEY_LAST_ACTION_COMMENT_ID)),
-            _VALIDATING_WATERMARK_COMMENT_ID,
-        )
-
-    def test_in_review_human_comment_routes_to_fixing(
-        self,
-    ) -> None:
-        # Regression for the reviewer's bug: a fresh issue-thread human
-        # comment used to trip `user_content_hash` (which covers comments
-        # too) and the drift path would resume the dev + bounce to
-        # `validating` instead of the contracted route to `fixing`. With
-        # the in_review handler scanning fresh feedback BEFORE the drift
-        # check, the issue-thread comment now routes to `fixing` and the
-        # hash is recomputed so the drift path does not double-fire on the
-        # same comment changes next tick.
-        gh = FakeGitHubClient()
-        issue = make_issue(
-            _IN_REVIEW_WATERMARK_ISSUE_NUMBER,
-            label=LABEL_IN_REVIEW,
-            body=NEW_BODY,
-        )
-        human = FakeComment(
-            id=_IN_REVIEW_WATERMARK_COMMENT_ID,
-            body="please also handle X",
-            user=FakeUser(TRUSTED_AUTHOR),
-        )
-        issue.comments.append(human)
-        gh.add_issue(issue)
-        pr = FakePR(
-            number=_IN_REVIEW_WATERMARK_PR_NUMBER,
-            head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-910",
-        )
-        gh.add_pr(pr)
-        gh.seed_state(
-            _IN_REVIEW_WATERMARK_ISSUE_NUMBER,
-            pr_number=pr.number,
-            dev_agent=BACKEND_CLAUDE,
-            dev_session_id=DEV_SESSION,
-            user_content_hash=STALE_HASH,
-            pr_last_comment_id=0,
-            pr_last_review_comment_id=0,
-            pr_last_review_summary_id=0,
-            branch="orchestrator/geserdugarov__agent-orchestrator/issue-910",
-            last_action_comment_id=100,
-        )
-
-        mocks = self._run(
-            lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
-            run_agent=_agent(),
-        )
-
-        # No dev spawn, no bounce to `validating`: the fixing route owns
-        # this signal.
-        mocks["run_agent"].assert_not_called()
-        self.assertIn(
-            (_IN_REVIEW_WATERMARK_ISSUE_NUMBER, "fixing"),
-            gh.label_history,
-        )
-        self.assertNotIn(
-            (_IN_REVIEW_WATERMARK_ISSUE_NUMBER, LABEL_VALIDATING),
-            gh.label_history,
-        )
-        state = gh.pinned_data(_IN_REVIEW_WATERMARK_ISSUE_NUMBER)
-        # The triggering comment is bookmarked for the fixing handler.
-        self.assertEqual(
-            state.get("pending_fix_issue_max_id"),
-            _IN_REVIEW_WATERMARK_COMMENT_ID,
-        )
-        # Hash is updated so the drift check does not re-fire on the
-        # same comment change after the fixing handler (or an operator
-        # relabel) bounces the issue back to `in_review`.
-        self.assertNotEqual(state.get(KEY_USER_CONTENT_HASH), STALE_HASH)
-        # Watermark is deliberately left at the route-time value so the
-        # fixing handler can read the triggering comment to build its
-        # dev-resume prompt (the bookmark above tells it where to start).
-        # The fixing handler advances this watermark itself once the
-        # consumed feedback has been fed to the dev.
-        self.assertEqual(state.get("pr_last_comment_id"), 0)
-
-    def test_implementing_bumps_past_comment(
-        self,
-    ) -> None:
-        gh = FakeGitHubClient()
-        issue = make_issue(
-            _IMPLEMENTING_WATERMARK_ISSUE_NUMBER,
-            label=LABEL_IMPLEMENTING,
-            body=NEW_BODY,
-        )
-        human = FakeComment(
-            id=_IMPLEMENTING_WATERMARK_COMMENT_ID,
-            body="here are more requirements",
-            user=FakeUser(TRUSTED_AUTHOR),
-        )
-        issue.comments.append(human)
-        gh.add_issue(issue)
-        gh.seed_state(
-            _IMPLEMENTING_WATERMARK_ISSUE_NUMBER,
-            dev_agent=BACKEND_CLAUDE,
-            dev_session_id=DEV_SESSION,
-            user_content_hash=STALE_HASH,
-            awaiting_human=True,
-            last_action_comment_id=100,
-            branch="orchestrator/geserdugarov__agent-orchestrator/issue-920",
-        )
-
-        self._run(
-            lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
-            run_agent=_agent(
-                session_id=DEV_SESSION, last_message="implemented"
-            ),
-            has_new_commits=True,
-            dirty_files=(),
-            push_branch=True,
-            head_shas=["before-resume", "after-resume"],
-        )
-
-        state = gh.pinned_data(_IMPLEMENTING_WATERMARK_ISSUE_NUMBER)
-        # The dev's commit goes through `_on_commits` which flips to
-        # validating; the validating->in_review handoff later reads
-        # last_action_comment_id, so we must have bumped past 7000.
-        self.assertGreaterEqual(
-            int(state.get(KEY_LAST_ACTION_COMMENT_ID)),
-            _IMPLEMENTING_WATERMARK_COMMENT_ID,
-        )
-
-    def test_conflict_drift_bumps_last_action(self) -> None:
-        gh = FakeGitHubClient()
-        issue = make_issue(
-            _CONFLICT_WATERMARK_ISSUE_NUMBER,
-            label=LABEL_RESOLVING_CONFLICT,
-            body=NEW_BODY,
-        )
-        human = FakeComment(
-            id=_CONFLICT_WATERMARK_COMMENT_ID,
-            body="more context",
-            user=FakeUser(TRUSTED_AUTHOR),
-        )
-        issue.comments.append(human)
-        gh.add_issue(issue)
-        pr = FakePR(
-            number=_CONFLICT_WATERMARK_PR_NUMBER,
-            head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-930",
-        )
-        gh.add_pr(pr)
-        gh.seed_state(
-            _CONFLICT_WATERMARK_ISSUE_NUMBER,
-            pr_number=pr.number,
-            dev_agent=BACKEND_CLAUDE,
-            dev_session_id=DEV_SESSION,
-            user_content_hash=STALE_HASH,
-            conflict_round=0,
-            branch="orchestrator/geserdugarov__agent-orchestrator/issue-930",
-            last_action_comment_id=100,
-        )
-
-        self._run(
-            lambda: workflow._handle_resolving_conflict(
-                gh, _TEST_SPEC, issue,
-            ),
-            run_agent=_agent(
-                session_id=DEV_SESSION, last_message="resolved"
-            ),
-            has_new_commits=True,
-            dirty_files=(),
-            push_branch=True,
-            head_shas=["before", SHA_AFTER, SHA_AFTER],
-        )
-
-        state = gh.pinned_data(_CONFLICT_WATERMARK_ISSUE_NUMBER)
-        # After the pushed resolution flips to validating, the
-        # subsequent handoff back to in_review must not replay the human
-        # comment that arrived during conflict resolution.
-        self.assertGreaterEqual(
-            int(state.get(KEY_LAST_ACTION_COMMENT_ID)),
-            _CONFLICT_WATERMARK_COMMENT_ID,
-        )
-
-
-class OrchCommentMarkerSurvivesIdCapTest(unittest.TestCase):
-    """Reviewer point 3: `orchestrator_comment_ids` is capped, but the
-    hash scans every comment. Once an old orchestrator-comment id is
-    evicted from the cap, an id-only filter would start including the
-    bot comment in the hash and trigger false drift each tick. The body
-    marker (`_ORCH_COMMENT_MARKER`) must keep the hash stable."""
-
-    def test_unknown_id_bot_comment_is_excluded(
-        self,
-    ) -> None:
-        # Simulate an orchestrator comment whose id has been evicted
-        # from the bounded cap. Its body still carries the marker
-        # (because every orchestrator comment is posted with it), so
-        # the hash filter must drop it.
-        bot_body = f"picking this up\n\n{workflow._ORCH_COMMENT_MARKER}"
-        bot = FakeComment(
-            id=_EVICTED_BOT_COMMENT_ID,
-            body=bot_body,
-            user=FakeUser(TRUSTED_AUTHOR),
-        )
-        human = FakeComment(
-            id=_HUMAN_COMMENT_ID,
-            body="please reconsider",
-            user=FakeUser(TRUSTED_AUTHOR),
-        )
-        issue_with_just_human = make_issue(1, comments=[human])
-        issue_with_both = make_issue(1, comments=[bot, human])
-        # `orchestrator_ids` is EMPTY (the id was evicted from the cap),
-        # but the hash must still match because the marker identifies
-        # the bot comment.
-        self.assertEqual(
-            workflow._compute_user_content_hash(
-                issue_with_just_human, set()
-            ),
-            workflow._compute_user_content_hash(
-                issue_with_both, set()
-            ),
-        )
-
-    def test_marker_is_appended_by_post_helpers(self) -> None:
-        # Every orchestrator-posted comment must carry the marker so
-        # the hash filter survives id-cap eviction.
-        gh = FakeGitHubClient()
-        issue = make_issue(1)
-        gh.add_issue(issue)
-        state = workflow.PinnedState()
-        workflow._post_issue_comment(gh, issue, state, "hello")
-        # The body actually written to the issue carries the marker.
-        last_body = issue.comments[-1].body
-        self.assertIn(workflow._ORCH_COMMENT_MARKER, last_body)
-        # And it starts with the original body text.
-        self.assertTrue(last_body.startswith("hello"))
-
-    def test_marker_is_idempotent_on_double_wrap(self) -> None:
-        # Defensive: a caller that already passes a body containing the
-        # marker (e.g. a future helper forwards a pre-built body) must
-        # not get the marker appended twice -- two markers in one body
-        # is harmless but ugly, and an idempotent wrap also keeps
-        # `_with_orch_marker` safe to call from helper chains.
-        marked = workflow._with_orch_marker("hi")
-        twice = workflow._with_orch_marker(marked)
-        self.assertEqual(marked, twice)
-        self.assertEqual(twice.count(workflow._ORCH_COMMENT_MARKER), 1)
-
-
-class HashFiltersBotUsersTest(unittest.TestCase):
-    """Reviewer point 2: third-party Bot/App accounts (Dependabot,
-    Renovate, CI bots) post comments structurally on long-lived issues.
-    The hash must filter them by GitHub's `user.type == "Bot"` flag so
-    a periodic bot comment doesn't re-trigger drift on every tick it
-    posts. Login matching is intentionally avoided because the
-    orchestrator PAT may be shared with a human reviewer's account."""
-
-    def test_bot_authored_comment_is_filtered(self) -> None:
-        # A Dependabot-style comment must NOT affect the hash even
-        # though its body is unique and its id is not tracked.
-        human = FakeComment(
-            id=_BOT_FILTER_HUMAN_COMMENT_ID,
-            body="real human comment",
-            user=FakeUser(TRUSTED_AUTHOR),
-        )
-        bot_comment = FakeComment(
-            id=_BOT_FILTER_BOT_COMMENT_ID,
-            body="Bumps `requests` from 2.31.0 to 2.32.0",
-            user=FakeUser("dependabot[bot]", type="Bot"),
-        )
-        issue_with_just_human = make_issue(1, comments=[human])
-        issue_with_bot = make_issue(1, comments=[human, bot_comment])
-        self.assertEqual(
-            workflow._compute_user_content_hash(
-                issue_with_just_human, set()
-            ),
-            workflow._compute_user_content_hash(
-                issue_with_bot, set()
-            ),
-        )
-
-    def test_user_type_human_still_contributes(self) -> None:
-        # A regular human user's `type == "User"` must NOT be filtered.
-        comment = FakeComment(
-            id=_TYPED_HUMAN_COMMENT_ID,
-            body="adds an acceptance criterion",
-            user=FakeUser(TRUSTED_AUTHOR, type="User"),
-        )
-        empty = make_issue(1)
-        with_human = make_issue(1, comments=[comment])
-        self.assertNotEqual(
-            workflow._compute_user_content_hash(empty, set()),
-            workflow._compute_user_content_hash(with_human, set()),
-        )
-
-
-class DriftAckRequiresExplicitMarkerTest(unittest.TestCase):
-    """Reviewer point: a generic non-empty no-commit response is OFTEN a
-    clarification question, not an ack. Only an explicit `ACK: ...`
-    marker should be treated as acknowledgement; everything else parks
-    awaiting human via `_on_question`."""
-
-    def test_explicit_ack_marker_extracts_reason(self) -> None:
-        msg = (
-            "I reviewed the change.\n\n"
-            "ACK: existing tests already cover the new requirement"
-        )
-        self.assertEqual(
-            workflow._drift_ack_reason(msg),
-            "existing tests already cover the new requirement",
-        )
-
-    def test_ack_is_case_insensitive_and_last_wins(self) -> None:
-        # Case insensitive (mirrors VERDICT parsing) and the LAST marker
-        # wins so a sample/template `ACK:` quoted earlier in the message
-        # doesn't override the agent's real concluding marker.
-        msg = (
-            "I considered ack: stale-template-text but on re-reading\n\n"
-            "ack: real final justification"
-        )
-        self.assertEqual(
-            workflow._drift_ack_reason(msg),
-            "real final justification",
-        )
-
-    def test_no_marker_returns_none(self) -> None:
-        # Generic "satisfied" prose without the marker is NOT an ack.
-        # `_post_user_content_change_result` parks via `_on_question`
-        # on this branch so a real question isn't swallowed.
-        msg = "Existing code already covers this; no change needed."
-        self.assertIsNone(workflow._drift_ack_reason(msg))
-
-    def test_clarification_question_returns_none(self) -> None:
-        msg = "Should I also handle the empty-input case?"
-        self.assertIsNone(workflow._drift_ack_reason(msg))
-
-
-class DriftNonAckResponseParksTest(
-    unittest.TestCase, _PatchedWorkflowMixin,
-):
-    """A non-empty no-commit response WITHOUT the `ACK:` marker -- e.g.
-    a clarification question -- must park awaiting human, not silently
-    advance the workflow with a misleading "satisfies" comment."""
-
-    def test_validating_clarification_parks(self) -> None:
-        gh = FakeGitHubClient()
-        issue = make_issue(
-            _VALIDATING_CLARIFICATION_ISSUE_NUMBER,
-            label=LABEL_VALIDATING,
-            body=CLARIFIED_BODY,
-        )
-        gh.add_issue(issue)
-        pr = FakePR(
-            number=_VALIDATING_CLARIFICATION_PR_NUMBER,
-            head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-601",
-        )
-        gh.add_pr(pr)
-        gh.seed_state(
-            _VALIDATING_CLARIFICATION_ISSUE_NUMBER,
-            pr_number=pr.number,
-            dev_agent=BACKEND_CLAUDE,
-            dev_session_id=DEV_SESSION,
-            user_content_hash=STALE_HASH,
-            review_round=1,
-            branch="orchestrator/geserdugarov__agent-orchestrator/issue-601",
-        )
-
-        self._run(
-            lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
-            run_agent=_agent(
-                session_id=DEV_SESSION,
-                last_message=(
-                    "Should the empty-input case also raise, or return "
-                    "an empty list? Need clarification."
-                ),
-            ),
-            has_new_commits=False,
-            dirty_files=(),
-            head_shas=[SAME_SHA, SAME_SHA],
-        )
-
-        state = gh.pinned_data(_VALIDATING_CLARIFICATION_ISSUE_NUMBER)
-        # Must park awaiting human so the real question isn't lost.
-        self.assertTrue(state.get(KEY_AWAITING_HUMAN))
-        # Must NOT have posted the misleading "satisfies" comment.
-        self.assertFalse(any(
-            EXISTING_WORK_MESSAGE in body
-            for _, body in gh.posted_comments
-        ))
-        # The question text was surfaced via `_on_question`.
-        self.assertTrue(any(
-            "Should the empty-input case" in body
-            for _, body in gh.posted_comments
-        ))
-
-    def test_in_review_clarification_parks(self) -> None:
-        gh = FakeGitHubClient()
-        issue = make_issue(
-            _IN_REVIEW_CLARIFICATION_ISSUE_NUMBER,
-            label=LABEL_IN_REVIEW,
-            body=CLARIFIED_BODY,
-        )
-        gh.add_issue(issue)
-        pr = FakePR(
-            number=_IN_REVIEW_CLARIFICATION_PR_NUMBER,
-            head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-701",
-        )
-        gh.add_pr(pr)
-        gh.seed_state(
-            _IN_REVIEW_CLARIFICATION_ISSUE_NUMBER,
-            pr_number=pr.number,
-            dev_agent=BACKEND_CLAUDE,
-            dev_session_id=DEV_SESSION,
-            user_content_hash=STALE_HASH,
-            pr_last_comment_id=0,
-            pr_last_review_comment_id=0,
-            pr_last_review_summary_id=0,
-            branch="orchestrator/geserdugarov__agent-orchestrator/issue-701",
-        )
-
-        self._run(
-            lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
-            run_agent=_agent(
-                session_id=DEV_SESSION,
-                last_message=(
-                    "Does the updated body imply I should also rename "
-                    "`old_fn`? Please confirm."
-                ),
-            ),
-            has_new_commits=False,
-            dirty_files=(),
-            head_shas=[UNCHANGED_SHA, UNCHANGED_SHA],
-        )
-
-        state = gh.pinned_data(_IN_REVIEW_CLARIFICATION_ISSUE_NUMBER)
-        # Park flagged.
-        self.assertTrue(state.get(KEY_AWAITING_HUMAN))
-        # NOT bounced to validating: the dev didn't ack OR commit, so
-        # the in_review label is preserved and the human resolves the
-        # question.
-        self.assertNotIn(
-            (_IN_REVIEW_CLARIFICATION_ISSUE_NUMBER, LABEL_VALIDATING),
-            gh.label_history,
-        )
-        # Misleading "satisfies" comment NOT posted.
-        self.assertFalse(any(
-            EXISTING_WORK_MESSAGE in body
-            for _, body in gh.posted_comments
-        ))
-
-    def test_implementing_clarification_parks(
-        self,
-    ) -> None:
-        # The implementing-stage inline drift handler shares the same
-        # contract: non-empty + no-commit + no ACK -> park as question.
-        gh = FakeGitHubClient()
-        issue = make_issue(
-            _IMPLEMENTING_CLARIFICATION_ISSUE_NUMBER,
-            label=LABEL_IMPLEMENTING,
-            body="updated requirements",
-        )
-        gh.add_issue(issue)
-        gh.seed_state(
-            _IMPLEMENTING_CLARIFICATION_ISSUE_NUMBER,
-            user_content_hash=STALE_HASH,
-            dev_agent=BACKEND_CLAUDE,
-            dev_session_id=DEV_SESSION,
-            awaiting_human=False,
-            branch="orchestrator/geserdugarov__agent-orchestrator/issue-602",
-        )
-
-        self._run(
-            lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
-            run_agent=_agent(
-                session_id=DEV_SESSION,
-                last_message=(
-                    "I'd like to clarify: should the schema migration "
-                    "run forward-only or also support rollback?"
-                ),
-            ),
-            has_new_commits=False,
-            dirty_files=(),
-            head_shas=["sha-before", "sha-before"],
-        )
-
-        state = gh.pinned_data(_IMPLEMENTING_CLARIFICATION_ISSUE_NUMBER)
-        self.assertTrue(state.get(KEY_AWAITING_HUMAN))
-        self.assertFalse(any(
-            EXISTING_WORK_MESSAGE in body
-            for _, body in gh.posted_comments
-        ))
-        # The dev's question was surfaced.
-        self.assertTrue(any(
-            "schema migration" in body
-            for _, body in gh.posted_comments
-        ))
-
-
-if __name__ == "__main__":
-    unittest.main()

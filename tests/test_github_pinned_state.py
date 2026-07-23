@@ -51,7 +51,7 @@ class ReadPinnedStateTrustsAuthorTest(unittest.TestCase):
         legit = FakeComment(
             id=_PINNED_COMMENT_ID,
             body=_marker({_BRANCH_KEY: REAL_BRANCH, _DEV_AGENT_KEY: "claude"}),
-            user=FakeUser(BOT),
+            user=FakeUser(login=BOT),
         )
         issue = make_issue(5, comments=[attacker, legit])
 
@@ -102,10 +102,11 @@ class ReadPinnedStateTrustsAuthorTest(unittest.TestCase):
     def test_bot_authored_state_is_trusted(self) -> None:
         # Legacy pinned comments were authored by this same account, so author
         # matching keeps honoring them with no migration step.
+        bot_user = FakeUser(BOT)
         legit = FakeComment(
             id=_PINNED_COMMENT_ID,
             body=_marker({_BRANCH_KEY: REAL_BRANCH, "review_round": 2}),
-            user=FakeUser(BOT),
+            user=bot_user,
         )
         issue = make_issue(5, comments=[legit])
 
@@ -182,7 +183,8 @@ class ReadPinnedStateRequiresStateOnlyBodyTest(unittest.TestCase):
         )
         issue = make_issue(5, comments=[ordinary])
 
-        state = _client().read_pinned_state(issue)
+        client = _client()
+        state = client.read_pinned_state(issue)
 
         self.assertIsNone(state.comment_id)
         self.assertEqual(state.data, {})

@@ -144,13 +144,19 @@ class ReviewerLivePauseTest(unittest.TestCase, _PatchedWorkflowMixin):
 
         mocks["run_agent"].assert_called_once()
         get_issue_mock.assert_called_with(_REVIEWER_ISSUE_NUMBER)
-        self.assertEqual(gh.label_history, [])
-        self.assertEqual(gh.posted_pr_comments, [])
-        self.assertEqual(gh.posted_comments, [])
+        self.assertEqual(
+            (gh.label_history, gh.posted_pr_comments, gh.posted_comments),
+            ([], [], []),
+        )
         self.assertEqual(gh.write_state_calls, before_writes)
-        state = gh.pinned_data(_REVIEWER_ISSUE_NUMBER)
-        self.assertNotIn("last_review_session_id", state)
-        self.assertNotIn("last_review_at", state)
+        self.assertNotIn(
+            "last_review_session_id",
+            gh.pinned_data(_REVIEWER_ISSUE_NUMBER),
+        )
+        self.assertNotIn(
+            "last_review_at",
+            gh.pinned_data(_REVIEWER_ISSUE_NUMBER),
+        )
 
 
 class QuestionLivePauseTest(unittest.TestCase, _PatchedWorkflowMixin):
@@ -184,13 +190,18 @@ class QuestionLivePauseTest(unittest.TestCase, _PatchedWorkflowMixin):
 
         get_issue_mock.assert_called_with(_FRESH_QUESTION_ISSUE_NUMBER)
         mocks["_push_branch"].assert_not_called()
-        self.assertEqual(gh.opened_prs, [])
-        self.assertEqual(gh.label_history, [])
-        self.assertEqual(gh.posted_comments, [])
+        self.assertEqual(
+            (gh.opened_prs, gh.label_history, gh.posted_comments),
+            ([], [], []),
+        )
         self.assertEqual(gh.write_state_calls, before_writes)
-        state = gh.pinned_data(_FRESH_QUESTION_ISSUE_NUMBER)
-        self.assertNotIn("question_session_id", state)
-        self.assertFalse(state.get("awaiting_human"))
+        self.assertNotIn(
+            "question_session_id",
+            gh.pinned_data(_FRESH_QUESTION_ISSUE_NUMBER),
+        )
+        self.assertFalse(
+            gh.pinned_data(_FRESH_QUESTION_ISSUE_NUMBER).get("awaiting_human"),
+        )
         mocks["_cleanup_question_worktree"].assert_called_once()
 
     def test_resume_pause_freezes_watermark(self) -> None:
@@ -239,12 +250,17 @@ class QuestionLivePauseTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertEqual(gh.label_history, [])
         self.assertEqual(gh.posted_comments, [])
         self.assertEqual(gh.write_state_calls, before_writes)
-        state = gh.pinned_data(_RESUMED_QUESTION_ISSUE_NUMBER)
         self.assertEqual(
-            state.get("last_action_comment_id"),
+            gh.pinned_data(_RESUMED_QUESTION_ISSUE_NUMBER).get(
+                "last_action_comment_id",
+            ),
             _QUESTION_WATERMARK,
         )
-        self.assertTrue(state.get("awaiting_human"))
+        self.assertTrue(
+            gh.pinned_data(_RESUMED_QUESTION_ISSUE_NUMBER).get(
+                "awaiting_human",
+            ),
+        )
 
 
 if __name__ == "__main__":

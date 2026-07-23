@@ -49,6 +49,22 @@ _NO_USAGE_ISSUE_NUMBER = 206
 _NO_USAGE_PR_NUMBER = 20600
 
 
+def _receipt_bodies(gh: FakeGitHubClient, issue_number: int) -> list[str]:
+    return [
+        body
+        for posted_number, body in gh.posted_comments
+        if posted_number == issue_number and body.startswith(":receipt:")
+    ]
+
+
+def _receipt_comment(issue):
+    return next(
+        comment
+        for comment in issue.comments
+        if comment.body.startswith(":receipt:")
+    )
+
+
 class FinalizeIfPrMergedTest(unittest.TestCase, _PatchedWorkflowMixin):
     """Direct coverage of the cross-stage `_finalize_if_pr_merged` helper.
 
@@ -149,13 +165,15 @@ class FinalizeMergedPrTest(unittest.TestCase, _PatchedWorkflowMixin):
             label=_IMPLEMENTING_LABEL,
         )
         gh.add_issue(issue)
-        pr = FakePR(
-            number=_OPEN_ISSUE_MERGED_PR_NUMBER,
-            head_branch=_issue_branch(_OPEN_ISSUE_MERGED_NUMBER),
-            head=FakePRRef(sha=_PR_HEAD_SHA),
-            merged=True, state=_STATE_CLOSED,
+        gh.add_pr(
+            FakePR(
+                number=_OPEN_ISSUE_MERGED_PR_NUMBER,
+                head_branch=_issue_branch(_OPEN_ISSUE_MERGED_NUMBER),
+                head=FakePRRef(sha=_PR_HEAD_SHA),
+                merged=True,
+                state=_STATE_CLOSED,
+            ),
         )
-        gh.add_pr(pr)
         state = _state_with_pr_number(
             gh,
             _OPEN_ISSUE_MERGED_NUMBER,
@@ -182,8 +200,6 @@ class FinalizeMergedPrTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
         # An `external`-merge audit event is emitted with the
         # entry-stage label.
-        kinds = [event["event"] for event in gh.recorded_events]
-        self.assertIn(EVENT_PR_MERGED, kinds)
         merged_event = next(
             event for event in gh.recorded_events
             if event["event"] == EVENT_PR_MERGED
@@ -233,13 +249,15 @@ class FinalizeMergedPrTest(unittest.TestCase, _PatchedWorkflowMixin):
         gh = FakeGitHubClient()
         issue = make_issue(_USAGE_ISSUE_NUMBER, label=_IMPLEMENTING_LABEL)
         gh.add_issue(issue)
-        pr = FakePR(
-            number=_USAGE_PR_NUMBER,
-            head_branch=_issue_branch(_USAGE_ISSUE_NUMBER),
-            head=FakePRRef(sha=_PR_HEAD_SHA),
-            merged=True, state=_STATE_CLOSED,
+        gh.add_pr(
+            FakePR(
+                number=_USAGE_PR_NUMBER,
+                head_branch=_issue_branch(_USAGE_ISSUE_NUMBER),
+                head=FakePRRef(sha=_PR_HEAD_SHA),
+                merged=True,
+                state=_STATE_CLOSED,
+            ),
         )
-        gh.add_pr(pr)
         state = _state_with_pr_number(
             gh,
             _USAGE_ISSUE_NUMBER,
@@ -257,20 +275,14 @@ class FinalizeMergedPrTest(unittest.TestCase, _PatchedWorkflowMixin):
             run_agent=_agent(),
         )
 
-        receipts = [
-            body for number, body in gh.posted_comments
-            if number == _USAGE_ISSUE_NUMBER and body.startswith(":receipt:")
-        ]
+        receipts = _receipt_bodies(gh, _USAGE_ISSUE_NUMBER)
         self.assertEqual(len(receipts), 1)
         self.assertIn(
             "this issue: 3 agent runs · 45,200 tokens · $0.87 (est.)",
             receipts[0],
         )
         # Posted before the write, so its id rode the same persisted state.
-        receipt_comment = next(
-            comment for comment in issue.comments
-            if comment.body.startswith(":receipt:")
-        )
+        receipt_comment = _receipt_comment(issue)
         self.assertIn(
             receipt_comment.id,
             gh.pinned_data(_USAGE_ISSUE_NUMBER).get(
@@ -285,13 +297,15 @@ class FinalizeMergedPrTest(unittest.TestCase, _PatchedWorkflowMixin):
         gh = FakeGitHubClient()
         issue = make_issue(_NO_USAGE_ISSUE_NUMBER, label=_IMPLEMENTING_LABEL)
         gh.add_issue(issue)
-        pr = FakePR(
-            number=_NO_USAGE_PR_NUMBER,
-            head_branch=_issue_branch(_NO_USAGE_ISSUE_NUMBER),
-            head=FakePRRef(sha=_PR_HEAD_SHA),
-            merged=True, state=_STATE_CLOSED,
+        gh.add_pr(
+            FakePR(
+                number=_NO_USAGE_PR_NUMBER,
+                head_branch=_issue_branch(_NO_USAGE_ISSUE_NUMBER),
+                head=FakePRRef(sha=_PR_HEAD_SHA),
+                merged=True,
+                state=_STATE_CLOSED,
+            ),
         )
-        gh.add_pr(pr)
         state = _state_with_pr_number(
             gh,
             _NO_USAGE_ISSUE_NUMBER,
@@ -305,12 +319,7 @@ class FinalizeMergedPrTest(unittest.TestCase, _PatchedWorkflowMixin):
             run_agent=_agent(),
         )
 
-        self.assertEqual(
-            [body for number, body in gh.posted_comments
-             if number == _NO_USAGE_ISSUE_NUMBER
-             and body.startswith(":receipt:")],
-            [],
-        )
+        self.assertEqual(_receipt_bodies(gh, _NO_USAGE_ISSUE_NUMBER), [])
 
 
 if __name__ == "__main__":
