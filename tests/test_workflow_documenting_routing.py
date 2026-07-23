@@ -3,7 +3,8 @@
 """`documenting` label bootstrap, family-aware partitioning, PR-refresh
 detour membership, and dispatcher routing -- plus the end-to-end
 no-`pr_number` park stability checks. Handler-behavior tests live in
-`tests/test_workflow_documenting.py`."""
+the focused `tests/test_workflow_documenting_*.py` modules."""
+
 from __future__ import annotations
 
 import unittest
@@ -18,6 +19,25 @@ LABEL_DOCUMENTING = "documenting"
 ROUTING_ISSUE_NUMBER = 901
 MISSING_PR_ISSUE_NUMBER = 902
 PARKED_MISSING_PR_ISSUE_NUMBER = 903
+
+
+def _routing_handlers(
+    gh: FakeGitHubClient,
+    issue,
+):
+    with (
+        patch.object(workflow, "_handle_documenting") as documenting_handler,
+        patch.object(workflow, "_handle_pickup") as pickup_handler,
+        patch.object(workflow, "_handle_implementing") as implementing_handler,
+        patch.object(workflow, "_handle_validating") as validating_handler,
+    ):
+        workflow._process_issue(gh, _TEST_SPEC, issue)
+        return (
+            documenting_handler,
+            pickup_handler,
+            implementing_handler,
+            validating_handler,
+        )
 
 
 class DocumentingLabelRegistrationTest(unittest.TestCase):
@@ -56,13 +76,19 @@ class DocumentingLabelRegistrationTest(unittest.TestCase):
         from orchestrator.github import WORKFLOW_LABEL_SPECS
 
         names = [name for name, _, _ in WORKFLOW_LABEL_SPECS]
-        impl_idx = names.index("implementing")
-        val_idx = names.index("validating")
-        doc_idx = names.index(LABEL_DOCUMENTING)
-        in_review_idx = names.index("in_review")
-        self.assertEqual(val_idx, impl_idx + 1)
-        self.assertEqual(doc_idx, val_idx + 1)
-        self.assertEqual(in_review_idx, doc_idx + 1)
+        positions = tuple(
+            names.index(label)
+            for label in (
+                "implementing",
+                "validating",
+                LABEL_DOCUMENTING,
+                "in_review",
+            )
+        )
+        self.assertEqual(
+            positions,
+            tuple(range(positions[0], positions[0] + len(positions))),
+        )
 
     def test_documenting_label_is_not_family_aware(self) -> None:
         # Open `documenting` issues touch only their own pinned state and
@@ -95,16 +121,11 @@ class DocumentingLabelRoutingTest(unittest.TestCase):
         issue = make_issue(ROUTING_ISSUE_NUMBER, label=LABEL_DOCUMENTING)
         gh.add_issue(issue)
 
-        with patch.object(workflow, "_handle_documenting") as documenting_handler, \
-             patch.object(workflow, "_handle_pickup") as pickup, \
-             patch.object(workflow, "_handle_implementing") as impl, \
-             patch.object(workflow, "_handle_validating") as validating_handler:
-            workflow._process_issue(gh, _TEST_SPEC, issue)
-
-        documenting_handler.assert_called_once_with(gh, _TEST_SPEC, issue)
-        pickup.assert_not_called()
-        impl.assert_not_called()
-        validating_handler.assert_not_called()
+        handlers = _routing_handlers(gh, issue)
+        handlers[0].assert_called_once_with(gh, _TEST_SPEC, issue)
+        handlers[1].assert_not_called()
+        handlers[2].assert_not_called()
+        handlers[3].assert_not_called()
 
     def test_missing_pr_parks_awaiting_human(self) -> None:
         # End-to-end with the real handler: a manually-applied
@@ -121,9 +142,7 @@ class DocumentingLabelRoutingTest(unittest.TestCase):
         issue_number, body = gh.posted_comments[0]
         self.assertEqual(issue_number, MISSING_PR_ISSUE_NUMBER)
         self.assertIn(LABEL_DOCUMENTING, body)
-        self.assertTrue(
-            gh.pinned_data(MISSING_PR_ISSUE_NUMBER).get("awaiting_human")
-        )
+        self.assertTrue(gh.pinned_data(MISSING_PR_ISSUE_NUMBER).get("awaiting_human"))
         # The label is NOT flipped: parking surfaces the situation but
         # leaves the operator in control of the next move.
         self.assertEqual(gh.label_history, [])

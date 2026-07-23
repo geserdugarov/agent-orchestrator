@@ -148,7 +148,7 @@ direct-launch command remain covered by tests.
 | Stage | Goal | Findings owned | Packages complete | Status |
 |---|---|---:|---:|---:|
 | 1 | Production cleanup | 223 | 3/3 | [x] |
-| 2 | Test cleanup | 1,350 | 2/7 | [ ] |
+| 2 | Test cleanup | 1,350 | 4/7 | [ ] |
 | 3 | Final zero-finding validation | 0 | 0/1 | [ ] |
 
 Package counts are ownership counts from the baseline scan. Refactoring can move line numbers or expose a new finding,
@@ -277,23 +277,27 @@ Test accounting: 275 collected tests and 55 subtests before and after the packag
 Baseline: `WPS202` 6, `WPS204` 33, `WPS210` 24, `WPS213` 31, `WPS230` 1, `WPS235` 1, `WPS430` 1,
 `WPS441` 17, and `WPS501` 2.
 
-- [ ] Split scheduler, synchronization, publication, cleanup, and serialization tests by decision branch and failure
+- [x] Split scheduler, synchronization, publication, cleanup, and serialization tests by decision branch and failure
   boundary.
-- [ ] Replace command/result setup with typed scenarios and separate operation from ordered-call assertions.
-- [ ] Replace context capture reuse with populated recorders and the nested race callback with a module-level callable
+- [x] Replace command/result setup with typed scenarios and separate operation from ordered-call assertions.
+- [x] Replace context capture reuse with populated recorders and the nested race callback with a module-level callable
   probe.
-- [ ] Express scheduler/worktree cleanup barriers with context helpers that retain exception and lock ordering.
-- [ ] Reduce all 116 findings to zero while keeping real-git and concurrency coverage intact.
+- [x] Express scheduler/worktree cleanup barriers with context helpers that retain exception and lock ordering.
+- [x] Reduce all 116 findings to zero while keeping real-git and concurrency coverage intact.
+
+Test accounting: 168 collected tests and 4 subtests before and after the package.
 
 ### Package 2.4 — Decomposition, question, and documenting tests (137 findings, 11 files)
 
 Baseline: `WPS201` 1, `WPS202` 3, `WPS204` 43, `WPS210` 55, `WPS213` 19, and `WPS441` 16.
 
-- [ ] Split stage tests by routing, execution, resume, trust filtering, drift, cleanup, and terminal behavior.
-- [ ] Use typed pinned-state/comment/agent-outcome cases to reduce repeated expressions and locals without obscuring
+- [x] Split stage tests by routing, execution, resume, trust filtering, drift, cleanup, and terminal behavior.
+- [x] Use typed pinned-state/comment/agent-outcome cases to reduce repeated expressions and locals without obscuring
   transition inputs.
-- [ ] Return populated log/patch captures from focused helpers instead of reading bound context variables later.
-- [ ] Reduce all 137 findings to zero with identical labels, comments, manifests, and ordered-write assertions.
+- [x] Return populated log/patch captures from focused helpers instead of reading bound context variables later.
+- [x] Reduce all 137 findings to zero with identical labels, comments, manifests, and ordered-write assertions.
+
+Test accounting: 225 collected tests and 4 subtests before and after the package.
 
 ### Package 2.5 — Implementing and fixing tests (128 findings, 11 files)
 

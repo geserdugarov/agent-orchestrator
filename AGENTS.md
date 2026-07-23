@@ -35,10 +35,11 @@ orchestrator process is stateless.
   and stable runtime-core facades (`main.py`, `agents.py`, `github.py`, `config.py`, `state_machine.py`).
   Full module-by-module map: [`docs/architecture.md`](docs/architecture.md#top-level-layout).
 - `tests/` — pytest suite. In-memory fakes in `tests/fakes.py`. Stage-handler tests in
-  `tests/test_workflow_<stage>.py` (the validating stage is split across `tests/test_workflow_validating_*.py`, the
+  `tests/test_workflow_<stage>*.py` (the validating stage is split across `tests/test_workflow_validating_*.py`, the
   in_review stage across `tests/test_workflow_in_review_*.py`, the implementing stage across
-  `tests/test_workflow_implementing_*.py`, and the decomposition stage across
-  `tests/test_workflow_decomposition_*.py`; the resolving-conflict stage is split entirely across
+  `tests/test_workflow_implementing_*.py`, and the decomposition, question, and documenting stages across their
+  respective focused modules, with shared fixtures in `tests/decomposition*_support.py`,
+  `tests/question_*_support.py`, and `tests/documenting_*_support.py`; the resolving-conflict stage is split across
   `tests/test_workflow_conflicts_*.py` — infrastructure tests (`_authed_fetch`, `_target_fetch`,
   `_worktree_restore`, `_event_emission`, `_git_identity`, `_list_pollable`, `_routing`) plus the
   `_handle_resolving_conflict` handler scenarios in focused modules (`_clean_rebase` for clean rebase routing,

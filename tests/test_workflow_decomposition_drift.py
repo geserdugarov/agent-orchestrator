@@ -6,6 +6,10 @@ import unittest
 
 from orchestrator import workflow
 
+from tests.decomposition_test_support import (
+    _comment_with_marker,
+    _comments_for_issue,
+)
 from tests.fakes import (
     FakeComment,
     FakeGitHubClient,
@@ -37,8 +41,74 @@ UMBRELLA_NUMBER = 400
 UMBRELLA_CHILD_NUMBERS = (401, 402)
 
 
+def _decomposing_drift_fixture():
+    github = FakeGitHubClient()
+    issue = make_issue(
+        DECOMPOSING_DRIFT_ISSUE_NUMBER,
+        label=LABEL_DECOMPOSING,
+        body="updated decomposition input",
+    )
+    issue.comments.append(
+        FakeComment(
+            id=HUMAN_COMMENT_ID,
+            body="please reconsider",
+            user=FakeUser("alice"),
+        )
+    )
+    github.add_issue(issue)
+    github.seed_state(
+        DECOMPOSING_DRIFT_ISSUE_NUMBER,
+        user_content_hash=STALE_USER_CONTENT_HASH,
+        decomposer_agent="claude",
+        decomposer_session_id="old-sess",
+        awaiting_human=True,
+        park_reason=None,
+        last_action_comment_id=LAST_ACTION_COMMENT_ID,
+        pickup_comment_id=PICKUP_COMMENT_ID,
+    )
+    return github, issue
+
+
+def _blocked_parent_drift_fixture():
+    github = FakeGitHubClient()
+    parent = make_issue(
+        BLOCKED_PARENT_NUMBER,
+        label="blocked",
+        body="updated parent body",
+    )
+    github.add_issue(parent)
+    github.add_issue(make_issue(BLOCKED_PARENT_CHILD_NUMBER, label="implementing"))
+    github.seed_state(
+        BLOCKED_PARENT_NUMBER,
+        children=[BLOCKED_PARENT_CHILD_NUMBER],
+        decomposer_session_id="old-sess",
+        user_content_hash=STALE_USER_CONTENT_HASH,
+    )
+    return github, parent
+
+
+def _umbrella_drift_fixture():
+    github = FakeGitHubClient()
+    umbrella = make_issue(
+        UMBRELLA_NUMBER,
+        label="umbrella",
+        body="updated umbrella body",
+    )
+    github.add_issue(umbrella)
+    for child_number in UMBRELLA_CHILD_NUMBERS:
+        github.add_issue(make_issue(child_number, label=LABEL_DONE))
+    github.seed_state(
+        UMBRELLA_NUMBER,
+        children=list(UMBRELLA_CHILD_NUMBERS),
+        umbrella=True,
+        user_content_hash=STALE_USER_CONTENT_HASH,
+    )
+    return github, umbrella
+
+
 class HandleReadyRoutesBackOnHashChangeTest(
-    unittest.TestCase, _PatchedWorkflowMixin,
+    unittest.TestCase,
+    _PatchedWorkflowMixin,
 ):
     def test_body_drift_routes_ready_back(self) -> None:
         # `ready` is reached only after a `single` decomposition decision
@@ -87,10 +157,15 @@ class HandleReadyRoutesBackOnHashChangeTest(
             PRIOR_TICK_USER_CONTENT_HASH,
         )
         # A human-visible notice is posted.
-        self.assertTrue(any(
-            "issue content changed" in body
-            for _, body in gh.posted_comments
-        ))
+        self.assertTrue(
+            any(
+                "issue content changed" in body
+                for body in _comments_for_issue(
+                    gh,
+                    READY_DRIFT_ISSUE_NUMBER,
+                )
+            )
+        )
 
     def test_unchanged_ready_does_not_route_back(self) -> None:
         gh = FakeGitHubClient()
@@ -109,9 +184,7 @@ class HandleReadyRoutesBackOnHashChangeTest(
 
         self._run(
             lambda: workflow._handle_ready(gh, _TEST_SPEC, issue),
-            run_agent=_agent(
-                session_id="dev-sess", last_message="done"
-            ),
+            run_agent=_agent(session_id="dev-sess", last_message="done"),
             has_new_commits=[False, True],
             push_branch=True,
         )
@@ -128,7 +201,8 @@ class HandleReadyRoutesBackOnHashChangeTest(
 
 
 class DecomposingHashChangeResetsSessionTest(
-    unittest.TestCase, _PatchedWorkflowMixin,
+    unittest.TestCase,
+    _PatchedWorkflowMixin,
 ):
     def test_drops_session_and_spawns_fresh(
         self,
@@ -138,39 +212,14 @@ class DecomposingHashChangeResetsSessionTest(
         # prior session (which would only see the human's reply, not the
         # new body). Drop the session id, clear the park flags, force a
         # fresh spawn against the new body.
-        gh = FakeGitHubClient()
-        issue = make_issue(
-            DECOMPOSING_DRIFT_ISSUE_NUMBER,
-            label=LABEL_DECOMPOSING,
-            body="updated decomposition input",
-        )
-        # A pre-existing human comment so the resume path would otherwise
-        # consume it; we want to verify the hash branch wins.
-        issue.comments.append(FakeComment(
-            id=HUMAN_COMMENT_ID,
-            body="please reconsider",
-            user=FakeUser("alice"),
-        ))
-        gh.add_issue(issue)
-        gh.seed_state(
-            DECOMPOSING_DRIFT_ISSUE_NUMBER,
-            user_content_hash=STALE_USER_CONTENT_HASH,
-            decomposer_agent="claude",
-            decomposer_session_id="old-sess",
-            awaiting_human=True,
-            park_reason=None,
-            last_action_comment_id=LAST_ACTION_COMMENT_ID,
-            pickup_comment_id=PICKUP_COMMENT_ID,
-        )
+        gh, issue = _decomposing_drift_fixture()
 
         mocks = self._run(
             lambda: workflow._handle_decomposing(gh, _TEST_SPEC, issue),
             run_agent=_agent(
                 session_id="new-sess",
                 last_message=(
-                    "fits one\n\n```orchestrator-manifest\n"
-                    '{"decision": "single", "rationale": "small"}\n'
-                    "```"
+                    'fits one\n\n```orchestrator-manifest\n{"decision": "single", "rationale": "small"}\n```'
                 ),
             ),
             has_new_commits=False,
@@ -185,14 +234,15 @@ class DecomposingHashChangeResetsSessionTest(
         # stale one.
         self.assertEqual(state.get("decomposer_session_id"), "new-sess")
         # Notice posted.
-        self.assertTrue(any(
-            "issue content changed" in body
-            for _, body in gh.posted_comments
-        ))
+        self.assertIn(
+            "issue content changed",
+            "\n".join(_comments_for_issue(gh, DECOMPOSING_DRIFT_ISSUE_NUMBER)),
+        )
 
 
 class HandleBlockedHashDriftTest(
-    unittest.TestCase, _PatchedWorkflowMixin,
+    unittest.TestCase,
+    _PatchedWorkflowMixin,
 ):
     """Reviewer point 2: `blocked` must route back to `decomposing` per
     the spec so a later `_handle_ready` does not skip the re-decomposer
@@ -200,24 +250,7 @@ class HandleBlockedHashDriftTest(
     listed as orphans) and child (no orphans) cases route."""
 
     def test_parent_with_children_routes_back(self) -> None:
-        gh = FakeGitHubClient()
-        parent = make_issue(
-            BLOCKED_PARENT_NUMBER,
-            label="blocked",
-            body="updated parent body",
-        )
-        gh.add_issue(parent)
-        # An in-flight child -- routing the parent orphans it on the
-        # GitHub side; the notice must call this out so the operator can
-        # close any obsolete children manually.
-        child = make_issue(BLOCKED_PARENT_CHILD_NUMBER, label="implementing")
-        gh.add_issue(child)
-        gh.seed_state(
-            BLOCKED_PARENT_NUMBER,
-            children=[BLOCKED_PARENT_CHILD_NUMBER],
-            decomposer_session_id="old-sess",
-            user_content_hash=STALE_USER_CONTENT_HASH,
-        )
+        gh, parent = _blocked_parent_drift_fixture()
 
         self._run(
             lambda: workflow._handle_blocked(gh, _TEST_SPEC, parent),
@@ -242,9 +275,10 @@ class HandleBlockedHashDriftTest(
         )
         # Notice explicitly lists the now-orphaned child so the operator
         # knows to close it manually if it no longer applies.
-        notice = next(
-            body for _, body in gh.posted_comments
-            if "re-running decomposer" in body
+        notice = _comment_with_marker(
+            gh,
+            BLOCKED_PARENT_NUMBER,
+            "re-running decomposer",
         )
         self.assertIn("#301", notice)
         self.assertIn("ORPHANED", notice)
@@ -283,15 +317,17 @@ class HandleBlockedHashDriftTest(
             STALE_USER_CONTENT_HASH,
         )
         # Notice posted; no orphans for a child with no own children.
-        notice = next(
-            body for _, body in gh.posted_comments
-            if "re-running decomposer" in body
+        notice = _comment_with_marker(
+            gh,
+            BLOCKED_CHILD_NUMBER,
+            "re-running decomposer",
         )
         self.assertNotIn("ORPHANED", notice)
 
 
 class HandleUmbrellaHashDriftTest(
-    unittest.TestCase, _PatchedWorkflowMixin,
+    unittest.TestCase,
+    _PatchedWorkflowMixin,
 ):
     """Reviewer point 2: `umbrella` parents never enter implementation,
     so a body edit cannot be picked up by any later stage's drift check.
@@ -302,26 +338,7 @@ class HandleUmbrellaHashDriftTest(
     def test_edited_umbrella_routes_back_before_close(
         self,
     ) -> None:
-        gh = FakeGitHubClient()
-        umbrella = make_issue(
-            UMBRELLA_NUMBER,
-            label="umbrella",
-            body="updated umbrella body",
-        )
-        gh.add_issue(umbrella)
-        # Children all done -- without the drift route, the umbrella
-        # would close to `done` against the stale manifest on this
-        # very tick.
-        first_child = make_issue(UMBRELLA_CHILD_NUMBERS[0], label=LABEL_DONE)
-        second_child = make_issue(UMBRELLA_CHILD_NUMBERS[1], label=LABEL_DONE)
-        gh.add_issue(first_child)
-        gh.add_issue(second_child)
-        gh.seed_state(
-            UMBRELLA_NUMBER,
-            children=list(UMBRELLA_CHILD_NUMBERS),
-            umbrella=True,
-            user_content_hash=STALE_USER_CONTENT_HASH,
-        )
+        gh, umbrella = _umbrella_drift_fixture()
 
         self._run(
             lambda: workflow._handle_umbrella(gh, _TEST_SPEC, umbrella),
@@ -339,16 +356,19 @@ class HandleUmbrellaHashDriftTest(
         self.assertFalse(umbrella.closed)
         # Manifest state cleared so half-finished-recovery does not fire
         # against the stale children list / umbrella flag.
-        self.assertEqual(state.get("children"), [])
-        self.assertIsNone(state.get("umbrella"))
+        self.assertEqual(
+            (state.get("children"), state.get("umbrella")),
+            ([], None),
+        )
         self.assertNotEqual(
             state.get(KEY_USER_CONTENT_HASH),
             STALE_USER_CONTENT_HASH,
         )
         # Orphans listed in the notice.
-        notice = next(
-            body for _, body in gh.posted_comments
-            if "re-running decomposer" in body
+        notice = _comment_with_marker(
+            gh,
+            UMBRELLA_NUMBER,
+            "re-running decomposer",
         )
         self.assertIn("#401", notice)
         self.assertIn("#402", notice)

@@ -6,6 +6,7 @@ import unittest
 
 from orchestrator import workflow
 
+from tests.decomposition_test_support import _comment_with_marker
 from tests.fakes import (
     FakeGitHubClient,
     make_issue,
@@ -23,8 +24,47 @@ RECOVERY_PARENT_NUMBER = 1100
 RECOVERY_CHILD_NUMBER = 1101
 
 
+def _ready_drift_fixture():
+    github = FakeGitHubClient()
+    parent = make_issue(
+        READY_DRIFT_PARENT_NUMBER,
+        label="ready",
+        body="updated parent body",
+    )
+    github.add_issue(parent)
+    github.seed_state(
+        READY_DRIFT_PARENT_NUMBER,
+        user_content_hash=STALE_USER_CONTENT_HASH,
+        children=list(READY_DRIFT_CHILD_NUMBERS),
+        dep_graph={"1": [0]},
+        expected_children_count=2,
+        pickup_comment_id=100,
+    )
+    return github, parent
+
+
+def _recovery_drift_fixture():
+    github = FakeGitHubClient()
+    parent = make_issue(
+        RECOVERY_PARENT_NUMBER,
+        label="decomposing",
+        body="updated body",
+    )
+    github.add_issue(parent)
+    github.add_issue(make_issue(RECOVERY_CHILD_NUMBER, label="blocked"))
+    github.seed_state(
+        RECOVERY_PARENT_NUMBER,
+        user_content_hash=STALE_USER_CONTENT_HASH,
+        children=[RECOVERY_CHILD_NUMBER],
+        expected_children_count=1,
+        decomposer_session_id="old-sess",
+    )
+    return github, parent
+
+
 class ReadyDriftClearsStaleManifestStateTest(
-    unittest.TestCase, _PatchedWorkflowMixin,
+    unittest.TestCase,
+    _PatchedWorkflowMixin,
 ):
     """Reviewer point 1: a non-umbrella parent reaches `ready` after all
     its children finish (`_handle_blocked`'s all-done branch flips
@@ -35,24 +75,7 @@ class ReadyDriftClearsStaleManifestStateTest(
     flip back to `blocked` WITHOUT re-running the decomposer."""
 
     def test_drift_clears_and_orphans_children(self) -> None:
-        gh = FakeGitHubClient()
-        parent = make_issue(
-            READY_DRIFT_PARENT_NUMBER,
-            label="ready",
-            body="updated parent body",
-        )
-        gh.add_issue(parent)
-        gh.seed_state(
-            READY_DRIFT_PARENT_NUMBER,
-            user_content_hash=STALE_USER_CONTENT_HASH,
-            # Children list survived from blocked->ready transition; the
-            # children are all in `done` (which is how the parent
-            # reached `ready` in the first place).
-            children=list(READY_DRIFT_CHILD_NUMBERS),
-            dep_graph={"1": [0]},
-            expected_children_count=2,
-            pickup_comment_id=100,
-        )
+        gh, parent = _ready_drift_fixture()
 
         self._run(
             lambda: workflow._handle_ready(gh, _TEST_SPEC, parent),
@@ -77,9 +100,10 @@ class ReadyDriftClearsStaleManifestStateTest(
         )
         # Orphaned children listed in the notice so the operator can
         # close any that no longer apply.
-        notice = next(
-            body for _, body in gh.posted_comments
-            if "re-running decomposer" in body
+        notice = _comment_with_marker(
+            gh,
+            READY_DRIFT_PARENT_NUMBER,
+            "re-running decomposer",
         )
         self.assertIn("#801", notice)
         self.assertIn("#802", notice)
@@ -87,7 +111,8 @@ class ReadyDriftClearsStaleManifestStateTest(
 
 
 class DriftBeforeHalfFinishedRecoveryTest(
-    unittest.TestCase, _PatchedWorkflowMixin,
+    unittest.TestCase,
+    _PatchedWorkflowMixin,
 ):
     """Reviewer point 2: `_handle_decomposing` checks half-finished
     recovery before user-content drift. If the issue was edited while
@@ -104,33 +129,14 @@ class DriftBeforeHalfFinishedRecoveryTest(
         # child creation and the parent label flip), but the human has
         # since edited the body. Without the fix, the recovery branch
         # would finalize to `blocked` against the stale manifest.
-        gh = FakeGitHubClient()
-        parent = make_issue(
-            RECOVERY_PARENT_NUMBER,
-            label="decomposing",
-            body="updated body",
-        )
-        gh.add_issue(parent)
-        # A real child issue so the orphan listing has something to
-        # reference.
-        child = make_issue(RECOVERY_CHILD_NUMBER, label="blocked")
-        gh.add_issue(child)
-        gh.seed_state(
-            RECOVERY_PARENT_NUMBER,
-            user_content_hash=STALE_USER_CONTENT_HASH,
-            children=[RECOVERY_CHILD_NUMBER],
-            expected_children_count=1,
-            decomposer_session_id="old-sess",
-        )
+        gh, parent = _recovery_drift_fixture()
 
         mocks = self._run(
             lambda: workflow._handle_decomposing(gh, _TEST_SPEC, parent),
             run_agent=_agent(
                 session_id="new-sess",
                 last_message=(
-                    "fits one\n\n```orchestrator-manifest\n"
-                    '{"decision": "single", "rationale": "small"}\n'
-                    "```"
+                    'fits one\n\n```orchestrator-manifest\n{"decision": "single", "rationale": "small"}\n```'
                 ),
             ),
             has_new_commits=False,
@@ -161,9 +167,10 @@ class DriftBeforeHalfFinishedRecoveryTest(
             gh.label_history,
         )
         # Orphans listed in the notice.
-        notice = next(
-            body for _, body in gh.posted_comments
-            if "re-running decomposer" in body
+        notice = _comment_with_marker(
+            gh,
+            RECOVERY_PARENT_NUMBER,
+            "re-running decomposer",
         )
         self.assertIn("#1101", notice)
         self.assertIn("ORPHANED", notice)

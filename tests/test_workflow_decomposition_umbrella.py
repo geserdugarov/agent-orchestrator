@@ -8,6 +8,11 @@ from unittest.mock import patch
 
 from orchestrator import workflow
 
+from tests.decomposition_test_support import (
+    _comments_for_issue,
+    _labels_for_issue,
+    _run_with_logs,
+)
 from tests.fakes import (
     FakeGitHubClient,
     FakeIssue,
@@ -39,6 +44,16 @@ NO_HELD_CHILDREN_PARENT_NUMBER = 67
 MISSING_CHILDREN_PARENT_NUMBER = 66
 
 
+def _make_umbrella_children(
+    parent_number: int,
+    child_labels: list[Optional[str]],
+) -> list[FakeIssue]:
+    return [
+        make_issue(parent_number * 10 + child_offset, label=label)
+        for child_offset, label in enumerate(child_labels, start=1)
+    ]
+
+
 def _seed_umbrella_with_children(
     *,
     parent_number: int,
@@ -49,21 +64,17 @@ def _seed_umbrella_with_children(
     gh = FakeGitHubClient()
     parent = make_issue(parent_number, label=UMBRELLA)
     gh.add_issue(parent)
-    children = [
-        make_issue(parent_number * 10 + index + 1, label=label)
-        for index, label in enumerate(child_labels)
-    ]
-    seed = {
-        "children": [seeded_child.number for seeded_child in children],
-        UMBRELLA: True,
-    }
+    children = _make_umbrella_children(parent_number, child_labels)
     for child in children:
         gh.add_issue(child)
-    if dep_graph is not None:
-        seed["dep_graph"] = dep_graph
-    seed.update(extra_state)
-    gh.seed_state(parent_number, **seed)
-    return gh, parent, children
+    gh.seed_state(
+        parent_number,
+        children=[seeded_child.number for seeded_child in children],
+        umbrella=True,
+        **({} if dep_graph is None else {"dep_graph": dep_graph}),
+        **extra_state,
+    )
+    return gh, parent, children.copy()
 
 
 def _run_umbrella(
@@ -77,6 +88,45 @@ def _run_umbrella(
     )
 
 
+def _dispatch_umbrella(
+    gh: FakeGitHubClient,
+    issue: FakeIssue,
+):
+    with patch.object(workflow, "_handle_umbrella") as umbrella_handler:
+        workflow._process_issue(gh, _TEST_SPEC, issue)
+        return umbrella_handler
+
+
+def _manual_closed_umbrella_fixture():
+    github = FakeGitHubClient()
+    parent = make_issue(MANUALLY_CLOSED_PARENT_NUMBER, label=UMBRELLA)
+    github.add_issue(parent)
+    done_child = make_issue(
+        MANUALLY_CLOSED_DONE_CHILD_NUMBER,
+        label=LABEL_DONE,
+    )
+    done_child.closed = True
+    github.add_issue(done_child)
+    closed_child = make_issue(
+        MANUALLY_CLOSED_CHILD_NUMBER,
+        label=LABEL_IMPLEMENTING,
+    )
+    closed_child.closed = True
+    github.add_issue(closed_child)
+    github.seed_state(
+        MANUALLY_CLOSED_PARENT_NUMBER,
+        children=[
+            MANUALLY_CLOSED_DONE_CHILD_NUMBER,
+            MANUALLY_CLOSED_CHILD_NUMBER,
+        ],
+        umbrella=True,
+    )
+    return github, parent
+
+
+_run_child_state = _run_umbrella
+
+
 class HandleUmbrellaResolutionTest(unittest.TestCase, _PatchedWorkflowMixin):
     """Umbrella parents close only after every child resolves."""
 
@@ -85,9 +135,7 @@ class HandleUmbrellaResolutionTest(unittest.TestCase, _PatchedWorkflowMixin):
         issue = make_issue(DISPATCH_ISSUE_NUMBER, label=UMBRELLA)
         gh.add_issue(issue)
 
-        with patch.object(workflow, "_handle_umbrella") as umbrella_handler:
-            workflow._process_issue(gh, _TEST_SPEC, issue)
-
+        umbrella_handler = _dispatch_umbrella(gh, issue)
         umbrella_handler.assert_called_once_with(gh, _TEST_SPEC, issue)
 
     def test_all_children_done_closes_as_done(self) -> None:
@@ -111,11 +159,13 @@ class HandleUmbrellaResolutionTest(unittest.TestCase, _PatchedWorkflowMixin):
             "umbrella_resolved_at",
             gh.pinned_data(ALL_DONE_PARENT_NUMBER),
         )
-        self.assertTrue(any(
-            "all children resolved" in body and "closing umbrella" in body
-            for issue_number, body in gh.posted_comments
-            if issue_number == ALL_DONE_PARENT_NUMBER
-        ))
+        self.assertTrue(
+            any(
+                "all children resolved" in body and "closing umbrella" in body
+                for issue_number, body in gh.posted_comments
+                if issue_number == ALL_DONE_PARENT_NUMBER
+            )
+        )
 
     def test_close_comment_appends_usage_verdict(self) -> None:
         # The decomposer runs accrue on the umbrella parent, so its close
@@ -132,11 +182,7 @@ class HandleUmbrellaResolutionTest(unittest.TestCase, _PatchedWorkflowMixin):
 
         _run_umbrella(self, gh, parent)
 
-        close_comments = [
-            body
-            for issue_number, body in gh.posted_comments
-            if issue_number == USAGE_PARENT_NUMBER and "closing umbrella" in body
-        ]
+        close_comments = [body for body in _comments_for_issue(gh, USAGE_PARENT_NUMBER) if "closing umbrella" in body]
         self.assertEqual(len(close_comments), 1)
         body = close_comments[0]
         self.assertIn("all children resolved", body)
@@ -156,10 +202,7 @@ class HandleUmbrellaResolutionTest(unittest.TestCase, _PatchedWorkflowMixin):
         _run_umbrella(self, gh, parent)
 
         close_comments = [
-            body
-            for issue_number, body in gh.posted_comments
-            if issue_number == NO_USAGE_PARENT_NUMBER
-            and "closing umbrella" in body
+            body for body in _comments_for_issue(gh, NO_USAGE_PARENT_NUMBER) if "closing umbrella" in body
         ]
         self.assertEqual(len(close_comments), 1)
         self.assertNotIn(":receipt:", close_comments[0])
@@ -178,11 +221,7 @@ class HandleUmbrellaResolutionTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
         self.assertFalse(parent.closed)
         self.assertEqual(
-            [
-                body
-                for issue_number, body in gh.posted_comments
-                if issue_number == IN_PROGRESS_PARENT_NUMBER
-            ],
+            [body for issue_number, body in gh.posted_comments if issue_number == IN_PROGRESS_PARENT_NUMBER],
             [],
         )
 
@@ -196,10 +235,9 @@ class HandleUmbrellaChildStateTest(unittest.TestCase, _PatchedWorkflowMixin):
             child_labels=[LABEL_DONE, "rejected"],
         )
 
-        _run_umbrella(self, gh, parent)
+        _run_child_state(self, gh, parent)
 
-        state = gh.pinned_data(REJECTED_CHILD_PARENT_NUMBER)
-        self.assertTrue(state.get("awaiting_human"))
+        self.assertTrue(gh.pinned_data(REJECTED_CHILD_PARENT_NUMBER).get("awaiting_human"))
         self.assertNotIn(
             (REJECTED_CHILD_PARENT_NUMBER, LABEL_DONE),
             gh.label_history,
@@ -210,34 +248,11 @@ class HandleUmbrellaChildStateTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertIn(f"#{children[1].number}", last_comment)
 
     def test_manually_closed_child_parks_umbrella(self) -> None:
-        gh = FakeGitHubClient()
-        parent = make_issue(MANUALLY_CLOSED_PARENT_NUMBER, label=UMBRELLA)
-        gh.add_issue(parent)
-        done_child = make_issue(
-            MANUALLY_CLOSED_DONE_CHILD_NUMBER,
-            label=LABEL_DONE,
-        )
-        done_child.closed = True
-        gh.add_issue(done_child)
-        closed_child = make_issue(
-            MANUALLY_CLOSED_CHILD_NUMBER,
-            label=LABEL_IMPLEMENTING,
-        )
-        closed_child.closed = True
-        gh.add_issue(closed_child)
-        gh.seed_state(
-            MANUALLY_CLOSED_PARENT_NUMBER,
-            children=[
-                MANUALLY_CLOSED_DONE_CHILD_NUMBER,
-                MANUALLY_CLOSED_CHILD_NUMBER,
-            ],
-            umbrella=True,
-        )
+        gh, parent = _manual_closed_umbrella_fixture()
 
-        _run_umbrella(self, gh, parent)
+        _run_child_state(self, gh, parent)
 
-        state = gh.pinned_data(MANUALLY_CLOSED_PARENT_NUMBER)
-        self.assertTrue(state.get("awaiting_human"))
+        self.assertTrue(gh.pinned_data(MANUALLY_CLOSED_PARENT_NUMBER).get("awaiting_human"))
         self.assertNotIn(
             (MANUALLY_CLOSED_PARENT_NUMBER, LABEL_DONE),
             gh.label_history,
@@ -257,13 +272,12 @@ class HandleUmbrellaChildStateTest(unittest.TestCase, _PatchedWorkflowMixin):
             dep_graph={"1": [0]},
         )
 
-        _run_umbrella(self, gh, parent)
+        _run_child_state(self, gh, parent)
 
-        flipped = [
-            new for issue_n, new in gh.label_history
-            if issue_n == children[1].number
-        ]
-        self.assertEqual(flipped, ["ready"])
+        self.assertEqual(
+            _labels_for_issue(gh, children[1].number),
+            ["ready"],
+        )
         self.assertNotIn(
             (DEPENDENCY_PARENT_NUMBER, LABEL_DONE),
             gh.label_history,
@@ -283,17 +297,21 @@ class HandleUmbrellaChildStateTest(unittest.TestCase, _PatchedWorkflowMixin):
             dep_graph={"1": [0]},
         )
 
-        with self.assertLogs("orchestrator.workflow", level="INFO") as cm:
-            _run_umbrella(self, gh, parent)
+        log_lines = _run_with_logs(
+            self,
+            "orchestrator.workflow",
+            "INFO",
+            lambda: _run_child_state(self, gh, parent),
+        )
 
         self.assertTrue(
             any(
                 "umbrella parent" in line
                 and "1 held" in line
                 and f"#{children[1].number} waits on #{children[0].number}" in line
-                for line in cm.output
+                for line in log_lines
             ),
-            cm.output,
+            log_lines,
         )
         self.assertNotIn((children[1].number, "ready"), gh.label_history)
         self.assertFalse(parent.closed)
@@ -308,7 +326,7 @@ class HandleUmbrellaChildStateTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
 
         with self.assertNoLogs("orchestrator.workflow", level="INFO"):
-            _run_umbrella(self, gh, parent)
+            _run_child_state(self, gh, parent)
 
     def test_umbrella_with_no_recorded_children_parks(self) -> None:
         gh = FakeGitHubClient()
@@ -316,7 +334,7 @@ class HandleUmbrellaChildStateTest(unittest.TestCase, _PatchedWorkflowMixin):
         gh.add_issue(parent)
         gh.seed_state(MISSING_CHILDREN_PARENT_NUMBER, umbrella=True)
 
-        _run_umbrella(self, gh, parent)
+        _run_child_state(self, gh, parent)
 
         state = gh.pinned_data(MISSING_CHILDREN_PARENT_NUMBER)
         self.assertTrue(state.get("awaiting_human"))

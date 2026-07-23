@@ -86,9 +86,7 @@ class HandleReadyTest(unittest.TestCase, _PatchedWorkflowMixin):
         # The "picking this up; starting implementation" comment was NOT
         # re-posted. (`_on_commits` still posts a `:sparkles:` comment.)
         new_comments = gh.posted_comments[before:]
-        self.assertFalse(any(
-            "picking this up" in body for _, body in new_comments
-        ))
+        self.assertFalse(any("picking this up" in body for _, body in new_comments))
 
     def test_marks_prior_comments_consumed(self) -> None:
         # A parent that came through `decomposing` -> `blocked` ->
@@ -106,11 +104,13 @@ class HandleReadyTest(unittest.TestCase, _PatchedWorkflowMixin):
         issue = make_issue(COMMENT_WATERMARK_ISSUE_NUMBER, label=LABEL_READY)
         # Decomposing-era human comment -- id well above the original
         # pickup comment id.
-        issue.comments.append(FakeComment(
-            id=HUMAN_COMMENT_ID,
-            body="please use snake_case",
-            user=FakeUser("alice"),
-        ))
+        issue.comments.append(
+            FakeComment(
+                id=HUMAN_COMMENT_ID,
+                body="please use snake_case",
+                user=FakeUser("alice"),
+            )
+        )
         gh.add_issue(issue)
         gh.seed_state(
             COMMENT_WATERMARK_ISSUE_NUMBER,
@@ -132,8 +132,7 @@ class HandleReadyTest(unittest.TestCase, _PatchedWorkflowMixin):
         last_action = state.get("last_action_comment_id")
         self.assertIsNotNone(
             last_action,
-            "last_action_comment_id must be set so the in_review "
-            "handoff treats decomposing-era comments as consumed",
+            "last_action_comment_id must be set so the in_review handoff treats decomposing-era comments as consumed",
         )
         self.assertGreaterEqual(int(last_action), HUMAN_COMMENT_ID)
 
