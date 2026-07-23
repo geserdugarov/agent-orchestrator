@@ -38,6 +38,3 @@ line-length = 120
 # E501 (line too long) is not in Ruff's default rule set; opt into it so
 # the line-length target above is actually enforced.
 extend-select = ["E501"]
-# `l` is used pervasively as a loop variable over GitHub labels; banning it
-# would force noise-only renames across the codebase.
-ignore = ["E741"]
