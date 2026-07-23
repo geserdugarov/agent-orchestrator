@@ -148,7 +148,7 @@ direct-launch command remain covered by tests.
 | Stage | Goal | Findings owned | Packages complete | Status |
 |---|---|---:|---:|---:|
 | 1 | Production cleanup | 223 | 3/3 | [x] |
-| 2 | Test cleanup | 1,350 | 0/7 | [ ] |
+| 2 | Test cleanup | 1,350 | 2/7 | [ ] |
 | 3 | Final zero-finding validation | 0 | 0/1 | [ ] |
 
 Package counts are ownership counts from the baseline scan. Refactoring can move line numbers or expose a new finding,
@@ -245,28 +245,32 @@ For every package, record collected test and subtest counts before editing and a
 Baseline: `WPS110` 1, `WPS201` 3, `WPS202` 6, `WPS204` 41, `WPS210` 35, `WPS211` 10, `WPS213` 12,
 `WPS214` 19, `WPS226` 70, `WPS230` 1, `WPS301` 2, `WPS358` 43, and `WPS432` 231.
 
-- [ ] Split large files and classes by analytics read family, persistence path, dashboard component, chart family, and
+- [x] Split large files and classes by analytics read family, persistence path, dashboard component, chart family, and
   trajectory view.
-- [ ] Build typed row/event/chart cases that replace positional payload construction, 231 magic numbers, 43 float
+- [x] Build typed row/event/chart cases that replace positional payload construction, 231 magic numbers, 43 float
   zeros, and 70 repeated protocol/rendering strings.
-- [ ] Extract only shared setup and projection steps needed to clear local/expression/argument findings while leaving
+- [x] Extract only shared setup and projection steps needed to clear local/expression/argument findings while leaving
   expected rows, traces, HTML, and usage totals visible.
-- [ ] Replace the reload idiom's dotted imports with a module-level reload helper that restores `sys.modules` and
+- [x] Replace the reload idiom's dotted imports with a module-level reload helper that restores `sys.modules` and
   package attributes.
-- [ ] Replace the external-API test-double name through a compatibility-signature fake.
-- [ ] Reduce all 474 findings to zero without dropping an analytics/dashboard/trajectory scenario.
+- [x] Replace the external-API test-double name through a compatibility-signature fake.
+- [x] Reduce all 474 findings to zero without dropping an analytics/dashboard/trajectory scenario.
+
+Test accounting: 2,231 collected tests and 1,523 subtests before and after the package.
 
 ### Package 2.2 — Agent, usage, main, and configuration tests (161 findings, 4 files)
 
 Baseline: `WPS201` 2, `WPS202` 3, `WPS204` 14, `WPS210` 9, `WPS211` 1, `WPS213` 4, `WPS214` 11,
 `WPS226` 29, `WPS235` 2, and `WPS432` 86.
 
-- [ ] Split tests by provider, parser event, process lifecycle, repository configuration, and error behavior.
-- [ ] Represent Claude/Codex wire payloads, pricing inputs, token totals, exit statuses, timeouts, and signals with
+- [x] Split tests by provider, parser event, process lifecycle, repository configuration, and error behavior.
+- [x] Represent Claude/Codex wire payloads, pricing inputs, token totals, exit statuses, timeouts, and signals with
   focused case models and protocol fixture builders.
-- [ ] Replace repeated reload/dispatch expressions with named entry-point helpers that preserve environment isolation.
-- [ ] Split oversized classes and reduce helper arguments/locals without merging distinct malformed-payload cases.
-- [ ] Reduce all 161 findings to zero while preserving provider-envelope and subprocess-cleanup coverage.
+- [x] Replace repeated reload/dispatch expressions with named entry-point helpers that preserve environment isolation.
+- [x] Split oversized classes and reduce helper arguments/locals without merging distinct malformed-payload cases.
+- [x] Reduce all 161 findings to zero while preserving provider-envelope and subprocess-cleanup coverage.
+
+Test accounting: 275 collected tests and 55 subtests before and after the package.
 
 ### Package 2.3 — Scheduler, base-sync, publication, and worktree tests (116 findings, 8 files)
 

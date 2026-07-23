@@ -1,0 +1,40 @@
+# Copyright 2026 Geser Dugarov
+# SPDX-License-Identifier: Apache-2.0
+"""Protocol and environment values shared by configuration tests."""
+
+_CONFIG_MODULE = "orchestrator.config"
+_SKIP_DOTENV_ENV = "ORCHESTRATOR_SKIP_DOTENV"
+_TOKEN_FILE_ENV = "ORCHESTRATOR_TOKEN_FILE"
+_MISSING_TOKEN_PATH = "/tmp/agent-orchestrator-token-missing"
+_ENABLED_ENV = "1"
+_DISABLED_ENV = "0"
+_ALICE = "alice"
+_BOB = "bob"
+_CLAUDE = "claude"
+_CODEX = "codex"
+_INVALID_AGENT = "gemini"
+_DEV_AGENT_ENV = "DEV_AGENT"
+_REVIEW_AGENT_ENV = "REVIEW_AGENT"
+_DECOMPOSE_AGENT_ENV = "DECOMPOSE_AGENT"
+_DECOMPOSE_ENV = "DECOMPOSE"
+_EXPOSE_REPOS_ENV = "EXPOSE_TRACKED_REPOS"
+_OFF = "off"
+_MODEL_FLAG = "-m"
+_REPOS_ENV = "REPOS"
+_LEGACY_REPO = "owner/legacy"
+_LEGACY_ROOT = "/tmp"
+_LEGACY_BRANCH = "trunk"
+_ALPHA_REPO = "alpha/one"
+_BETA_REPO = "beta/two"
+_ORIGIN_REMOTE = "origin"
+_PRIVATE_REMOTE = "private"
+_PER_REPO_LIMIT_ENV = "MAX_PARALLEL_ISSUES_PER_REPO"
+_GLOBAL_LIMIT_ENV = "MAX_PARALLEL_ISSUES_GLOBAL"
+_PARALLEL_LIMIT_FIELD = "parallel_limit"
+_DEFAULT_DEBOUNCE_SECONDS = 600
+_OVERRIDE_DEBOUNCE_SECONDS = 120
+_DOTENV_OWNED_KEYS = (
+    _DEV_AGENT_ENV,
+    _REVIEW_AGENT_ENV,
+    _DECOMPOSE_AGENT_ENV,
+)

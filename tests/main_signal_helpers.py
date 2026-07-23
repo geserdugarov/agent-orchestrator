@@ -1,6 +1,7 @@
 # Copyright 2026 Geser Dugarov
 # SPDX-License-Identifier: Apache-2.0
 """Signal and shutdown probes for polling-loop tests."""
+
 from __future__ import annotations
 
 import threading

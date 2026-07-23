@@ -1,19 +1,21 @@
 # Copyright 2026 Geser Dugarov
 # SPDX-License-Identifier: Apache-2.0
-"""Shared fakes for the polling-loop entry-point tests (`test_main.py`).
+"""Shared fakes for the polling-loop entry-point tests.
 
 The recorders stand in for the two collaborators `main.main` / `main._run_tick`
 call out to -- the `GitHubClient` constructor and `workflow.tick` -- so a test
 can drive the loop and then assert on what it dispatched. They live here so
 `test_main.py` stays a set of test classes rather than test-plus-fixtures.
 """
+
 from __future__ import annotations
 
 import threading
 from pathlib import Path
 from types import MappingProxyType
-from unittest.mock import MagicMock
+from unittest import mock
 
+from tests import main_reload_helpers as _reload_helpers
 from tests import main_scheduler_helpers as _scheduler_helpers
 from tests import main_signal_helpers as _signal_helpers
 
@@ -28,11 +30,13 @@ _TICK_ATTR = "tick"
 _SHUTDOWN_GRACE_ATTR = "SHUTDOWN_GRACE_SECONDS"
 _COUNT_FIELD = "n"
 _ONCE_ARGS = ("--once",)
-_LEGACY_ENV = MappingProxyType({
-    "REPO": _LEGACY_REPO,
-    "TARGET_REPO_ROOT": "/tmp",
-    "BASE_BRANCH": "trunk",
-})
+_LEGACY_ENV = MappingProxyType(
+    {
+        "REPO": _LEGACY_REPO,
+        "TARGET_REPO_ROOT": "/tmp",
+        "BASE_BRANCH": "trunk",
+    }
+)
 _WORKER_WAIT_SECONDS = 5.0
 _FAST_WAIT_SECONDS = 2.0
 _SHORT_SHUTDOWN_GRACE_SECONDS = 0.05
@@ -51,6 +55,7 @@ _SignalSubmitTick = _signal_helpers.SignalSubmitTick
 _MultiRepoSignalTick = _signal_helpers.MultiRepoSignalTick
 _FirstTickShutdown = _signal_helpers.FirstTickShutdown
 _WaitRecorder = _signal_helpers.WaitRecorder
+reload_main = _reload_helpers.reload_main
 
 
 class _ClientFactory:
@@ -60,10 +65,10 @@ class _ClientFactory:
     """
 
     def __init__(self) -> None:
-        self.by_slug: dict[str, MagicMock] = {}
+        self.by_slug: dict[str, mock.MagicMock] = {}
 
     def __call__(self, *, repo_spec):
-        client = MagicMock()
+        client = mock.MagicMock()
         client.slug = repo_spec.slug
         self.by_slug[repo_spec.slug] = client
         return client
@@ -112,6 +117,7 @@ def _build_clients(slugs):
     `ensure_workflow_labels`, so the mock surface is intentionally minimal.
     """
     from orchestrator.config import RepoSpec
+
     clients = []
     for slug in slugs:
         spec = RepoSpec(
@@ -119,7 +125,7 @@ def _build_clients(slugs):
             target_root=Path("/tmp"),
             base_branch="main",
         )
-        gh = MagicMock()
+        gh = mock.MagicMock()
         gh.slug = slug
         clients.append((spec, gh))
     return clients

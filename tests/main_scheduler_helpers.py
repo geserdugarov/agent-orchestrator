@@ -1,10 +1,12 @@
 # Copyright 2026 Geser Dugarov
 # SPDX-License-Identifier: Apache-2.0
 """Scheduler and cross-poll probes for polling-loop tests."""
+
 from __future__ import annotations
 
 import threading
 import time
+from contextlib import contextmanager
 
 
 _ALPHA_REPO = "alpha/one"
@@ -73,6 +75,15 @@ class GlobalCapProbe:
     def finish(self, releaser: threading.Thread) -> None:
         self._release.set()
         releaser.join(timeout=_WORKER_WAIT_SECONDS)
+
+    @contextmanager
+    def releasing(self):
+        releaser = threading.Thread(target=self.release_when_two_admitted)
+        releaser.start()
+        try:
+            yield
+        finally:
+            self.finish(releaser)
 
 
 class CrossPollProbe:
