@@ -8,7 +8,7 @@ from types import ModuleType
 from typing import Any
 
 _EXPORTED_NAMES = ("__version__",)
-_PACKAGE_VERSION = "0.7.0"
+_PACKAGE_VERSION = "0.8.0"
 
 
 def _package_module() -> ModuleType:
