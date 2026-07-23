@@ -655,7 +655,9 @@ repos / tool calls / total cost, the last summed from `summarize`'s `total_cost_
 overview table (capped at the 200 most recent; collapse the expander to focus on a single run), three cascading run
 pickers (repo → issue → the run's `detail_label` cohort — stage/role · backend · round · timestamp) that
 together still reach every match, and a per-run detail card that lists the offered tools and triggered / available
-skills, a run-level usage / cost row (model(s), token buckets, turn count, and the authoritative run cost tagged with
+skills — the triggered-skills row always renders, marked `none` when no skill fired so a run that used no skill is
+distinguishable from an omitted row, while the offered-tools and available-skills rows are dropped when empty — a
+run-level usage / cost row (model(s), token buckets, turn count, and the authoritative run cost tagged with
 its `cost_source` — the codex surface too), then walks the run's normalised `timeline` as one ordered sequence — the
 redacted prompt, then the interleaved assistant / user text turns and tool calls / results (each rendered by its
 `kind`), then the final output (rendered as markdown; every other entry is shown verbatim in a code block). For a claude
