@@ -102,8 +102,9 @@ Two GitHub-side controls combine to enforce this:
 
 Mark these checks **required** in the branch-protection rule (job names as they appear on the PR):
 
-- `ci` from [`../.github/workflows/ci.yml`](../.github/workflows/ci.yml) — `ruff check` + `pytest` on Python 3.12,
-  installed from [`../uv.lock`](../uv.lock).
+- `ci` from [`../.github/workflows/ci.yml`](../.github/workflows/ci.yml) — Ruff, WPS
+  (`flake8 orchestrator tests --select=WPS`), and pytest on Python 3.12, installed from
+  [`../uv.lock`](../uv.lock).
 - `dependency-review` from [`../.github/workflows/dependency-review.yml`](../.github/workflows/dependency-review.yml)
   — fails when a PR introduces a vulnerable or non-compliant dep.
 
@@ -172,7 +173,7 @@ Every PR opened by the orchestrator is AI-generated, so the policy is the workfl
   ([`configuration.md#local-verification-gate`](configuration.md#local-verification-gate)). Set
   `VERIFY_COMMANDS=python3 -m pytest -q;ruff check .` (or your project equivalent) so an AI-produced regression is
   caught locally before the PR is advertised to humans for merge.
-- **CI on every PR.** [`../.github/workflows/ci.yml`](../.github/workflows/ci.yml) re-runs lint + tests;
+- **CI on every PR.** [`../.github/workflows/ci.yml`](../.github/workflows/ci.yml) re-runs Ruff, WPS, and tests;
   [`../.github/workflows/dependency-review.yml`](../.github/workflows/dependency-review.yml) blocks vulnerable /
   non-compliant deps. Mark both **required** in branch protection (see [Required checks](#required-checks)).
 - **Human merge by default.** The orchestrator is permanently manual-merge-only — it pings HITL handles when a PR is

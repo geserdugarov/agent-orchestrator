@@ -24,6 +24,8 @@ Before committing, run each of these and fix what they report:
   - **F541** (f-string without placeholders): use a plain string.
   - **F841** (unused local).
   - **E402** (module-level import not at top of file).
+- `uv run flake8 orchestrator tests --select=WPS` — all WPS naming, complexity, consistency, bug-prevention,
+  refactoring, and OOP rules must pass.
 - `git diff --check origin/main...HEAD` — catches trailing whitespace and stray blank lines at EOF.
 - `.venv/bin/python -m pytest` — full suite must pass. Do not assume any "known" failure is
   acceptable; if a test fails on your branch, first reproduce it on `origin/main` at the same SHA
@@ -122,6 +124,6 @@ explicitly asks you to edit or remove one.
 
 ## Out of scope without explicit ask
 
-- Adding dependencies (`pyproject.toml` pins only PyGithub).
+- Adding dependencies that the current issue did not request.
 - Reformatting unrelated files or churning whitespace.
 - "Future-proofing" abstractions for hypothetical features. Implement what the issue asks for and stop.

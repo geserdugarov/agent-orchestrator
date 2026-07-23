@@ -17,6 +17,8 @@ Reject (or request fixes) if any of these are red:
   - **F541** — f-strings without placeholders, typically in newly-added test files.
   - **F841** — unused local in tests.
   - **E402** — import after non-import code.
+- `uv run flake8 orchestrator tests --select=WPS`. All WPS naming, complexity, consistency, bug-prevention,
+  refactoring, and OOP findings are rejection criteria.
 - `git diff --check origin/main...HEAD` — trailing whitespace and blank lines at EOF. Check it even
   if everything else looks clean.
 - Full `pytest` run is referenced in the PR description and passes end-to-end. Reject "known failure"
@@ -102,6 +104,6 @@ Treat blanket statements like "every helper is re-exported" with suspicion — v
 
 ## Out of scope — push back
 
-- New dependencies (`pyproject.toml` should still pin only PyGithub).
+- Dependencies outside the issue's stated scope.
 - Reformatting of files outside the change's blast radius.
 - Abstractions or generality added for hypothetical future features. The issue's stated scope is the source of truth.
