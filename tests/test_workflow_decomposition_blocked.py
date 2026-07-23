@@ -7,6 +7,11 @@ from typing import Optional
 
 from orchestrator import workflow
 
+from tests.decomposition_test_support import (
+    _comments_for_issue,
+    _labels_for_issue,
+    _run_with_logs,
+)
 from tests.fakes import (
     FakeGitHubClient,
     FakeIssue,
@@ -46,6 +51,22 @@ PREVIOUSLY_PARKED_CHILD_NUMBERS = (381, 382)
 LAST_ACTION_COMMENT_ID = 999
 
 
+def _make_children(
+    parent_number: int,
+    child_labels: list[Optional[str]],
+) -> list[FakeIssue]:
+    return [
+        make_issue(parent_number * 10 + child_offset, label=label)
+        for child_offset, label in enumerate(child_labels, start=1)
+    ]
+
+
+def _dependency_state(dep_graph: Optional[dict]) -> dict:
+    if dep_graph is None:
+        return {}
+    return {"dep_graph": dep_graph}
+
+
 def _seed_parent_with_children(
     *,
     parent_number: int,
@@ -55,20 +76,16 @@ def _seed_parent_with_children(
     gh = FakeGitHubClient()
     parent = make_issue(parent_number, label=LABEL_BLOCKED)
     gh.add_issue(parent)
-    children = [
-        make_issue(parent_number * 10 + index + 1, label=label)
-        for index, label in enumerate(child_labels)
-    ]
-    seed = {
-        "children": [seeded_child.number for seeded_child in children],
-        "decomposer_agent": "claude",
-        "decomposer_session_id": "dec-sess",
-    }
+    children = _make_children(parent_number, child_labels)
     for child in children:
         gh.add_issue(child)
-    if dep_graph is not None:
-        seed["dep_graph"] = dep_graph
-    gh.seed_state(parent_number, **seed)
+    gh.seed_state(
+        parent_number,
+        children=[seeded_child.number for seeded_child in children],
+        decomposer_agent="claude",
+        decomposer_session_id="dec-sess",
+        **_dependency_state(dep_graph),
+    )
     return gh, parent, children
 
 
@@ -83,8 +100,11 @@ def _run_blocked(
     )
 
 
-class HandleBlockedResolutionTest(unittest.TestCase, _PatchedWorkflowMixin):
+_run_dependency = _run_blocked
+_run_recovery = _run_blocked
 
+
+class HandleBlockedResolutionTest(unittest.TestCase, _PatchedWorkflowMixin):
     def test_all_children_done_flips_parent_to_ready(self) -> None:
         gh, parent, children = _seed_parent_with_children(
             parent_number=ALL_DONE_PARENT_NUMBER,
@@ -97,10 +117,10 @@ class HandleBlockedResolutionTest(unittest.TestCase, _PatchedWorkflowMixin):
             (ALL_DONE_PARENT_NUMBER, LABEL_READY),
             gh.label_history,
         )
-        self.assertTrue(any(
-            "all children resolved" in body
-            for _, body in gh.posted_comments
-        ))
+        self.assertIn(
+            "all children resolved",
+            "\n".join(_comments_for_issue(gh, ALL_DONE_PARENT_NUMBER)),
+        )
 
     def test_some_children_in_progress_no_op(self) -> None:
         gh, parent, children = _seed_parent_with_children(
@@ -116,11 +136,7 @@ class HandleBlockedResolutionTest(unittest.TestCase, _PatchedWorkflowMixin):
             gh.label_history,
         )
         self.assertEqual(
-            [
-                body
-                for issue_number, body in gh.posted_comments
-                if issue_number == IN_PROGRESS_PARENT_NUMBER
-            ],
+            [body for issue_number, body in gh.posted_comments if issue_number == IN_PROGRESS_PARENT_NUMBER],
             [],
         )
 
@@ -175,8 +191,7 @@ class HandleBlockedResolutionTest(unittest.TestCase, _PatchedWorkflowMixin):
 
         _run_blocked(self, gh, parent)
 
-        state = gh.pinned_data(MANUALLY_CLOSED_PARENT_NUMBER)
-        self.assertTrue(state.get(KEY_AWAITING_HUMAN))
+        self.assertTrue(gh.pinned_data(MANUALLY_CLOSED_PARENT_NUMBER).get(KEY_AWAITING_HUMAN))
         last_comment = gh.posted_comments[-1][1]
         self.assertIn("closed without reaching", last_comment)
         self.assertIn(f"#{MANUALLY_CLOSED_CHILD_NUMBER}", last_comment)
@@ -232,11 +247,15 @@ class HandleBlockedResolutionTest(unittest.TestCase, _PatchedWorkflowMixin):
             (CLOSED_REVIEW_PARENT_NUMBER, LABEL_READY),
             gh.label_history,
         )
-        self.assertFalse(any(
-            "closed without reaching" in body
-            for issue_number, body in gh.posted_comments
-            if issue_number == CLOSED_REVIEW_PARENT_NUMBER
-        ))
+        self.assertFalse(
+            any(
+                "closed without reaching" in body
+                for body in _comments_for_issue(
+                    gh,
+                    CLOSED_REVIEW_PARENT_NUMBER,
+                )
+            )
+        )
 
     def test_manual_closed_unlabeled_child_parks(self) -> None:
         # Defensive corner: a child with no workflow label at all
@@ -259,11 +278,12 @@ class HandleBlockedResolutionTest(unittest.TestCase, _PatchedWorkflowMixin):
 
         state = gh.pinned_data(UNLABELED_CHILD_PARENT_NUMBER)
         self.assertTrue(state.get(KEY_AWAITING_HUMAN))
-        self.assertTrue(any(
-            "closed without reaching" in body
-            and f"#{UNLABELED_CHILD_NUMBER}" in body
-            for _, body in gh.posted_comments
-        ))
+        self.assertTrue(
+            any(
+                "closed without reaching" in body and f"#{UNLABELED_CHILD_NUMBER}" in body
+                for _, body in gh.posted_comments
+            )
+        )
 
 
 class HandleBlockedDependencyTest(unittest.TestCase, _PatchedWorkflowMixin):
@@ -276,15 +296,14 @@ class HandleBlockedDependencyTest(unittest.TestCase, _PatchedWorkflowMixin):
             dep_graph={"1": [0]},
         )
 
-        _run_blocked(self, gh, parent)
+        _run_dependency(self, gh, parent)
 
         # children[1] flipped to ready by the dep-graph walk; parent
         # stays blocked because children[1] is not yet done.
-        flipped = [
-            new for issue_n, new in gh.label_history
-            if issue_n == children[1].number
-        ]
-        self.assertEqual(flipped, [LABEL_READY])
+        self.assertEqual(
+            _labels_for_issue(gh, children[1].number),
+            [LABEL_READY],
+        )
         self.assertNotIn(
             (DEPENDENCY_PARENT_NUMBER, LABEL_READY),
             gh.label_history,
@@ -302,17 +321,21 @@ class HandleBlockedDependencyTest(unittest.TestCase, _PatchedWorkflowMixin):
             dep_graph={"1": [0]},
         )
 
-        with self.assertLogs("orchestrator.workflow", level="INFO") as cm:
-            _run_blocked(self, gh, parent)
+        log_lines = _run_with_logs(
+            self,
+            "orchestrator.workflow",
+            "INFO",
+            lambda: _run_dependency(self, gh, parent),
+        )
 
         self.assertTrue(
             any(
                 "blocked parent" in line
                 and "1 held" in line
                 and f"#{children[1].number} waits on #{children[0].number}" in line
-                for line in cm.output
+                for line in log_lines
             ),
-            cm.output,
+            log_lines,
         )
         # Held means genuinely still gated -- no relabel to `ready`.
         self.assertNotIn(
@@ -330,7 +353,7 @@ class HandleBlockedDependencyTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
 
         with self.assertNoLogs("orchestrator.workflow", level="INFO"):
-            _run_blocked(self, gh, parent)
+            _run_dependency(self, gh, parent)
 
 
 class HandleBlockedRecoveryTest(unittest.TestCase, _PatchedWorkflowMixin):
@@ -341,7 +364,7 @@ class HandleBlockedRecoveryTest(unittest.TestCase, _PatchedWorkflowMixin):
         # No children pinned.
         gh.seed_state(MISSING_CHILDREN_PARENT_NUMBER, decomposer_agent="claude")
 
-        _run_blocked(self, gh, parent)
+        _run_recovery(self, gh, parent)
 
         state = gh.pinned_data(MISSING_CHILDREN_PARENT_NUMBER)
         self.assertTrue(state.get(KEY_AWAITING_HUMAN))
@@ -366,7 +389,7 @@ class HandleBlockedRecoveryTest(unittest.TestCase, _PatchedWorkflowMixin):
         before_comments = list(gh.posted_comments)
         before_labels = list(gh.label_history)
 
-        _run_blocked(self, gh, child)
+        _run_recovery(self, gh, child)
 
         state = gh.pinned_data(DEPENDENCY_BLOCKED_CHILD_NUMBER)
         self.assertFalse(state.get(KEY_AWAITING_HUMAN))
@@ -385,16 +408,15 @@ class HandleBlockedRecoveryTest(unittest.TestCase, _PatchedWorkflowMixin):
             # No dep_graph -- both children have no recorded deps.
         )
 
-        _run_blocked(self, gh, parent)
+        _run_recovery(self, gh, parent)
 
         # Both children flipped to `ready`. Parent stays `blocked`
         # because no children are `done` yet.
         for child in children:
-            flipped = [
-                new for issue_n, new in gh.label_history
-                if issue_n == child.number
-            ]
-            self.assertEqual(flipped, [LABEL_READY])
+            self.assertEqual(
+                _labels_for_issue(gh, child.number),
+                [LABEL_READY],
+            )
         self.assertNotIn(
             (ACTIVATION_RECOVERY_PARENT_NUMBER, LABEL_READY),
             gh.label_history,
@@ -411,10 +433,8 @@ class HandleBlockedRecoveryTest(unittest.TestCase, _PatchedWorkflowMixin):
         gh = FakeGitHubClient()
         parent = make_issue(PREVIOUSLY_PARKED_PARENT_NUMBER, label=LABEL_BLOCKED)
         gh.add_issue(parent)
-        child_a = make_issue(PREVIOUSLY_PARKED_CHILD_NUMBERS[0], label=LABEL_DONE)
-        child_b = make_issue(PREVIOUSLY_PARKED_CHILD_NUMBERS[1], label=LABEL_DONE)
-        gh.add_issue(child_a)
-        gh.add_issue(child_b)
+        for child_number in PREVIOUSLY_PARKED_CHILD_NUMBERS:
+            gh.add_issue(make_issue(child_number, label=LABEL_DONE))
         gh.seed_state(
             PREVIOUSLY_PARKED_PARENT_NUMBER,
             children=list(PREVIOUSLY_PARKED_CHILD_NUMBERS),
@@ -423,7 +443,7 @@ class HandleBlockedRecoveryTest(unittest.TestCase, _PatchedWorkflowMixin):
             last_action_comment_id=LAST_ACTION_COMMENT_ID,
         )
 
-        _run_blocked(self, gh, parent)
+        _run_recovery(self, gh, parent)
 
         self.assertIn(
             (PREVIOUSLY_PARKED_PARENT_NUMBER, LABEL_READY),

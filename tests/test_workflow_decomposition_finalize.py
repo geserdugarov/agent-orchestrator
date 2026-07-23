@@ -55,9 +55,7 @@ def _seed_child_with_merged_pr(
     return child
 
 
-class ChildMergedPrAutoFinalizeTest(
-    unittest.TestCase, _PatchedWorkflowMixin
-):
+class ChildMergedPrAutoFinalizeTest(unittest.TestCase, _PatchedWorkflowMixin):
     """A child whose linked PR was merged externally but whose workflow
     label was never advanced past an in-flight stage (e.g. `validating`)
     looks like a manually closed child to the parent aggregation. The
@@ -100,11 +98,13 @@ class ChildMergedPrAutoFinalizeTest(
         # Parent flipped to ready because every child is now `done`.
         self.assertIn((BLOCKED_PARENT_NUMBER, "ready"), gh.label_history)
         # No manual-close park comment posted.
-        self.assertFalse(any(
-            "closed without reaching" in body
-            for issue_number, body in gh.posted_comments
-            if issue_number == BLOCKED_PARENT_NUMBER
-        ))
+        self.assertFalse(
+            any(
+                "closed without reaching" in body
+                for issue_number, body in gh.posted_comments
+                if issue_number == BLOCKED_PARENT_NUMBER
+            )
+        )
 
     def test_umbrella_recovers_child_with_merged_pr(self) -> None:
         gh = FakeGitHubClient()
@@ -137,11 +137,13 @@ class ChildMergedPrAutoFinalizeTest(
         # Umbrella closes once both children are `done`.
         self.assertIn((UMBRELLA_PARENT_NUMBER, LABEL_DONE), gh.label_history)
         self.assertTrue(parent.closed)
-        self.assertFalse(any(
-            "closed without reaching" in body
-            for issue_number, body in gh.posted_comments
-            if issue_number == UMBRELLA_PARENT_NUMBER
-        ))
+        self.assertFalse(
+            any(
+                "closed without reaching" in body
+                for issue_number, body in gh.posted_comments
+                if issue_number == UMBRELLA_PARENT_NUMBER
+            )
+        )
 
     def test_unmerged_child_pr_keeps_parent_parked(self) -> None:
         # Regression guard: when the child PR is closed-without-merge,
@@ -173,6 +175,4 @@ class ChildMergedPrAutoFinalizeTest(
             (UNMERGED_CHILD_NUMBER, LABEL_DONE),
             gh.label_history,
         )
-        self.assertTrue(
-            gh.pinned_data(UNMERGED_PARENT_NUMBER).get("awaiting_human")
-        )
+        self.assertTrue(gh.pinned_data(UNMERGED_PARENT_NUMBER).get("awaiting_human"))
