@@ -333,12 +333,12 @@ analytics, event, polling, prompt, and terminal tests not owned above.
 Baseline: `WPS201` 1, `WPS202` 12, `WPS204` 27, `WPS210` 37, `WPS211` 5, `WPS213` 16, `WPS214` 1,
 `WPS230` 1, `WPS235` 6, `WPS602` 7, and `WPS615` 1.
 
-- [ ] Split `FakeGitHubClient` into cohesive stores/services behind the existing fake-client surface and move stateless
+- [x] Split `FakeGitHubClient` into cohesive stores/services behind the existing fake-client surface and move stateless
   helpers to module functions.
-- [ ] Replace the getter/setter pair with a property and group public histories into typed read-only views.
-- [ ] Replace argument-heavy workflow mixins with typed patch/run contexts and split them by stage family.
-- [ ] Split remaining large modules/classes and simplify scenario setup without hiding state/event assertions.
-- [ ] Reduce all 114 findings to zero and rerun every workflow suite because these helpers are shared broadly.
+- [x] Replace the getter/setter pair with a property and group public histories into typed read-only views.
+- [x] Replace argument-heavy workflow mixins with typed patch/run contexts and split them by stage family.
+- [x] Split remaining large modules/classes and simplify scenario setup without hiding state/event assertions.
+- [x] Reduce all 114 findings to zero and rerun every workflow suite because these helpers are shared broadly.
 
 Stage 2 completion gate: the complete `tests/` tree has zero findings, all 2,207 baseline tests remain accounted for,
 and no helper erases materially different setup or assertions.

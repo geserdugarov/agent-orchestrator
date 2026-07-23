@@ -40,11 +40,6 @@ class CompatibilityExports:
         self._exported_names = exported_names
         self._facade_namespace = facade_namespace
 
-    def _namespace(self) -> MutableMapping[str, Any]:
-        if self._facade_namespace is not None:
-            return self._facade_namespace
-        return sys.modules[self._facade_name].__dict__
-
     def resolve(self, export_name: str) -> Any:
         """Resolve one registered attribute and cache it on the facade."""
         if export_name == "__all__" and self._exported_names is not None:
@@ -67,6 +62,11 @@ class CompatibilityExports:
         if self._exported_names is not None:
             registered.add("__all__")
         return sorted(facade_names | registered)
+
+    def _namespace(self) -> MutableMapping[str, Any]:
+        if self._facade_namespace is not None:
+            return self._facade_namespace
+        return sys.modules[self._facade_name].__dict__
 
 
 def export_group(

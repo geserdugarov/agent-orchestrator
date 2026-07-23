@@ -58,7 +58,7 @@ class ParseReviewVerdictTest(unittest.TestCase):
         )
 
     def test_case_insensitive(self) -> None:
-        verdict, _ = _parse_review_verdict("verdict: approved")
+        verdict, _review_body = _parse_review_verdict("verdict: approved")
         self.assertEqual(verdict, VERDICT_APPROVED)
 
     def test_last_marker_wins(self) -> None:
@@ -66,7 +66,7 @@ class ParseReviewVerdictTest(unittest.TestCase):
             f"I considered {REVIEW_APPROVED_MARKER} but a test fails.\n"
             f"{REVIEW_CHANGES_REQUESTED_MARKER}"
         )
-        verdict, _ = _parse_review_verdict(msg)
+        verdict, _review_body = _parse_review_verdict(msg)
         self.assertEqual(verdict, VERDICT_CHANGES_REQUESTED)
 
     def test_no_marker_returns_unknown(self) -> None:
@@ -103,7 +103,9 @@ class ParseDocumentationVerdictTest(unittest.TestCase):
         )
 
     def test_no_change_marker_case_insensitive(self) -> None:
-        verdict, _ = _parse_documentation_verdict("docs: no_change")
+        verdict, _documentation_body = _parse_documentation_verdict(
+            "docs: no_change",
+        )
         self.assertEqual(verdict, DOCS_NO_CHANGE)
 
     def test_last_marker_wins(self) -> None:
@@ -114,7 +116,7 @@ class ParseDocumentationVerdictTest(unittest.TestCase):
             f"I almost wrote {DOCS_NO_CHANGE_MARKER} but actually the README is "
             f"stale, so I'll commit a fix.\n\n{DOCS_NO_CHANGE_MARKER}"
         )
-        verdict, _ = _parse_documentation_verdict(msg)
+        verdict, _documentation_body = _parse_documentation_verdict(msg)
         self.assertEqual(verdict, DOCS_NO_CHANGE)
 
     def test_ambiguous_no_change_text_is_not_accepted(self) -> None:
@@ -132,7 +134,7 @@ class ParseDocumentationVerdictTest(unittest.TestCase):
         # branch, not by the parser. A message describing an update but
         # lacking the no-change marker must therefore stay 'unknown' so
         # the no-commit branch (parser-only) cannot silently accept it.
-        verdict, _ = _parse_documentation_verdict(
+        verdict, _documentation_body = _parse_documentation_verdict(
             "Updated README.md with the new flag."
         )
         self.assertEqual(verdict, VERDICT_UNKNOWN)
@@ -146,7 +148,7 @@ class ParseDocumentationMarkerGuardTest(unittest.TestCase):
         # embedded in a sentence -- e.g. "I cannot conclude DOCS:
         # NO_CHANGE because the README is stale" -- is exactly the kind
         # of ambiguous no-commit text the issue forbids accepting.
-        verdict, _ = _parse_documentation_verdict(
+        verdict, _marker_body = _parse_documentation_verdict(
             f"I cannot conclude {DOCS_NO_CHANGE_MARKER} because README is stale."
         )
         self.assertEqual(verdict, VERDICT_UNKNOWN)
@@ -155,7 +157,7 @@ class ParseDocumentationMarkerGuardTest(unittest.TestCase):
         # The marker must be the FINAL non-whitespace content. A marker
         # line followed by an unresolved question must be rejected so an
         # agent's follow-up clarification can't silently close the stage.
-        verdict, _ = _parse_documentation_verdict(
+        verdict, _marker_body = _parse_documentation_verdict(
             f"{DOCS_NO_CHANGE_MARKER}\nBut I have a question about the API."
         )
         self.assertEqual(verdict, VERDICT_UNKNOWN)
@@ -165,7 +167,7 @@ class ParseDocumentationMarkerGuardTest(unittest.TestCase):
         # contract is a machine-readable marker, not a sentence. Without
         # this, a markdown-trained agent's habit of ending sentences
         # with periods would silently mask the stricter rule.
-        verdict, _ = _parse_documentation_verdict(
+        verdict, _marker_body = _parse_documentation_verdict(
             f"All clear.\n\n{DOCS_NO_CHANGE_MARKER}."
         )
         self.assertEqual(verdict, VERDICT_UNKNOWN)

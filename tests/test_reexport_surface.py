@@ -1,103 +1,42 @@
 # Copyright 2026 Geser Dugarov
 # SPDX-License-Identifier: Apache-2.0
-"""Compatibility-facade inventories, imports, identity, and patch routing."""
+"""Compatibility-facade inventories and static surfaces."""
 from __future__ import annotations
 
-import ast
-import importlib
 import unittest
-from itertools import chain
-from pathlib import Path
-from types import SimpleNamespace
-from unittest.mock import Mock, patch
 
-from orchestrator import analytics, dashboard, workflow, worktrees
-from orchestrator import _dashboard_export_manifest
-from orchestrator import _workflow_export_manifest
-from orchestrator import _worktrees_export_manifest
-from orchestrator.analytics import read as analytics_read
-from orchestrator.analytics import _read_export_manifest
-
-
-_FACADES = (analytics, workflow, worktrees, analytics_read, dashboard)
-_STUBBED_FACADES = (analytics, analytics_read, dashboard)
-_STATIC_FACADES = ()
-_PURE_STATIC_HUBS = ()
-_LAZY_FACADES = (
-    (workflow, _workflow_export_manifest),
-    (worktrees, _worktrees_export_manifest),
-    (analytics_read, _read_export_manifest),
-    (dashboard, _dashboard_export_manifest),
+from tests.reexport_test_facades import (
+    FACADES,
+    LAZY_FACADES,
+    PURE_STATIC_HUBS,
+    STATIC_FACADES,
+    STUBBED_FACADES,
+)
+from tests.reexport_test_support import (
+    lazy_targets,
+    reexport_names,
+    stub_names,
 )
 
 
-def _intentional_reexports(node: ast.AST) -> tuple[str, ...]:
-    if not isinstance(node, ast.ImportFrom) or node.module == "__future__":
-        return ()
-    return tuple(
-        alias.name
-        for alias in node.names
-        if alias.asname == alias.name
-    )
-
-
-def _reexport_names(module) -> set[str]:
-    """Names imported under the redundant-alias re-export marker (`X as X`).
-
-    That alias is the pyflakes/ruff convention this repo uses to mark an
-    intentional re-export; parsing it back out of the source gives the set of
-    names the facade republishes, independent of the hand-maintained
-    `__all__`.
-    """
-    tree = ast.parse(Path(module.__file__).read_text(encoding="utf-8"))
-    return set(chain.from_iterable(map(_intentional_reexports, ast.walk(tree))))
-
-
-def _lazy_targets(manifest) -> dict[str, object]:
-    """Return the unique historical-name mapping declared by a manifest."""
-    targets = {target.export_name: target for target in manifest.EXPORTS}
-    if len(targets) != len(manifest.EXPORTS):
-        raise AssertionError("lazy export manifest contains duplicate names")
-    return targets
-
-
-def _target_value(target):
-    implementation = importlib.import_module(target.module_name)
-    if target.target_name is None:
-        return implementation
-    return getattr(implementation, target.target_name)
-
-
-def _stub_names(module) -> set[str]:
-    stub_path = Path(module.__file__).with_suffix(".pyi")
-    tree = ast.parse(stub_path.read_text(encoding="utf-8"))
-    return {
-        node.target.id
-        for node in tree.body
-        if isinstance(node, ast.AnnAssign)
-        and isinstance(node.target, ast.Name)
-    }
-
-
 class ReexportInventoryTest(unittest.TestCase):
-    # Static pure hubs re-export everything they expose, so `__all__` must
-    # equal the re-export set exactly. Lazy facades are checked against their
-    # immutable manifests below.
     def test_all_is_sorted_and_unique(self) -> None:
-        for module in _FACADES:
+        for module in FACADES:
             with self.subTest(module=module.__name__):
                 names = module.__all__
                 self.assertEqual(
-                    len(names), len(set(names)),
+                    len(names),
+                    len(set(names)),
                     f"{module.__name__}.__all__ has duplicate entries",
                 )
                 self.assertEqual(
-                    list(names), sorted(names),
+                    list(names),
+                    sorted(names),
                     f"{module.__name__}.__all__ is not sorted",
                 )
 
     def test_every_listed_name_resolves(self) -> None:
-        for module in _FACADES:
+        for module in FACADES:
             for name in module.__all__:
                 with self.subTest(module=module.__name__, name=name):
                     self.assertTrue(
@@ -106,68 +45,34 @@ class ReexportInventoryTest(unittest.TestCase):
                         "but the module has no such attribute",
                     )
 
-    def test_lazy_facade_stubs_match_runtime_inventory(self) -> None:
-        for module in _STUBBED_FACADES:
+    def test_stub_matches_runtime_inventory(self) -> None:
+        for module in STUBBED_FACADES:
             with self.subTest(module=module.__name__):
-                stub_names = _stub_names(module)
-                stub_names.discard("__all__")
-                self.assertEqual(stub_names, set(module.__all__))
+                names = stub_names(module)
+                names.discard("__all__")
+                self.assertEqual(names, set(module.__all__))
 
     def test_reexports_are_inventoried(self) -> None:
-        for module in _STATIC_FACADES:
+        for module in STATIC_FACADES:
             with self.subTest(module=module.__name__):
-                reexports = _reexport_names(module)
+                reexports = reexport_names(module)
                 listed = set(module.__all__)
                 missing = reexports - listed
                 self.assertEqual(
-                    missing, set(),
-                    f"{module.__name__} re-exports {sorted(missing)} but they "
-                    "are absent from __all__",
+                    missing,
+                    set(),
+                    f"{module.__name__} re-exports {sorted(missing)} but "
+                    "they are absent from __all__",
                 )
-                if module in _PURE_STATIC_HUBS:
-                    # A pure hub exposes only what it re-exports, so extras in
-                    # __all__ would be dead entries.
-                    self.assertEqual(
-                        listed, reexports,
-                        f"{module.__name__}.__all__ diverges from its "
-                        f"re-export block: extra={sorted(listed - reexports)}",
-                    )
+                if module in PURE_STATIC_HUBS:
+                    self.assertEqual(listed, reexports)
 
-    def test_lazy_facade_manifests_cover_star_exports(self) -> None:
-        for module, manifest in _LAZY_FACADES:
+    def test_manifest_covers_star_exports(self) -> None:
+        for module, manifest in LAZY_FACADES:
             with self.subTest(module=module.__name__):
-                targets = _lazy_targets(manifest)
+                targets = lazy_targets(manifest)
                 self.assertEqual(module.__all__, manifest.EXPORTED_NAMES)
-                self.assertEqual(set(module.__all__) - set(targets), set())
-
-    def test_lazy_facade_targets_preserve_identity_and_from_import(self) -> None:
-        for module, manifest in _LAZY_FACADES:
-            for name, target in _lazy_targets(manifest).items():
-                with self.subTest(module=module.__name__, name=name):
-                    module.__dict__.pop(name, None)
-                    expected = _target_value(target)
-                    self.assertIs(getattr(module, name), expected)
-                    imported = __import__(module.__name__, fromlist=(name,))
-                    self.assertIs(getattr(imported, name), expected)
-
-    def test_lazy_facade_wildcard_import_matches_inventory(self) -> None:
-        for module, _manifest in _LAZY_FACADES:
-            with self.subTest(module=module.__name__):
-                namespace: dict[str, object] = {}
-                exec(f"from {module.__name__} import *", namespace)
-                namespace.pop("__builtins__", None)
-                self.assertEqual(set(namespace), set(module.__all__))
-                for name, value in namespace.items():
-                    self.assertIs(value, getattr(module, name))
-
-    def test_workflow_handler_patches_remain_late_bound(self) -> None:
-        issue = SimpleNamespace(number=17)
-        spec = SimpleNamespace(slug="owner/repo")
-        handler = Mock()
-        with patch.object(workflow, "_handle_ready", handler):
-            workflow._route_issue_to_handler(None, spec, issue, "ready")
-        handler.assert_called_once_with(None, spec, issue)
-
-
-if __name__ == "__main__":
-    unittest.main()
+                self.assertEqual(
+                    set(module.__all__) - set(targets),
+                    set(),
+                )

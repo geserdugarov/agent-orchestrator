@@ -10,7 +10,6 @@ unpersisted."""
 from __future__ import annotations
 
 import unittest
-from typing import Optional
 from unittest.mock import patch
 
 from orchestrator import config, workflow
@@ -25,6 +24,7 @@ from tests.workflow_helpers import (
     _agent,
     _fake_worktree,
 )
+from tests.workflow_usage_test_support import _PoisonedThenFreshRun
 
 
 _BACKEND_CLAUDE = "claude"
@@ -63,21 +63,6 @@ def _resume_seed():
     issue = make_issue(_RESUME_ISSUE_NUMBER, label="resolving_conflict")
     gh.add_issue(issue)
     return gh, issue
-
-
-class _PoisonedThenFreshRun:
-    def __init__(self) -> None:
-        self.calls: list[Optional[str]] = []
-
-    def __call__(self, *_args, resume_session_id=None, **_kwargs):
-        self.calls.append(resume_session_id)
-        if resume_session_id == "poisoned-sess":
-            return _agent(
-                session_id="",
-                last_message="",
-                stderr="Error: No conversation found with session ID: x",
-            )
-        return _agent(session_id="fresh-sess", last_message="ok")
 
 
 class AccumulateIssueUsageHelperTest(unittest.TestCase):
