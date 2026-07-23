@@ -61,6 +61,25 @@ class HandleInReviewResumeOnHashChangeTest(
     unittest.TestCase,
     _PatchedWorkflowMixin,
 ):
+    def seed_drift(self, issue_number: int, pr_number: int, **extra_state):
+        github = FakeGitHubClient()
+        issue = make_issue(issue_number, label=LABEL_IN_REVIEW, body=UPDATED_BODY)
+        github.add_issue(issue)
+        github.add_pr(FakePR(number=pr_number, head_branch=_issue_branch(issue_number)))
+        state = {
+            "user_content_hash": STALE_HASH,
+            "dev_agent": BACKEND_CLAUDE,
+            "dev_session_id": DEV_SESSION,
+            "pr_number": pr_number,
+            "pr_last_comment_id": 0,
+            "pr_last_review_comment_id": 0,
+            "pr_last_review_summary_id": 0,
+            "branch": _issue_branch(issue_number),
+        }
+        state.update(extra_state)
+        github.seed_state(issue_number, **state)
+        return github, issue
+
     def test_pushed_drift_routes_to_validating(
         self,
     ) -> None:
@@ -73,22 +92,7 @@ class HandleInReviewResumeOnHashChangeTest(
         # `in_review` via the final-docs handoff, so running the docs
         # stage against an unapproved diff here would just push a no-op
         # and waste a tick.
-        gh = FakeGitHubClient()
-        issue = make_issue(PUSHED_DRIFT_ISSUE, label=LABEL_IN_REVIEW, body=UPDATED_BODY)
-        gh.add_issue(issue)
-        pr = FakePR(number=PUSHED_DRIFT_PR, head_branch=_issue_branch(PUSHED_DRIFT_ISSUE))
-        gh.add_pr(pr)
-        gh.seed_state(
-            PUSHED_DRIFT_ISSUE,
-            user_content_hash=STALE_HASH,
-            dev_agent=BACKEND_CLAUDE,
-            dev_session_id=DEV_SESSION,
-            pr_number=pr.number,
-            pr_last_comment_id=0,
-            pr_last_review_comment_id=0,
-            pr_last_review_summary_id=0,
-            branch=_issue_branch(PUSHED_DRIFT_ISSUE),
-        )
+        gh, issue = self.seed_drift(PUSHED_DRIFT_ISSUE, PUSHED_DRIFT_PR)
 
         self._run_in_review(
             gh,
@@ -126,21 +130,9 @@ class HandleInReviewResumeOnHashChangeTest(
         # drift exit, the single docs pass runs after reviewer approval
         # before `in_review` via the final-docs handoff). `review_round`
         # is reset so the reviewer round cap counts fresh rounds.
-        gh = FakeGitHubClient()
-        issue = make_issue(ACK_DRIFT_ISSUE, label=LABEL_IN_REVIEW, body=UPDATED_BODY)
-        gh.add_issue(issue)
-        pr = FakePR(number=ACK_DRIFT_PR, head_branch=_issue_branch(ACK_DRIFT_ISSUE))
-        gh.add_pr(pr)
-        gh.seed_state(
+        gh, issue = self.seed_drift(
             ACK_DRIFT_ISSUE,
-            user_content_hash=STALE_HASH,
-            dev_agent=BACKEND_CLAUDE,
-            dev_session_id=DEV_SESSION,
-            pr_number=pr.number,
-            pr_last_comment_id=0,
-            pr_last_review_comment_id=0,
-            pr_last_review_summary_id=0,
-            branch=_issue_branch(ACK_DRIFT_ISSUE),
+            ACK_DRIFT_PR,
             review_round=2,
         )
 
@@ -182,22 +174,7 @@ class HandleInReviewResumeOnHashChangeTest(
         # in `in_review` awaiting human. Preserves the failure-path
         # contract while the success / ACK paths both bounce directly
         # back to `validating`.
-        gh = FakeGitHubClient()
-        issue = make_issue(PARKED_DRIFT_ISSUE, label=LABEL_IN_REVIEW, body=UPDATED_BODY)
-        gh.add_issue(issue)
-        pr = FakePR(number=PARKED_DRIFT_PR, head_branch=_issue_branch(PARKED_DRIFT_ISSUE))
-        gh.add_pr(pr)
-        gh.seed_state(
-            PARKED_DRIFT_ISSUE,
-            user_content_hash=STALE_HASH,
-            dev_agent=BACKEND_CLAUDE,
-            dev_session_id=DEV_SESSION,
-            pr_number=pr.number,
-            pr_last_comment_id=0,
-            pr_last_review_comment_id=0,
-            pr_last_review_summary_id=0,
-            branch=_issue_branch(PARKED_DRIFT_ISSUE),
-        )
+        gh, issue = self.seed_drift(PARKED_DRIFT_ISSUE, PARKED_DRIFT_PR)
 
         self._run_in_review(
             gh,
@@ -220,22 +197,7 @@ class HandleInReviewResumeOnHashChangeTest(
         # refresh, consumed drift comments, `last_agent_action_at`, and the
         # `awaiting_human` clear from `_resume_dev_with_text` never reach
         # GitHub. The next tick re-detects the body change and retries.
-        gh = FakeGitHubClient()
-        issue = make_issue(INTERRUPTED_DRIFT_ISSUE, label=LABEL_IN_REVIEW, body=UPDATED_BODY)
-        gh.add_issue(issue)
-        pr = FakePR(number=INTERRUPTED_DRIFT_PR, head_branch=_issue_branch(INTERRUPTED_DRIFT_ISSUE))
-        gh.add_pr(pr)
-        gh.seed_state(
-            INTERRUPTED_DRIFT_ISSUE,
-            user_content_hash=STALE_HASH,
-            dev_agent=BACKEND_CLAUDE,
-            dev_session_id=DEV_SESSION,
-            pr_number=pr.number,
-            pr_last_comment_id=0,
-            pr_last_review_comment_id=0,
-            pr_last_review_summary_id=0,
-            branch=_issue_branch(INTERRUPTED_DRIFT_ISSUE),
-        )
+        gh, issue = self.seed_drift(INTERRUPTED_DRIFT_ISSUE, INTERRUPTED_DRIFT_PR)
 
         mocks = self._run_in_review(
             gh,
@@ -267,22 +229,7 @@ class HandleInReviewResumeOnHashChangeTest(
         # `ACK:` marker. Without the stranded-fix gate the ACK would return
         # "ack" and the caller would consume/advance the drift while the PR
         # branch never received the commit. Mirrors `_handle_dev_fix_result`.
-        gh = FakeGitHubClient()
-        issue = make_issue(STRANDED_FIX_ISSUE, label=LABEL_IN_REVIEW, body=UPDATED_BODY)
-        gh.add_issue(issue)
-        pr = FakePR(number=STRANDED_FIX_PR, head_branch=_issue_branch(STRANDED_FIX_ISSUE))
-        gh.add_pr(pr)
-        gh.seed_state(
-            STRANDED_FIX_ISSUE,
-            user_content_hash=STALE_HASH,
-            dev_agent=BACKEND_CLAUDE,
-            dev_session_id=DEV_SESSION,
-            pr_number=pr.number,
-            pr_last_comment_id=0,
-            pr_last_review_comment_id=0,
-            pr_last_review_summary_id=0,
-            branch=_issue_branch(STRANDED_FIX_ISSUE),
-        )
+        gh, issue = self.seed_drift(STRANDED_FIX_ISSUE, STRANDED_FIX_PR)
 
         mocks = self._run_in_review(
             gh,

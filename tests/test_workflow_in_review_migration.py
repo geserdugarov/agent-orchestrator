@@ -239,13 +239,12 @@ class LegacyMigrationPersistsEmptyWatermarksTest(
         # Now a human posts the first inline review comment. With the fix,
         # the next tick sees pr_last_review_comment_id=0 (already set) and
         # surfaces id=42 instead of re-running migration past it.
-        long_ago = datetime.now(timezone.utc) - timedelta(hours=1)
         pr.review_comments.append(
             FakeComment(
                 id=FIRST_INLINE_REVIEW_ID,
                 body="line 7: rename foo to bar",
                 user=FakeUser(HUMAN_LOGIN),
-                created_at=long_ago,
+                created_at=datetime.now(timezone.utc) - timedelta(hours=1),
             ),
         )
 
@@ -293,14 +292,13 @@ class LegacyMigrationPersistsEmptyWatermarksTest(
         state = gh.pinned_data(EMPTY_WATERMARK_ISSUE)
         self.assertEqual(state.get("pr_last_review_summary_id"), 0)
 
-        long_ago = datetime.now(timezone.utc) - timedelta(hours=1)
         pr.reviews.append(
             FakePRReview(
                 id=FIRST_REVIEW_SUMMARY_ID,
                 body="please tighten the spec",
                 state="COMMENTED",
                 user=FakeUser(HUMAN_LOGIN),
-                submitted_at=long_ago,
+                submitted_at=datetime.now(timezone.utc) - timedelta(hours=1),
                 commit_id=REVIEWED_SHA,
             ),
         )

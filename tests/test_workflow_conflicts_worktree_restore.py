@@ -69,6 +69,21 @@ class _WorktreeRestoreFixtureMixin:
         return git_recorder.calls, fetch_recorder.calls
 
 
+def _assert_authed_fetches(test_case, fetch_calls) -> None:
+    test_case.assertEqual(len(fetch_calls), 2)
+    branches = {branch for _spec, branch in fetch_calls}
+    test_case.assertEqual(branches, {_TEST_SPEC.base_branch, WORKTREE_BRANCH})
+
+
+def _assert_no_plain_fetch(test_case, git_calls) -> None:
+    for git_args, _cwd in git_calls:
+        test_case.assertNotEqual(
+            git_args[0] if git_args else "",
+            "fetch",
+            f'plain `_git("fetch", ...)` leaked: {git_args!r}',
+        )
+
+
 class EnsurePrWorktreeRestoresFromRemoteBranchTest(
     unittest.TestCase,
     _WorktreeRestoreFixtureMixin,
@@ -136,17 +151,10 @@ class EnsurePrWorktreeRestoresFromRemoteBranchTest(
         git_calls, fetch_calls = self._run_ensure(local_branch_present=True)
 
         # Both fetches landed on the authed helper -- base and PR branch.
-        self.assertEqual(len(fetch_calls), 2)
-        branches = {branch for _spec, branch in fetch_calls}
-        self.assertEqual(branches, {_TEST_SPEC.base_branch, WORKTREE_BRANCH})
+        _assert_authed_fetches(self, fetch_calls)
         # And no plain-git fetch leaked through (which would prompt for
         # credentials under systemd and fail).
-        for args, _cwd in git_calls:
-            self.assertNotEqual(
-                args[0] if args else "",
-                "fetch",
-                f'plain `_git("fetch", ...)` leaked: {args!r}',
-            )
+        _assert_no_plain_fetch(self, git_calls)
 
 
 if __name__ == "__main__":

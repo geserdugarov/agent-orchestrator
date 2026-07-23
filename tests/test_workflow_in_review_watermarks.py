@@ -40,6 +40,18 @@ class InReviewParkWatermarkTest(unittest.TestCase, _PatchedWorkflowMixin):
     the issue to `fixing` against it.
     """
 
+    def assert_initial_park(self, github, issue) -> int:
+        state = github.pinned_data(PARK_ISSUE)
+        self.assertTrue(state.get("awaiting_human"))
+        self.assertEqual(state.get("park_reason"), "unmergeable")
+        comments_after_park = len(github.posted_comments)
+        self.assertGreater(comments_after_park, 0)
+        self.assertEqual(
+            state.get("pr_last_comment_id"),
+            github.latest_comment_id(issue),
+        )
+        return comments_after_park
+
     def test_park_does_not_replay_next_tick(self) -> None:
         # An unmergeable PR parks awaiting human on the first tick. The
         # park message is recorded as orchestrator-authored and the
@@ -48,16 +60,17 @@ class InReviewParkWatermarkTest(unittest.TestCase, _PatchedWorkflowMixin):
         gh = FakeGitHubClient()
         issue = make_issue(PARK_ISSUE, label="in_review")
         gh.add_issue(issue)
-        pr = FakePR(
-            number=PARK_PR,
-            head_branch=PARK_BRANCH,
-            head=FakePRRef(sha="cafe1234"),
-            approved=True,
-            approval_head_sha="cafe1234",
-            mergeable=False,
-            check_state="success",
+        gh.add_pr(
+            FakePR(
+                number=PARK_PR,
+                head_branch=PARK_BRANCH,
+                head=FakePRRef(sha="cafe1234"),
+                approved=True,
+                approval_head_sha="cafe1234",
+                mergeable=False,
+                check_state="success",
+            ),
         )
-        gh.add_pr(pr)
         gh.seed_state(
             PARK_ISSUE,
             pr_number=PARK_PR,
@@ -73,20 +86,7 @@ class InReviewParkWatermarkTest(unittest.TestCase, _PatchedWorkflowMixin):
             issue,
             run_agent=_agent(),
         )
-        self.assertTrue(gh.pinned_data(PARK_ISSUE).get("awaiting_human"))
-        self.assertEqual(
-            gh.pinned_data(PARK_ISSUE).get("park_reason"),
-            "unmergeable",
-        )
-        comments_after_park = len(gh.posted_comments)
-        self.assertGreater(comments_after_park, 0)
-        # Watermark must have been bumped past the park comment -- which
-        # means it's at or above the latest comment id on the issue.
-        latest_id = gh.latest_comment_id(issue)
-        self.assertEqual(
-            gh.pinned_data(PARK_ISSUE).get("pr_last_comment_id"),
-            latest_id,
-        )
+        comments_after_park = self.assert_initial_park(gh, issue)
 
         # Tick 2: nothing new; must NOT route the orchestrator's park
         # message back through the fixing route.
@@ -133,21 +133,20 @@ class InReviewSplitWatermarkTest(
     """Track issue and inline-review ids in independent namespaces."""
 
     def test_inline_review_comment_routes_to_fixing(self) -> None:
-        long_ago = datetime.now(timezone.utc) - timedelta(hours=1)
-        gh, issue, pr = self._setup(
+        gh, issue = self._setup(
             review_comments=[
                 FakeComment(
                     id=INLINE_COMMENT_ID,
                     body="line 12: rename foo to bar",
                     user=FakeUser("alice"),
-                    created_at=long_ago,
+                    created_at=datetime.now(timezone.utc) - timedelta(hours=1),
                 ),
             ],
             # Inline-review watermark just below the comment id so it
             # surfaces as fresh feedback. An unset watermark would trip the
             # legacy in_review migration and treat id=42 as already-consumed.
             state_extra={"pr_last_review_comment_id": INLINE_COMMENT_WATERMARK},
-        )
+        )[:2]
 
         mocks = self._run_in_review(
             gh,

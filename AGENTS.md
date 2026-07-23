@@ -35,8 +35,10 @@ orchestrator process is stateless.
   and stable runtime-core facades (`main.py`, `agents.py`, `github.py`, `config.py`, `state_machine.py`).
   Full module-by-module map: [`docs/architecture.md`](docs/architecture.md#top-level-layout).
 - `tests/` — pytest suite. In-memory fakes in `tests/fakes.py`. Stage-handler tests in
-  `tests/test_workflow_<stage>*.py` (the validating stage is split across `tests/test_workflow_validating_*.py`, the
-  in_review stage across `tests/test_workflow_in_review_*.py`, the implementing stage across
+  `tests/test_workflow_<stage>*.py` (the validating stage is split across review, controls, drift, handoff, pause,
+  squash, verify, and watermark modules in `tests/test_workflow_validating_*.py`, with shared fixtures in
+  `tests/validating_*_test_support.py`; the in_review stage is split across
+  `tests/test_workflow_in_review_*.py`; the implementing stage across
   `tests/test_workflow_implementing_*.py`, and the decomposition, question, and documenting stages across their
   respective focused modules, with shared fixtures in `tests/decomposition*_support.py`,
   `tests/question_*_support.py`, and `tests/documenting_*_support.py`; the resolving-conflict stage is split across
@@ -46,7 +48,8 @@ orchestrator process is stateless.
   `_agent` for agent execution, `_resume` for awaiting-human resume paths, `_dirty` for dirty / rebase-in-progress
   parking, `_recovery` for recovery pushes, `_diverged` for stale / diverged worktree handling, `_publish` for
   already-rebased force-publish scenarios, `_publish_guard` for the publish-guard probe unit tests, `_drift` for
-  hash-drift resume behavior)); scheduler, base-sync, cleanup, and worktree-subsystem tests are split across
+  hash-drift resume behavior), with resume fixtures in `tests/conflict_resume_test_support.py`); scheduler, base-sync,
+  cleanup, and worktree-subsystem tests are split across
   `tests/test_scheduler_*.py`, `tests/test_workflow_scheduler_*.py`, `tests/test_workflow_base_sync_*.py`,
   `tests/test_workflow_cleanup*.py`, and `tests/test_workflow_worktree_*.py`, with subsystem-specific support in
   `tests/scheduler_*.py`, `tests/base_sync_*.py`, and `tests/worktree_*.py`; other facade-level helper tests include

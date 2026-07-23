@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import unittest
+from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import MagicMock, patch as mock_patch
 
@@ -162,25 +163,31 @@ class AuthedTargetFetchTest(unittest.TestCase):
         # token-bearing target fetch must fail closed on it, not just on url
         # rewrites. Real git config resolution (not a mocked probe) proves the
         # broadened regexp catches http.* transport keys.
-        with _temp_git_repo_with_local_config([("http.sslVerify", "false")]) as repo:
+        log_capture = MagicMock()
+        with ExitStack() as stack:
+            repo = stack.enter_context(
+                _temp_git_repo_with_local_config([("http.sslVerify", "false")]),
+            )
             spec = config.RepoSpec(
                 slug="geserdugarov/agent-orchestrator",
                 target_root=repo,
                 base_branch=MAIN_BRANCH,
             )
-            with (
+            stack.enter_context(
                 mock_patch.object(
                     workflow.config,
                     TOKEN_RESOLVER,
                     return_value=SECRET_TOKEN,
                 ),
-                self.assertLogs(git_plumbing.log, level="ERROR") as cm,
-            ):
-                fetch = workflow._authed_target_fetch(spec, MAIN_BRANCH)
+            )
+            log_capture.records = stack.enter_context(
+                self.assertLogs(git_plumbing.log, level="ERROR"),
+            )
+            fetch = workflow._authed_target_fetch(spec, MAIN_BRANCH)
         self.assertNotEqual(fetch.returncode, 0)
         self.assertTrue(
-            any("sslverify" in line.lower() for line in cm.output),
-            f"expected sslVerify in refusal log, got {cm.output!r}",
+            any("sslverify" in line.lower() for line in log_capture.records.output),
+            "expected sslVerify in refusal log, got {!r}".format(log_capture.records.output),
         )
 
     def test_missing_token_fails_without_subprocess(self) -> None:
@@ -196,15 +203,19 @@ class AuthedTargetFetchTest(unittest.TestCase):
             base_branch=CACHE_BRANCH,
             remote_name="private",
         )
-        with (
-            mock_patch(SUBPROCESS_RUN, subprocess_run),
-            mock_patch.object(
-                workflow.config,
-                TOKEN_RESOLVER,
-                return_value="",
-            ),
-            self.assertLogs(git_plumbing.log, level="ERROR") as cm,
-        ):
+        log_capture = MagicMock()
+        with ExitStack() as stack:
+            stack.enter_context(mock_patch(SUBPROCESS_RUN, subprocess_run))
+            stack.enter_context(
+                mock_patch.object(
+                    workflow.config,
+                    TOKEN_RESOLVER,
+                    return_value="",
+                ),
+            )
+            log_capture.records = stack.enter_context(
+                self.assertLogs(git_plumbing.log, level="ERROR"),
+            )
             fetch = workflow._authed_target_fetch(repo, CACHE_BRANCH)
 
         # Failed without ever shelling out.
@@ -212,8 +223,8 @@ class AuthedTargetFetchTest(unittest.TestCase):
         self.assertNotEqual(fetch.returncode, 0)
         # Slug is in the log so the operator knows which token file to fix.
         self.assertTrue(
-            any(PRIVATE_REPO_SLUG in line for line in cm.output),
-            f"expected slug in log output, got {cm.output!r}",
+            any(PRIVATE_REPO_SLUG in line for line in log_capture.records.output),
+            "expected slug in log output, got {!r}".format(log_capture.records.output),
         )
 
 

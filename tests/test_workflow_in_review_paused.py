@@ -31,19 +31,12 @@ def _paused_view(number: int) -> object:
 
 
 class InReviewLivePauseDriftTest(unittest.TestCase, _PatchedWorkflowMixin):
-    def test_drift_pause_blocks_relabel_and_bump(self) -> None:
-        # A body edit (seeded hash mismatch) drives the drift resume. The
-        # operator applies `paused` only after the run starts, so it appears
-        # solely on the freshly fetched view -- a guard consulting the stale
-        # labels would run `_post_user_content_change_result`, bump the
-        # watermarks, and bounce to `validating`. Asserting none of that
-        # happens (and the stale hash survives) proves the guard reads
-        # `gh.get_issue` and honors it, leaving the drift for a later tick.
-        gh = FakeGitHubClient()
+    def seed_paused_drift(self):
+        github = FakeGitHubClient()
         issue = make_issue(ISSUE, label="in_review", body="new acceptance")
-        gh.add_issue(issue)
-        gh.add_pr(FakePR(number=PR_NUMBER, head_branch=BRANCH))
-        gh.seed_state(
+        github.add_issue(issue)
+        github.add_pr(FakePR(number=PR_NUMBER, head_branch=BRANCH))
+        github.seed_state(
             ISSUE,
             user_content_hash="stale-hash",
             dev_agent="claude",
@@ -55,7 +48,23 @@ class InReviewLivePauseDriftTest(unittest.TestCase, _PatchedWorkflowMixin):
             branch=BRANCH,
             review_round=2,
         )
-        before_writes = gh.write_state_calls
+        return github, issue, github.write_state_calls
+
+    def assert_pause_state(self, github) -> None:
+        pinned_state = github.pinned_data(ISSUE)
+        self.assertEqual(pinned_state.get("user_content_hash"), "stale-hash")
+        self.assertEqual(pinned_state.get("review_round"), 2)
+        self.assertFalse(pinned_state.get("awaiting_human"))
+
+    def test_drift_pause_blocks_relabel_and_bump(self) -> None:
+        # A body edit (seeded hash mismatch) drives the drift resume. The
+        # operator applies `paused` only after the run starts, so it appears
+        # solely on the freshly fetched view -- a guard consulting the stale
+        # labels would run `_post_user_content_change_result`, bump the
+        # watermarks, and bounce to `validating`. Asserting none of that
+        # happens (and the stale hash survives) proves the guard reads
+        # `gh.get_issue` and honors it, leaving the drift for a later tick.
+        gh, issue, before_writes = self.seed_paused_drift()
 
         get_issue_mock = MagicMock(return_value=_paused_view(ISSUE))
         with patch.object(gh, "get_issue", get_issue_mock):
@@ -76,10 +85,7 @@ class InReviewLivePauseDriftTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertEqual(gh.write_state_calls, before_writes)
         self.assertNotIn((ISSUE, "validating"), gh.label_history)
         self.assertNotIn((ISSUE, "documenting"), gh.label_history)
-        pinned_state = gh.pinned_data(ISSUE)
-        self.assertEqual(pinned_state.get("user_content_hash"), "stale-hash")
-        self.assertEqual(pinned_state.get("review_round"), 2)
-        self.assertFalse(pinned_state.get("awaiting_human"))
+        self.assert_pause_state(gh)
 
 
 if __name__ == "__main__":

@@ -15,6 +15,23 @@ from tests.workflow_helpers import (
 CONFLICT_ISSUE = 200
 
 
+def _assert_completed_round(test_case, github) -> None:
+    state = github.pinned_data(CONFLICT_ISSUE)
+    test_case.assertEqual(state.get("review_round"), 0)
+    test_case.assertEqual(state.get("conflict_round"), 1)
+    test_case.assertIn("last_conflict_resolved_at", state)
+
+
+def _assert_combined_round_event(test_case, github) -> None:
+    rounds = [
+        event
+        for event in github.recorded_events
+        if event.get("event") == "conflict_round" and event.get("action") == "incremented"
+    ]
+    test_case.assertEqual(len(rounds), 1)
+    test_case.assertEqual(rounds[0].get("outcome"), "base_rebased_clean")
+
+
 class ResolvingConflictRecoveryPushTest(unittest.TestCase, _ResolvingConflictMixin):
     """Drive `_handle_resolving_conflict` through the crash-recovery push
     branches: an unpushed local commit ships on the next tick, a failed
@@ -28,7 +45,7 @@ class ResolvingConflictRecoveryPushTest(unittest.TestCase, _ResolvingConflictMix
         # push state write landed). The next tick must push the local
         # commit and complete the round, NOT treat it as "no work needed"
         # and flip to validating with the resolution unpushed.
-        gh, issue, pr = self._seed()
+        gh, issue, _ = self._seed()
 
         merge_mock = MagicMock(return_value=(True, []))
         # After the recovered push the handler probes whether the
@@ -65,10 +82,7 @@ class ResolvingConflictRecoveryPushTest(unittest.TestCase, _ResolvingConflictMix
         # stamped exactly as on the happy-path resolve. The recovered
         # push hands straight back to `validating`; the single docs
         # pass is deferred to the post-approval hop.
-        state = gh.pinned_data(CONFLICT_ISSUE)
-        self.assertEqual(state.get("review_round"), 0)
-        self.assertEqual(state.get("conflict_round"), 1)
-        self.assertIn("last_conflict_resolved_at", state)
+        _assert_completed_round(self, gh)
         self.assertIn((CONFLICT_ISSUE, "validating"), gh.label_history)
         self.assertNotIn((CONFLICT_ISSUE, "documenting"), gh.label_history)
 
@@ -76,7 +90,7 @@ class ResolvingConflictRecoveryPushTest(unittest.TestCase, _ResolvingConflictMix
         # Recovery push fails (e.g. force-with-lease lease miss because
         # the remote actually moved). Park rather than silently flipping
         # to validating with an unsynced local SHA.
-        gh, issue, pr = self._seed()
+        gh, issue, _ = self._seed()
 
         merge_mock = MagicMock(return_value=(True, []))
 
@@ -90,8 +104,7 @@ class ResolvingConflictRecoveryPushTest(unittest.TestCase, _ResolvingConflictMix
             )
         mocks["_push_branch"].assert_called_once()
         merge_mock.assert_not_called()
-        state = gh.pinned_data(CONFLICT_ISSUE)
-        self.assertTrue(state.get("awaiting_human"))
+        self.assertTrue(gh.pinned_data(CONFLICT_ISSUE).get("awaiting_human"))
         self.assertNotIn((CONFLICT_ISSUE, "validating"), gh.label_history)
 
     def test_stale_base_falls_through_to_rebase(self) -> None:
@@ -108,7 +121,7 @@ class ResolvingConflictRecoveryPushTest(unittest.TestCase, _ResolvingConflictMix
         # would be republished still-behind-base and the round counter
         # would burn a slot toward `MAX_CONFLICT_ROUNDS` without ever
         # attempting the base rebase the reroute was meant to perform.
-        gh, issue, pr = self._seed()
+        gh, issue, _ = self._seed()
 
         # Clean rebase that actually moved HEAD (recovered push +
         # rebase pushes a different SHA than the recovered SHA).
@@ -146,19 +159,10 @@ class ResolvingConflictRecoveryPushTest(unittest.TestCase, _ResolvingConflictMix
         mocks["run_agent"].assert_not_called()
         # Single conflict_round increment for the combined push+rebase
         # reconciliation, NOT one per push.
-        state = gh.pinned_data(CONFLICT_ISSUE)
-        self.assertEqual(state.get("conflict_round"), 1)
-        self.assertEqual(state.get("review_round"), 0)
-        self.assertIn("last_conflict_resolved_at", state)
+        _assert_completed_round(self, gh)
         # The combined round outcome is the rebase path's
         # `base_rebased_clean`, not the fast-path `recovered_push`.
-        rounds = [
-            event
-            for event in gh.recorded_events
-            if event.get("event") == "conflict_round" and event.get("action") == "incremented"
-        ]
-        self.assertEqual(len(rounds), 1)
-        self.assertEqual(rounds[0].get("outcome"), "base_rebased_clean")
+        _assert_combined_round_event(self, gh)
         # Hand back to validating after the rebase landed.
         self.assertIn((CONFLICT_ISSUE, "validating"), gh.label_history)
         self.assertNotIn((CONFLICT_ISSUE, "documenting"), gh.label_history)

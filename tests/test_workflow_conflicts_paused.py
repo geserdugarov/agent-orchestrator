@@ -43,6 +43,25 @@ def _assert_no_park_comment(test_case, gh) -> None:
     )
 
 
+def _assert_fresh_pause_state(test_case, github) -> None:
+    pinned_state = github.pinned_data(CONFLICT_ISSUE)
+    test_case.assertFalse(pinned_state.get(AWAITING_HUMAN))
+    test_case.assertEqual(pinned_state.get("conflict_round"), 0)
+
+
+def _assert_resume_pause_state(test_case, github) -> None:
+    pinned_state = github.pinned_data(CONFLICT_ISSUE)
+    test_case.assertTrue(pinned_state.get(AWAITING_HUMAN))
+    test_case.assertEqual(pinned_state.get("last_action_comment_id"), 1000)
+    test_case.assertEqual(pinned_state.get("conflict_round"), 1)
+
+
+def _assert_drift_pause_state(test_case, github) -> None:
+    pinned_state = github.pinned_data(CONFLICT_ISSUE)
+    test_case.assertEqual(pinned_state.get("user_content_hash"), "stale-hash")
+    test_case.assertFalse(pinned_state.get(AWAITING_HUMAN))
+
+
 class ResolvingConflictLivePauseTest(unittest.TestCase, _ResolvingConflictMixin):
     """A live pause applied mid-run short-circuits each of the three dev
     resume paths before any push / relabel / pinned-state write."""
@@ -55,7 +74,7 @@ class ResolvingConflictLivePauseTest(unittest.TestCase, _ResolvingConflictMixin)
         # `_post_conflict_resolution_result` pushes / increments the round /
         # relabels. The resolved commit stays on the branch, durable state
         # untouched.
-        gh, issue, pr = self._seed()
+        gh, issue, _ = self._seed()
         self._seed_with_baseline_hash(gh, issue)  # quiet drift, no baseline write
         before_writes = gh.write_state_calls
 
@@ -74,9 +93,7 @@ class ResolvingConflictLivePauseTest(unittest.TestCase, _ResolvingConflictMixin)
         mocks["_push_branch"].assert_not_called()
         self.assertEqual(gh.write_state_calls, before_writes)
         self.assertNotIn((CONFLICT_ISSUE, "validating"), gh.label_history)
-        pinned_state = gh.pinned_data(CONFLICT_ISSUE)
-        self.assertFalse(pinned_state.get(AWAITING_HUMAN))
-        self.assertEqual(pinned_state.get("conflict_round"), 0)
+        _assert_fresh_pause_state(self, gh)
         _assert_no_park_comment(self, gh)
 
     def test_resume_pause_keeps_park(self) -> None:
@@ -85,7 +102,7 @@ class ResolvingConflictLivePauseTest(unittest.TestCase, _ResolvingConflictMixin)
         # `_post_conflict_resolution_result`, so the park stays intact and the
         # reply watermark is NOT advanced -- a later tick re-resumes on the
         # same reply once the label is removed.
-        gh, issue, pr = self._seed(
+        gh, issue, _ = self._seed(
             extra_state={
                 AWAITING_HUMAN: True,
                 "conflict_round": 1,
@@ -127,10 +144,7 @@ class ResolvingConflictLivePauseTest(unittest.TestCase, _ResolvingConflictMixin)
         mocks["_push_branch"].assert_not_called()
         self.assertEqual(gh.write_state_calls, before_writes)
         self.assertNotIn((CONFLICT_ISSUE, "validating"), gh.label_history)
-        pinned_state = gh.pinned_data(CONFLICT_ISSUE)
-        self.assertTrue(pinned_state.get(AWAITING_HUMAN))
-        self.assertEqual(pinned_state.get("last_action_comment_id"), 1000)
-        self.assertEqual(pinned_state.get("conflict_round"), 1)
+        _assert_resume_pause_state(self, gh)
 
     def test_drift_pause_blocks_relabel(self) -> None:
         # A body edit drives the drift resume (seeded hash mismatch); the
@@ -138,9 +152,9 @@ class ResolvingConflictLivePauseTest(unittest.TestCase, _ResolvingConflictMixin)
         # `_post_user_content_change_result` and the conflict-round bump, so
         # the drift stays unconsumed (the stale hash stands) and no relabel /
         # write happens.
-        gh, issue, pr = self._seed(
+        gh, issue = self._seed(
             extra_state={"user_content_hash": "stale-hash"},
-        )
+        )[:2]
         before_writes = gh.write_state_calls
 
         with patch.object(gh, "get_issue", MagicMock(return_value=_paused_view(CONFLICT_ISSUE))):
@@ -160,9 +174,7 @@ class ResolvingConflictLivePauseTest(unittest.TestCase, _ResolvingConflictMixin)
         mocks["_push_branch"].assert_not_called()
         self.assertEqual(gh.write_state_calls, before_writes)
         self.assertNotIn((CONFLICT_ISSUE, "validating"), gh.label_history)
-        pinned_state = gh.pinned_data(CONFLICT_ISSUE)
-        self.assertEqual(pinned_state.get("user_content_hash"), "stale-hash")
-        self.assertFalse(pinned_state.get(AWAITING_HUMAN))
+        _assert_drift_pause_state(self, gh)
 
 
 if __name__ == "__main__":

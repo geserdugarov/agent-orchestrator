@@ -6,6 +6,7 @@ surfaces (check-runs 403 scope hint, partial-read downgrade)."""
 from __future__ import annotations
 
 import unittest
+from contextlib import ExitStack
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -25,6 +26,41 @@ STATE_FAILURE = "failure"
 STATE_SUCCESS = "success"
 
 
+def _closed_sweep_fixture():
+    client = GitHubClient.__new__(GitHubClient)
+    client.repo = MagicMock()
+    client._pollable_calls = 0
+    client._label_cache = {}
+    client.repo.get_issues.return_value = iter([])
+    labels = SimpleNamespace(
+        implementing=MagicMock(name="implementing_label"),
+        documenting=MagicMock(name="documenting_label"),
+        validating=MagicMock(name="validating_label"),
+        in_review=MagicMock(name="in_review_label"),
+        fixing=MagicMock(name="fixing_label"),
+        resolving_conflict=MagicMock(name="resolving_conflict_label"),
+        question=MagicMock(name="question_label"),
+    )
+    client.repo.get_label.side_effect = labels.__dict__.__getitem__
+    return client, labels
+
+
+def _assert_closed_sweeps(test_case, client, labels) -> None:
+    calls = SimpleNamespace(
+        looked_up={call.args[0] for call in client.repo.get_label.call_args_list},
+        closed=[
+            call
+            for call in client.repo.get_issues.call_args_list
+            if call.kwargs.get("state") == "closed"
+        ],
+    )
+    test_case.assertEqual(calls.looked_up, set(labels.__dict__))
+    test_case.assertEqual(len(calls.closed), 7)
+    labels_passed = [call.kwargs["labels"] for call in calls.closed]
+    for expected_label in labels.__dict__.values():
+        test_case.assertIn([expected_label], labels_passed)
+
+
 class GitHubClientClosedIssueSweepLabelTest(unittest.TestCase):
     """Real PyGithub's `Repository.get_issues(labels=...)` expects Label
     OBJECTS and reads `label.name`. The closed-issue sweep used to pass a
@@ -38,62 +74,11 @@ class GitHubClientClosedIssueSweepLabelTest(unittest.TestCase):
     """
 
     def test_closed_sweep_uses_label_object(self) -> None:
-        # Bypass __init__: it would require a real PAT and Github client.
-        client = GitHubClient.__new__(GitHubClient)
-        client.repo = MagicMock()
-        # __init__ normally seeds these; the closed sweep and label cache
-        # both read them.
-        client._pollable_calls = 0
-        client._label_cache = {}
-        # All get_issues calls (open sweep + per-label closed sweeps)
-        # return nothing -- we only care about the call arguments.
-        client.repo.get_issues.return_value = iter([])
-        implementing_label = MagicMock(name="implementing_label")
-        documenting_label = MagicMock(name="documenting_label")
-        validating_label = MagicMock(name="validating_label")
-        in_review_label = MagicMock(name="in_review_label")
-        fixing_label = MagicMock(name="fixing_label")
-        resolving_label = MagicMock(name="resolving_conflict_label")
-        question_label = MagicMock(name="question_label")
-
-        client.repo.get_label.side_effect = {
-            "implementing": implementing_label,
-            "documenting": documenting_label,
-            "validating": validating_label,
-            "in_review": in_review_label,
-            "fixing": fixing_label,
-            "resolving_conflict": resolving_label,
-            "question": question_label,
-        }.__getitem__
+        client, labels = _closed_sweep_fixture()
 
         list(client.list_pollable_issues())
 
-        # Each sweep label is looked up by name (one query per label
-        # because the GitHub Issues API treats `labels` as AND, not OR --
-        # a single query for "any of these labels" is impossible).
-        looked_up = [call.args[0] for call in client.repo.get_label.call_args_list]
-        self.assertIn("implementing", looked_up)
-        self.assertIn("documenting", looked_up)
-        self.assertIn("validating", looked_up)
-        self.assertIn("in_review", looked_up)
-        self.assertIn("fixing", looked_up)
-        self.assertIn("resolving_conflict", looked_up)
-        self.assertIn("question", looked_up)
-        # The closed sweeps were invoked with Label OBJECTS, not strings.
-        closed_calls = [
-            call
-            for call in client.repo.get_issues.call_args_list
-            if call.kwargs.get("state") == "closed"
-        ]
-        self.assertEqual(len(closed_calls), 7)
-        labels_passed = [call.kwargs["labels"] for call in closed_calls]
-        self.assertIn([implementing_label], labels_passed)
-        self.assertIn([documenting_label], labels_passed)
-        self.assertIn([validating_label], labels_passed)
-        self.assertIn([in_review_label], labels_passed)
-        self.assertIn([fixing_label], labels_passed)
-        self.assertIn([resolving_label], labels_passed)
-        self.assertIn([question_label], labels_passed)
+        _assert_closed_sweeps(self, client, labels)
 
     def test_missing_label_skips_closed_sweep(self) -> None:
         # If `get_label` raises (under-scoped PAT, label not yet bootstrapped)
@@ -124,33 +109,23 @@ class CheckRunsForbiddenSurfacesScopeHintTest(unittest.TestCase):
     """
 
     def test_forbidden_check_runs_log_scope_hint(self) -> None:
-        from unittest.mock import MagicMock
-        from orchestrator.github import GitHubClient
-        from github import GithubException
-
-        client = GitHubClient.__new__(GitHubClient)
-        client.repo = MagicMock()
-
-        commit_obj = MagicMock()
-        # Combined-status path returns nothing useful (Actions-only PR).
-        combined = MagicMock(state="", total_count=0)
-        commit_obj.get_combined_status.return_value = combined
-        # Check-runs path raises 403.
-        commit_obj.get_check_runs.side_effect = GithubException(
-            HTTP_FORBIDDEN,
-            {MESSAGE_KEY: "Resource not accessible"},
-            None,
+        client, pr = _client_with(
+            combined_state="",
+            combined_total=0,
+            check_runs_exc=GithubException(
+                HTTP_FORBIDDEN,
+                {MESSAGE_KEY: "Resource not accessible"},
+                None,
+            ),
         )
-        client.repo.get_commit.return_value = commit_obj
+        log_capture = MagicMock()
+        with ExitStack() as stack:
+            log_capture.records = stack.enter_context(
+                self.assertLogs(GITHUB_LOGGER, level=ERROR_LEVEL),
+            )
+            self.assertEqual(client.pr_combined_check_state(pr), STATE_NONE)
 
-        pr = MagicMock()
-        pr.head.sha = "deadbeef"
-
-        with self.assertLogs(GITHUB_LOGGER, level=ERROR_LEVEL) as logs:
-            state = client.pr_combined_check_state(pr)
-
-        self.assertEqual(state, STATE_NONE)
-        joined = "\n".join(logs.output)
+        joined = "\n".join(log_capture.records.output)
         self.assertIn("403", joined)
         self.assertIn("Checks: read", joined)
         self.assertIn("check_state", joined)
@@ -158,31 +133,28 @@ class CheckRunsForbiddenSurfacesScopeHintTest(unittest.TestCase):
     def test_other_check_error_logs_warning(self) -> None:
         # 404, transient 5xx, etc. are logged at warning level and don't
         # need scope guidance. Avoid noisy ERROR for unrelated failures.
-        from unittest.mock import MagicMock
-        from orchestrator.github import GitHubClient
-        from github import GithubException
-
-        client = GitHubClient.__new__(GitHubClient)
-        client.repo = MagicMock()
-        commit_obj = MagicMock()
-        commit_obj.get_combined_status.return_value = MagicMock(state="", total_count=0)
-        commit_obj.get_check_runs.side_effect = GithubException(
-            HTTP_SERVER_ERROR,
-            {MESSAGE_KEY: "Internal Server Error"},
-            None,
+        client, pr = _client_with(
+            combined_state="",
+            combined_total=0,
+            check_runs_exc=GithubException(
+                HTTP_SERVER_ERROR,
+                {MESSAGE_KEY: "Internal Server Error"},
+                None,
+            ),
         )
-        client.repo.get_commit.return_value = commit_obj
-        pr = MagicMock()
-        pr.head.sha = "deadbeef"
-
-        with self.assertLogs(GITHUB_LOGGER, level="WARNING") as logs:
+        log_capture = MagicMock()
+        with ExitStack() as stack:
+            log_capture.records = stack.enter_context(
+                self.assertLogs(GITHUB_LOGGER, level="WARNING"),
+            )
             client.pr_combined_check_state(pr)
 
-        # Filter to only WARNING records (assertLogs catches WARNING and above).
-        warning_only = [record for record in logs.records if record.levelname == "WARNING"]
+        self._assert_warning_records(log_capture.records)
+
+    def _assert_warning_records(self, captured_logs) -> None:
+        warning_only = [record for record in captured_logs.records if record.levelname == "WARNING"]
         self.assertTrue(warning_only, "should log a warning for non-403 errors")
-        # No ERROR for non-403 failures.
-        error_records = [record for record in logs.records if record.levelname == ERROR_LEVEL]
+        error_records = [record for record in captured_logs.records if record.levelname == ERROR_LEVEL]
         self.assertEqual(error_records, [])
 
 

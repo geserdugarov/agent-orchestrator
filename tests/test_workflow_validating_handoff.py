@@ -12,6 +12,7 @@ from orchestrator import config, workflow
 from tests.fakes import (
     FakeComment,
     FakeGitHubClient,
+    FakeLabel,
     FakePR,
     FakePRRef,
     FakeUser,
@@ -240,7 +241,7 @@ class ValidatingRecoveryStaysOnValidatingTest(
         # No commit happened during a reviewer-side park (the reviewer
         # crashed, the dev never ran). Recovery clears the flags and
         # stays on `validating` -- the PR head is unchanged.
-        gh, issue = self._validating_issue(
+        recovery_gh, issue = self._validating_issue(
             issue_number=REVIEWER_RECOVERY_ISSUE,
             awaiting_human=True,
             park_reason="reviewer_timeout",
@@ -250,24 +251,24 @@ class ValidatingRecoveryStaysOnValidatingTest(
 
         with patch.object(workflow, "_worktree_path", return_value=Path("/tmp")):
             self._run_validating(
-                gh,
+                recovery_gh,
                 issue,
                 run_agent=_agent(),
                 push_branch=True,
             )
 
-        state = gh.pinned_data(REVIEWER_RECOVERY_ISSUE)
-        self.assertFalse(state.get(AWAITING_HUMAN))
-        self.assertIsNone(state.get("park_reason"))
+        recovery_state = recovery_gh.pinned_data(REVIEWER_RECOVERY_ISSUE)
+        self.assertFalse(recovery_state.get(AWAITING_HUMAN))
+        self.assertIsNone(recovery_state.get("park_reason"))
         # No fix landed -- stays on validating.
-        self.assertEqual(state.get(REVIEW_ROUND), 1)
-        self.assertNotIn((REVIEWER_RECOVERY_ISSUE, LABEL_DOCUMENTING), gh.label_history)
+        self.assertEqual(recovery_state.get(REVIEW_ROUND), 1)
+        self.assertNotIn((REVIEWER_RECOVERY_ISSUE, LABEL_DOCUMENTING), recovery_gh.label_history)
 
     def test_clean_dev_recovery_keeps_label(self) -> None:
         # The dev session timed out without producing a new commit (HEAD
         # unchanged from the pre-agent watermark). Recovery clears the
         # flags and stays on validating.
-        gh, issue = self._validating_issue(
+        recovery_gh, issue = self._validating_issue(
             issue_number=CLEAN_DEV_RECOVERY_ISSUE,
             awaiting_human=True,
             park_reason="agent_timeout",
@@ -278,7 +279,7 @@ class ValidatingRecoveryStaysOnValidatingTest(
 
         with patch.object(workflow, "_worktree_path", return_value=Path("/tmp")):
             self._run_validating(
-                gh,
+                recovery_gh,
                 issue,
                 run_agent=_agent(),
                 dirty_files=(),
@@ -286,17 +287,17 @@ class ValidatingRecoveryStaysOnValidatingTest(
                 head_shas=("cafe1234",),  # HEAD == pre-agent SHA: no commit.
             )
 
-        state = gh.pinned_data(CLEAN_DEV_RECOVERY_ISSUE)
-        self.assertFalse(state.get(AWAITING_HUMAN))
-        self.assertEqual(state.get(REVIEW_ROUND), 1)
-        self.assertNotIn((CLEAN_DEV_RECOVERY_ISSUE, LABEL_DOCUMENTING), gh.label_history)
+        recovery_state = recovery_gh.pinned_data(CLEAN_DEV_RECOVERY_ISSUE)
+        self.assertFalse(recovery_state.get(AWAITING_HUMAN))
+        self.assertEqual(recovery_state.get(REVIEW_ROUND), 1)
+        self.assertNotIn((CLEAN_DEV_RECOVERY_ISSUE, LABEL_DOCUMENTING), recovery_gh.label_history)
 
     def test_pushed_dev_recovery_stays_validating(self) -> None:
         # The dev committed before the timeout killed it; recovery
         # finishes the push. A new SHA landed on the PR but the issue
         # stays on `validating` so the reviewer re-evaluates on the
         # next tick.
-        gh, issue = self._validating_issue(
+        recovery_gh, issue = self._validating_issue(
             issue_number=PUSHED_DEV_RECOVERY_ISSUE,
             awaiting_human=True,
             park_reason="agent_timeout",
@@ -307,7 +308,7 @@ class ValidatingRecoveryStaysOnValidatingTest(
 
         with patch.object(workflow, "_worktree_path", return_value=Path("/tmp")):
             self._run_validating(
-                gh,
+                recovery_gh,
                 issue,
                 run_agent=_agent(),
                 dirty_files=(),
@@ -315,9 +316,9 @@ class ValidatingRecoveryStaysOnValidatingTest(
                 head_shas=("beef5678",),  # HEAD moved past pre-agent SHA.
             )
 
-        state = gh.pinned_data(PUSHED_DEV_RECOVERY_ISSUE)
-        self.assertEqual(state.get(REVIEW_ROUND), 2)
-        self.assertNotIn((PUSHED_DEV_RECOVERY_ISSUE, LABEL_DOCUMENTING), gh.label_history)
+        recovery_state = recovery_gh.pinned_data(PUSHED_DEV_RECOVERY_ISSUE)
+        self.assertEqual(recovery_state.get(REVIEW_ROUND), 2)
+        self.assertNotIn((PUSHED_DEV_RECOVERY_ISSUE, LABEL_DOCUMENTING), recovery_gh.label_history)
 
 
 class _ValidatingToInReviewFixtureMixin(_PatchedWorkflowMixin):
@@ -361,6 +362,38 @@ class _ValidatingToInReviewFixtureMixin(_PatchedWorkflowMixin):
         )
         return gh, issue, pr
 
+    def _backdate_comments(self, issue, pr) -> None:
+        long_ago = datetime.now(timezone.utc) - timedelta(hours=1)
+        for comment in list(issue.comments) + list(pr.issue_comments):
+            comment.created_at = long_ago
+
+    def _ready_for_in_review(self, issue, pr) -> None:
+        pr.approved = True
+        pr.mergeable = True
+        pr.check_state = "success"
+        if not any(label.name == LABEL_IN_REVIEW for label in issue.labels):
+            issue.labels = [FakeLabel(LABEL_IN_REVIEW)]
+
+    def _run_debounced_in_review(self, github, issue):
+        with patch.object(
+            config,
+            "IN_REVIEW_DEBOUNCE_SECONDS",
+            REVIEW_DEBOUNCE_SECONDS,
+        ):
+            return self._run_in_review(
+                github,
+                issue,
+                run_agent=_agent(),
+            )
+
+    def _assert_ready_ping(self, github) -> None:
+        ping_comments = [
+            body
+            for _, body in github.posted_comments
+            if "ready for review/merge" in body
+        ]
+        self.assertEqual(len(ping_comments), 1)
+
 
 class ValidatingToInReviewHandoffTest(
     unittest.TestCase,
@@ -378,10 +411,8 @@ class ValidatingToInReviewHandoffTest(
         # Step 1: validating approves. This posts a PR comment, seeds the
         # watermark, and flips to `documenting` (the final-docs hop
         # before in_review).
-        long_ago = datetime.now(timezone.utc) - timedelta(hours=1)
         # Backdate every existing comment so debounce would otherwise fire.
-        for comment in list(issue.comments) + list(pr.issue_comments):
-            comment.created_at = long_ago
+        self._backdate_comments(issue, pr)
 
         mocks_v = self._run_validating(
             gh,
@@ -395,30 +426,16 @@ class ValidatingToInReviewHandoffTest(
         # Backdate the approval comment that pr_comment just appended too,
         # so it would falsely fire the debounce-resume path if the
         # watermark were not seeded.
-        for comment in list(pr.issue_comments):
-            if comment.created_at is None:
-                comment.created_at = long_ago
+        self._backdate_comments(issue, pr)
 
         # Step 2: pretend approved + green checks + mergeable so the
         # ready-ping gate is the thing under test.
-        pr.approved = True
-        pr.mergeable = True
-        pr.check_state = "success"
         # Skip the documenting hop (no docs change) by relabeling to
         # in_review -- this is what `_handle_documenting`'s no-change
         # exit would do for a final-docs pass with nothing to commit.
         # Watermarks set by validating ride through untouched.
-        from tests.fakes import FakeLabel
-
-        if not any(label.name == LABEL_IN_REVIEW for label in issue.labels):
-            issue.labels = [FakeLabel(LABEL_IN_REVIEW)]
-
-        with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", REVIEW_DEBOUNCE_SECONDS):
-            mocks_r = self._run_in_review(
-                gh,
-                issue,
-                run_agent=_agent(),
-            )
+        self._ready_for_in_review(issue, pr)
+        mocks_r = self._run_debounced_in_review(gh, issue)
 
         # Critical assertion: NO dev resume on stale orchestrator comments.
         mocks_r["run_agent"].assert_not_called()
@@ -426,8 +443,7 @@ class ValidatingToInReviewHandoffTest(
         # for the manual merge instead of merging itself.
         self.assertEqual(gh.merge_calls, [])
         self.assertNotIn((HANDOFF_ISSUE, "done"), gh.label_history)
-        ping_comments = [body for _, body in gh.posted_comments if "ready for review/merge" in body]
-        self.assertEqual(len(ping_comments), 1)
+        self._assert_ready_ping(gh)
 
     def test_second_handoff_ratchets_watermark(self) -> None:
         # An earlier in_review tick consumed a human PR comment (id 2000)

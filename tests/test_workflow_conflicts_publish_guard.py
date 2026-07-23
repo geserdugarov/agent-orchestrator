@@ -22,6 +22,14 @@ def _pr(sha):
     return FakePR(number=1, head_branch="b", head=FakePRRef(sha=sha))
 
 
+def _state_for(issue_number: int, **state_fields):
+    github = FakeGitHubClient()
+    issue = make_issue(issue_number, label="resolving_conflict")
+    github.add_issue(issue)
+    github.seed_state(issue_number, **state_fields)
+    return github.read_pinned_state(issue)
+
+
 class ResolvingConflictPublishGuardUnitTest(unittest.TestCase):
     """Unit tests for the two safety probes behind the already-rebased
     force-publish decision."""
@@ -33,11 +41,7 @@ class ResolvingConflictPublishGuardUnitTest(unittest.TestCase):
         # initial implementing push, an intermediate fixing push) are not
         # currently recorded, so the guard refuses those by design rather
         # than guessing.
-        gh = FakeGitHubClient()
-        issue = make_issue(1, label="resolving_conflict")
-        gh.add_issue(issue)
-        gh.seed_state(1, docs_checked_sha="abc")
-        state = gh.read_pinned_state(issue)
+        state = _state_for(1, docs_checked_sha="abc")
         self.assertTrue(
             conflicts._pr_head_orchestrator_produced(state, _pr("abc")),
         )
@@ -50,11 +54,7 @@ class ResolvingConflictPublishGuardUnitTest(unittest.TestCase):
         )
         # No `docs_checked_sha` recorded -- e.g. a pre-docs validating
         # PR head -- must NOT match an empty-string lookup either.
-        gh2 = FakeGitHubClient()
-        issue2 = make_issue(2, label="resolving_conflict")
-        gh2.add_issue(issue2)
-        gh2.seed_state(2, dev_agent="claude")
-        state2 = gh2.read_pinned_state(issue2)
+        state2 = _state_for(2, dev_agent="claude")
         self.assertFalse(
             conflicts._pr_head_orchestrator_produced(state2, _pr("abc")),
         )

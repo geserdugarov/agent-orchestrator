@@ -26,7 +26,7 @@ class ResolvingConflictDirtyParkingTest(unittest.TestCase, _ResolvingConflictMix
     """
 
     def test_dirty_worktree_parks_for_human(self) -> None:
-        gh, issue, pr = self._seed()
+        gh, issue = self._seed()[:2]
 
         merge_mock = MagicMock(return_value=(False, ["a.py"]))
         git_mock = MagicMock(return_value=MagicMock(returncode=0, stdout="", stderr=""))
@@ -55,13 +55,12 @@ class ResolvingConflictDirtyParkingTest(unittest.TestCase, _ResolvingConflictMix
             )
 
         mocks[PUSH_BRANCH].assert_not_called()
-        state = gh.pinned_data(CONFLICT_ISSUE)
-        self.assertTrue(state.get(AWAITING_HUMAN))
+        self.assertTrue(gh.pinned_data(CONFLICT_ISSUE).get(AWAITING_HUMAN))
         self.assertNotIn((CONFLICT_ISSUE, LABEL_VALIDATING), gh.label_history)
 
     def test_rebase_in_progress_parks_without_push(self) -> None:
-        gh, issue, pr = self._seed()
-        mocks, merge_mock, git_mock = self._run_with_merge(
+        gh, issue, _ = self._seed()
+        mocks, _, _ = self._run_with_merge(
             gh,
             issue,
             merge_succeeded=False,
@@ -90,7 +89,7 @@ class ResolvingConflictDirtyParkingTest(unittest.TestCase, _ResolvingConflictMix
         # a SHA that silently omits the leftover edits, and the reviewer
         # at validating would later run on a tree that does not match
         # the PR. Park instead.
-        gh, issue, pr = self._seed()
+        gh, issue, _ = self._seed()
 
         merge_mock = MagicMock(return_value=(True, []))
 
@@ -107,8 +106,7 @@ class ResolvingConflictDirtyParkingTest(unittest.TestCase, _ResolvingConflictMix
         mocks[PUSH_BRANCH].assert_not_called()
         merge_mock.assert_not_called()
         self.assertNotIn((CONFLICT_ISSUE, LABEL_VALIDATING), gh.label_history)
-        state = gh.pinned_data(CONFLICT_ISSUE)
-        self.assertTrue(state.get(AWAITING_HUMAN))
+        self.assertTrue(gh.pinned_data(CONFLICT_ISSUE).get(AWAITING_HUMAN))
         last_comment = gh.posted_comments[-1][1]
         self.assertIn("uncommitted", last_comment)
 
@@ -116,8 +114,8 @@ class ResolvingConflictDirtyParkingTest(unittest.TestCase, _ResolvingConflictMix
         # Clean rebase produced a new HEAD but the
         # worktree carries pre-existing dirty files. Pushing the merge
         # rebased branch without those edits would publish an incomplete branch.
-        gh, issue, pr = self._seed()
-        mocks, merge_mock, _ = self._run_with_merge(
+        gh, issue, _ = self._seed()
+        mocks, _, _ = self._run_with_merge(
             gh,
             issue,
             merge_succeeded=True,
@@ -136,8 +134,8 @@ class ResolvingConflictDirtyParkingTest(unittest.TestCase, _ResolvingConflictMix
         # at validating reads the worktree directly, so flipping with a
         # dirty tree would let the agent vote on something that does NOT
         # match the PR head. Park instead.
-        gh, issue, pr = self._seed()
-        mocks, merge_mock, _ = self._run_with_merge(
+        gh, issue, _ = self._seed()
+        mocks, _, _ = self._run_with_merge(
             gh,
             issue,
             merge_succeeded=True,
