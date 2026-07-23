@@ -45,15 +45,16 @@ orchestrator process is stateless.
   `_agent` for agent execution, `_resume` for awaiting-human resume paths, `_dirty` for dirty / rebase-in-progress
   parking, `_recovery` for recovery pushes, `_diverged` for stale / diverged worktree handling, `_publish` for
   already-rebased force-publish scenarios, `_publish_guard` for the publish-guard probe unit tests, `_drift` for
-  hash-drift resume behavior)); facade-level helper tests are split into focused modules
+  hash-drift resume behavior)); scheduler, base-sync, cleanup, and worktree-subsystem tests are split across
+  `tests/test_scheduler_*.py`, `tests/test_workflow_scheduler_*.py`, `tests/test_workflow_base_sync_*.py`,
+  `tests/test_workflow_cleanup*.py`, and `tests/test_workflow_worktree_*.py`, with subsystem-specific support in
+  `tests/scheduler_*.py`, `tests/base_sync_*.py`, and `tests/worktree_*.py`; other facade-level helper tests include
   (`tests/test_workflow_verdict_parsing.py`, `tests/test_workflow_prompt_redaction.py`,
-  `tests/test_workflow_branch_publication.py`, `tests/test_workflow_pickup.py`,
+  `tests/test_workflow_branch_publication*.py`, `tests/test_workflow_pickup.py`,
   `tests/test_workflow_event_emission.py`, `tests/test_workflow_agent_analytics.py`,
   `tests/test_workflow_model_extraction.py`, `tests/test_workflow_pr_lifecycle.py`,
-  `tests/test_workflow_list_pollable.py`, `tests/test_workflow_worktree_paths.py`, `tests/test_workflow_cleanup.py`,
-  `tests/test_workflow_base_sync_unit.py`, `tests/test_workflow_tick_parallel.py`,
-  `tests/test_workflow_scheduler_routing.py`, `tests/test_workflow_base_sync_real_git.py`,
-  `tests/test_workflow_drift.py`, `tests/test_workflow_worktree_serialization.py`,
+  `tests/test_workflow_list_pollable.py`, `tests/test_workflow_tick_parallel.py`,
+  `tests/test_workflow_drift.py`,
   `tests/test_workflow_backlog_routing.py`, `tests/test_workflow_question_routing.py`,
   `tests/test_workflow_documenting_routing.py`, `tests/test_workflow_fixing_routing.py`,
   `tests/test_workflow_in_review_fresh_feedback.py`, `tests/test_workflow_community_contribution.py`,

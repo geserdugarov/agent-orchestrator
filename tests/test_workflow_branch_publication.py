@@ -1,29 +1,25 @@
 # Copyright 2026 Geser Dugarov
 # SPDX-License-Identifier: Apache-2.0
-"""`_push_branch` divergence handling: ls-remote + --force-with-lease for
-the legacy self-restart case, empty-lease for first-time pushes, refusal
-on local url.<host>.insteadOf rewrites and http.* proxy/TLS transport config,
-and per-spec token resolution so multi-repo deployments honor each
-`~/.config/<owner>/<repo>/token` file."""
+"""``_push_branch`` lease, failure, and per-repository token decisions."""
+
 from __future__ import annotations
 
 import contextlib
-import subprocess
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from orchestrator import config, git_plumbing, workflow
+from orchestrator import config, workflow
 
 from tests.workflow_helpers import (
-    _FAKE_WT, _TEST_SPEC, _temp_git_repo_with_local_config,
+    _FAKE_WT,
+    _TEST_SPEC,
 )
 
 ISSUE_BRANCH = "orchestrator/issue-5"
 ISSUE_REF = f"refs/heads/{ISSUE_BRANCH}"
 TOKEN_RESOLVER_ATTR = "_resolve_github_token"
 GIT_FAILURE_EXIT_CODE = 128
-HTTP_PROXY_KEY = "http.proxy"
 
 
 def _git_result(
@@ -42,11 +38,14 @@ def _git_result(
 @contextlib.contextmanager
 def _patched_push(run_results: list):
     run_mock = MagicMock(side_effect=run_results)
-    with patch.object(
-        workflow.config,
-        TOKEN_RESOLVER_ATTR,
-        return_value="ghp-test-secret",
-    ), patch.object(workflow.subprocess, "run", run_mock):
+    with (
+        patch.object(
+            workflow.config,
+            TOKEN_RESOLVER_ATTR,
+            return_value="ghp-test-secret",
+        ),
+        patch.object(workflow.subprocess, "run", run_mock),
+    ):
         yield run_mock
 
 
@@ -73,14 +72,14 @@ class PushBranchTest(unittest.TestCase):
         # rewrite check (clean), ls-remote (returns sha), push (ok)
         sha = "87b2bc94b03a1729ef8b8145836d0959f433600e"
         ls_stdout = f"{sha}\t{ISSUE_REF}\n"
-        with _patched_push([
-            _git_result(),
-            _git_result(stdout=ls_stdout),
-            _git_result(),
-        ]) as run_mock:
-            ok = workflow._push_branch(
-                _TEST_SPEC, _FAKE_WT, ISSUE_BRANCH
-            )
+        with _patched_push(
+            [
+                _git_result(),
+                _git_result(stdout=ls_stdout),
+                _git_result(),
+            ]
+        ) as run_mock:
+            ok = workflow._push_branch(_TEST_SPEC, _FAKE_WT, ISSUE_BRANCH)
             self.assertTrue(ok)
             push_cmd = run_mock.call_args_list[2].args[0]
             self.assertIn("push", push_cmd)
@@ -94,14 +93,14 @@ class PushBranchTest(unittest.TestCase):
         # First push ever for this branch -- ls-remote returns nothing, the
         # lease becomes "expect ref to not exist" so a concurrent create still
         # fails the lease.
-        with _patched_push([
-            _git_result(),
-            _git_result(stdout=""),
-            _git_result(),
-        ]) as run_mock:
-            ok = workflow._push_branch(
-                _TEST_SPEC, _FAKE_WT, "orchestrator/issue-9"
-            )
+        with _patched_push(
+            [
+                _git_result(),
+                _git_result(stdout=""),
+                _git_result(),
+            ]
+        ) as run_mock:
+            ok = workflow._push_branch(_TEST_SPEC, _FAKE_WT, "orchestrator/issue-9")
             self.assertTrue(ok)
             push_cmd = run_mock.call_args_list[2].args[0]
             self.assertIn(
@@ -110,13 +109,13 @@ class PushBranchTest(unittest.TestCase):
             )
 
     def test_ls_remote_failure_aborts_without_pushing(self) -> None:
-        with _patched_push([
-            _git_result(),
-            _git_result(returncode=GIT_FAILURE_EXIT_CODE, stderr="network down"),
-        ]) as run_mock:
-            ok = workflow._push_branch(
-                _TEST_SPEC, _FAKE_WT, ISSUE_BRANCH
-            )
+        with _patched_push(
+            [
+                _git_result(),
+                _git_result(returncode=GIT_FAILURE_EXIT_CODE, stderr="network down"),
+            ]
+        ) as run_mock:
+            ok = workflow._push_branch(_TEST_SPEC, _FAKE_WT, ISSUE_BRANCH)
             self.assertFalse(ok)
             # Only rewrite-check + ls-remote ran; the push subprocess.run was not
             # invoked.
@@ -124,14 +123,14 @@ class PushBranchTest(unittest.TestCase):
 
     def test_push_failure_returns_false(self) -> None:
         ls_stdout = f"abc123\t{ISSUE_REF}\n"
-        with _patched_push([
-            _git_result(),
-            _git_result(stdout=ls_stdout),
-            _git_result(returncode=GIT_FAILURE_EXIT_CODE, stderr="rejected"),
-        ]):
-            ok = workflow._push_branch(
-                _TEST_SPEC, _FAKE_WT, ISSUE_BRANCH
-            )
+        with _patched_push(
+            [
+                _git_result(),
+                _git_result(stdout=ls_stdout),
+                _git_result(returncode=GIT_FAILURE_EXIT_CODE, stderr="rejected"),
+            ]
+        ):
+            ok = workflow._push_branch(_TEST_SPEC, _FAKE_WT, ISSUE_BRANCH)
         self.assertFalse(ok)
 
     def test_url_rewrite_in_local_config_refuses_push(self) -> None:
@@ -140,14 +139,10 @@ class PushBranchTest(unittest.TestCase):
         # push must never run.
         rewrite_hit = MagicMock()
         rewrite_hit.returncode = 0
-        rewrite_hit.stdout = (
-            "url.https://evil.example.com/.insteadof https://github.com/\n"
-        )
+        rewrite_hit.stdout = "url.https://evil.example.com/.insteadof https://github.com/\n"
         rewrite_hit.stderr = ""
         with _patched_push([rewrite_hit]) as run_mock:
-            ok = workflow._push_branch(
-                _TEST_SPEC, _FAKE_WT, ISSUE_BRANCH
-            )
+            ok = workflow._push_branch(_TEST_SPEC, _FAKE_WT, ISSUE_BRANCH)
             self.assertFalse(ok)
             self.assertEqual(run_mock.call_count, 1)
 
@@ -156,38 +151,39 @@ class PushBranchTest(unittest.TestCase):
         # from `spec.slug` (so a per-repo `~/.config/<owner>/<repo>/token`
         # file is honored), not from the cached single-repo
         # `config.GITHUB_TOKEN` that was looked up once for `config.REPO`.
-        run_mock = MagicMock(side_effect=[
-            _git_result(),
-            _git_result(
-                stdout="deadbeefcafef00ddeadbeefcafef00ddeadbeef"
-                f"\t{ISSUE_REF}\n",
-            ),
-            _git_result(),
-        ])
+        run_mock = MagicMock(
+            side_effect=[
+                _git_result(),
+                _git_result(
+                    stdout=f"deadbeefcafef00ddeadbeefcafef00ddeadbeef\t{ISSUE_REF}\n",
+                ),
+                _git_result(),
+            ]
+        )
         resolver = _TokenResolver()
 
-        with patch.object(workflow.config, TOKEN_RESOLVER_ATTR, resolver), \
-             patch.object(workflow.subprocess, "run", run_mock):
-            self.assertTrue(workflow._push_branch(
-                config.RepoSpec(
-                    slug="acme/widgets",
-                    target_root=Path("/tmp/orchestrator-test-target-root"),
-                    base_branch="main",
-                ),
-                _FAKE_WT,
-                ISSUE_BRANCH,
-            ))
+        with (
+            patch.object(workflow.config, TOKEN_RESOLVER_ATTR, resolver),
+            patch.object(workflow.subprocess, "run", run_mock),
+        ):
+            self.assertTrue(
+                workflow._push_branch(
+                    config.RepoSpec(
+                        slug="acme/widgets",
+                        target_root=Path("/tmp/orchestrator-test-target-root"),
+                        base_branch="main",
+                    ),
+                    _FAKE_WT,
+                    ISSUE_BRANCH,
+                )
+            )
         # Token was resolved exactly once, for the spec's slug.
         self.assertEqual(resolver.slugs, ["acme/widgets"])
         ls_call = run_mock.call_args_list[1]
         push_call = run_mock.call_args_list[2]
         # ls-remote and push both run with the per-spec token in GIT_TOKEN.
-        self.assertEqual(
-            ls_call.kwargs["env"]["GIT_TOKEN"], "ghp-token-for-acme-widgets"
-        )
-        self.assertEqual(
-            push_call.kwargs["env"]["GIT_TOKEN"], "ghp-token-for-acme-widgets"
-        )
+        self.assertEqual(ls_call.kwargs["env"]["GIT_TOKEN"], "ghp-token-for-acme-widgets")
+        self.assertEqual(push_call.kwargs["env"]["GIT_TOKEN"], "ghp-token-for-acme-widgets")
         # Auth URL targets the spec's slug, not the cached config.REPO.
         self.assertIn(
             "https://x-access-token@github.com/acme/widgets.git",
@@ -199,106 +195,11 @@ class PushBranchTest(unittest.TestCase):
         # token file should refuse to push and log which repo is misconfigured
         # rather than the generic "GITHUB_TOKEN missing" the legacy code emitted.
         run_mock = MagicMock()
-        with patch.object(
-            workflow.config, TOKEN_RESOLVER_ATTR, return_value=""
-        ), patch.object(workflow.subprocess, "run", run_mock):
-            ok = workflow._push_branch(
-                _TEST_SPEC, _FAKE_WT, ISSUE_BRANCH
-            )
+        with (
+            patch.object(workflow.config, TOKEN_RESOLVER_ATTR, return_value=""),
+            patch.object(workflow.subprocess, "run", run_mock),
+        ):
+            ok = workflow._push_branch(_TEST_SPEC, _FAKE_WT, ISSUE_BRANCH)
         self.assertFalse(ok)
         # Push aborted before any subprocess ran.
         run_mock.assert_not_called()
-
-
-class TransportConfigHardeningTest(unittest.TestCase):
-    """Authenticated git ops must not honor agent-writable local HTTP proxy /
-    TLS config while GIT_TOKEN is in scope. A worktree the agent controls can
-    plant `http.proxy` / `http.sslVerify=false` in `.git/config` to tunnel the
-    token-bearing push through an attacker proxy or strip TLS verification, so
-    the pre-flight fails closed on any local `http.*` key as well as the
-    url.<host>.insteadOf rewrites it already rejected. These exercise real git
-    config resolution because a mocked `--get-regexp` probe would pass even
-    against the old rewrite-only regexp.
-    """
-
-    def test_unsafe_config_flags_transport_keys(self) -> None:
-        cases = {
-            HTTP_PROXY_KEY: [(HTTP_PROXY_KEY, "http://evil.example:8080")],
-            "http.sslVerify=false": [("http.sslVerify", "false")],
-            "url-scoped http.proxy": [
-                ("http.https://github.com/.proxy", "http://evil.example:8080"),
-            ],
-            "url rewrite": [
-                ("url.https://evil.example/.insteadOf", "https://github.com/"),
-            ],
-        }
-        for label, pairs in cases.items():
-            with self.subTest(config=label):
-                with _temp_git_repo_with_local_config(pairs) as repo:
-                    flagged = git_plumbing._unsafe_local_transport_config(repo)
-                self.assertTrue(
-                    flagged, f"{label} should be rejected, got {flagged!r}"
-                )
-
-    def test_unsafe_config_allows_clean_clone_config(self) -> None:
-        # A normal clone's local config (remote URL + branch tracking) must NOT
-        # trip the pre-flight, or every push/fetch would be refused.
-        clean = [
-            ("remote.origin.url", "https://github.com/acme/widgets.git"),
-            ("branch.main.remote", "origin"),
-            ("core.logAllRefUpdates", "true"),
-        ]
-        with _temp_git_repo_with_local_config(clean) as repo:
-            self.assertEqual(
-                git_plumbing._unsafe_local_transport_config(repo), ""
-            )
-
-    def test_unsafe_config_follows_local_include_path(self) -> None:
-        # `git config --local` does not expand `include.path`, but a real
-        # fetch/push does -- so an agent can hide `http.proxy` behind an
-        # `[include] path = ...` in `.git/config`. The preflight must resolve
-        # includes the same way the token-bearing command will.
-        with _temp_git_repo_with_local_config([]) as repo:
-            evil = repo / "evil.conf"
-            evil.write_text("[http]\n\tproxy = http://evil.example:8080\n")
-            subprocess.run(
-                ["git", "config", "--local", "include.path", str(evil)],
-                cwd=repo, check=True, capture_output=True,
-            )
-            self.assertIn(
-                HTTP_PROXY_KEY,
-                git_plumbing._unsafe_local_transport_config(repo),
-            )
-
-    def test_unsafe_config_reads_per_worktree_config(self) -> None:
-        # With `extensions.worktreeConfig` enabled git honors the per-worktree
-        # `config.worktree`, which `git config --local` misses -- another place
-        # the agent can plant `http.proxy`. The preflight must read it too.
-        with _temp_git_repo_with_local_config(
-            [("extensions.worktreeConfig", "true")]
-        ) as repo:
-            subprocess.run(
-                ["git", "config", "--worktree", HTTP_PROXY_KEY,
-                 "http://evil.example:9090"],
-                cwd=repo, check=True, capture_output=True,
-            )
-            self.assertIn(
-                HTTP_PROXY_KEY,
-                git_plumbing._unsafe_local_transport_config(repo),
-            )
-
-    def test_push_refused_on_real_local_http_proxy(self) -> None:
-        # End-to-end: a real worktree carrying `http.proxy` makes `_push_branch`
-        # fail closed before the token-bearing ls-remote / push ever runs.
-        with _temp_git_repo_with_local_config(
-            [(HTTP_PROXY_KEY, "http://evil.example:8080")]
-        ) as repo, patch.object(
-            workflow.config, TOKEN_RESOLVER_ATTR,
-            return_value="ghp-test-secret",
-        ), self.assertLogs(git_plumbing.log, level="ERROR") as cm:
-            ok = workflow._push_branch(_TEST_SPEC, repo, ISSUE_BRANCH)
-        self.assertFalse(ok)
-        self.assertTrue(
-            any(HTTP_PROXY_KEY in line for line in cm.output),
-            f"expected {HTTP_PROXY_KEY} in refusal log, got {cm.output!r}",
-        )
