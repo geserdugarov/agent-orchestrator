@@ -7,6 +7,7 @@ the run returns (`gh.get_issue`) rather than trusting the handler's label
 snapshot, and on a hit the handler returns without opening a PR, relabeling,
 parking, consuming the action watermark, or advancing pinned state -- so once
 the label is removed a later tick republishes the committed work normally."""
+
 from __future__ import annotations
 
 import unittest
@@ -46,6 +47,46 @@ def _paused_view(number: int) -> object:
     return view
 
 
+def _assert_fresh_pause_state(
+    test_case,
+    github,
+    before_writes,
+    get_issue_mock,
+) -> None:
+    get_issue_mock.assert_called_with(1)
+    test_case.assertEqual(github.opened_prs, [])
+    test_case.assertEqual(github.label_history, [])
+    test_case.assertEqual(github.posted_comments, [])
+    test_case.assertEqual(github.write_state_calls, before_writes)
+    pinned_state = github.pinned_data(1)
+    test_case.assertNotIn("dev_session_id", pinned_state)
+    test_case.assertFalse(pinned_state.get("awaiting_human"))
+
+
+def _assert_poisoned_pause_state(
+    test_case,
+    github,
+    get_issue_mock,
+    before_writes,
+    mocks,
+) -> None:
+    mocks["run_agent"].assert_called_once()
+    test_case.assertEqual(get_issue_mock.call_count, 1)
+    test_case.assertEqual(github.opened_prs, [])
+    test_case.assertEqual(github.label_history, [])
+    test_case.assertEqual(github.write_state_calls, before_writes)
+    pinned_state = github.pinned_data(POISONED_RESUME_ISSUE)
+    test_case.assertEqual(
+        pinned_state.get("dev_session_id"),
+        "sess-old",
+    )
+    test_case.assertTrue(pinned_state.get("awaiting_human"))
+    test_case.assertEqual(
+        pinned_state.get("last_action_comment_id"),
+        ACTION_COMMENT_ID,
+    )
+
+
 class ImplementingLivePauseFreshSpawnTest(unittest.TestCase, _PatchedWorkflowMixin):
     def test_fresh_pause_blocks_pr_and_relabel(
         self,
@@ -59,14 +100,16 @@ class ImplementingLivePauseFreshSpawnTest(unittest.TestCase, _PatchedWorkflowMix
         issue = make_issue(1, label=LABEL_IMPLEMENTING)
         gh.add_issue(issue)
         gh.seed_state(
-            1, user_content_hash=workflow._compute_user_content_hash(issue, set()),
+            1,
+            user_content_hash=workflow._compute_user_content_hash(issue, set()),
         )
         before_writes = gh.write_state_calls
 
         get_issue_mock = MagicMock(return_value=_paused_view(1))
         with patch.object(gh, GET_ISSUE, get_issue_mock):
             self._run_implementing(
-                gh, issue,
+                gh,
+                issue,
                 run_agent=_agent(session_id="sess-1", last_message="implemented"),
                 # Recovered probe False -> spawn; a True post-agent check would
                 # open the PR were the guard absent, so the guard is what keeps
@@ -76,17 +119,12 @@ class ImplementingLivePauseFreshSpawnTest(unittest.TestCase, _PatchedWorkflowMix
                 push_branch=True,
             )
 
-        get_issue_mock.assert_called_with(1)
-        # No publish, no relabel, no HITL park comment.
-        self.assertEqual(gh.opened_prs, [])
-        self.assertEqual(gh.label_history, [])
-        self.assertEqual(gh.posted_comments, [])
-        # Durable state untouched: the fresh session id is discarded and no
-        # pinned-state advancement is written, so the next tick resumes intact.
-        self.assertEqual(gh.write_state_calls, before_writes)
-        pinned_state = gh.pinned_data(1)
-        self.assertNotIn("dev_session_id", pinned_state)
-        self.assertFalse(pinned_state.get("awaiting_human"))
+        _assert_fresh_pause_state(
+            self,
+            gh,
+            before_writes,
+            get_issue_mock,
+        )
 
 
 class ImplementingLivePauseResumeTest(unittest.TestCase, _PatchedWorkflowMixin):
@@ -107,9 +145,12 @@ class ImplementingLivePauseResumeTest(unittest.TestCase, _PatchedWorkflowMixin):
         # proves the observation is propagated, closing that race.
         gh = FakeGitHubClient()
         issue = make_issue(POISONED_RESUME_ISSUE, label=LABEL_IMPLEMENTING)
-        issue.comments.append(
-            FakeComment(id=HUMAN_REPLY_ID, body="try again please", user=FakeUser("alice"))
+        reply = FakeComment(
+            id=HUMAN_REPLY_ID,
+            body="try again please",
+            user=FakeUser("alice"),
         )
+        issue.comments.append(reply)
         gh.add_issue(issue)
         gh.seed_state(
             POISONED_RESUME_ISSUE,
@@ -120,15 +161,16 @@ class ImplementingLivePauseResumeTest(unittest.TestCase, _PatchedWorkflowMixin):
             branch=f"orchestrator/geserdugarov__agent-orchestrator/issue-{POISONED_RESUME_ISSUE}",
             user_content_hash=workflow._compute_user_content_hash(issue, set()),
         )
-        before_writes = gh.write_state_calls
+        self._before_writes = gh.write_state_calls
 
         unpaused_view = make_issue(POISONED_RESUME_ISSUE, label=LABEL_IMPLEMENTING)
         get_issue_mock = MagicMock(
             side_effect=[_paused_view(POISONED_RESUME_ISSUE), unpaused_view, unpaused_view],
         )
         with patch.object(gh, GET_ISSUE, get_issue_mock):
-            mocks = self._run_implementing(
-                gh, issue,
+            self._mocks = self._run_implementing(
+                gh,
+                issue,
                 run_agent=_agent(
                     session_id="sess-old",
                     last_message="",
@@ -136,20 +178,13 @@ class ImplementingLivePauseResumeTest(unittest.TestCase, _PatchedWorkflowMixin):
                 ),
             )
 
-        # The poisoned-session retry -- a second agent spawn -- never fired.
-        mocks["run_agent"].assert_called_once()
-        # The label was read exactly once (the helper's fetch); the handler
-        # honored that decision instead of re-reading the now-unpaused issue.
-        self.assertEqual(get_issue_mock.call_count, 1)
-        self.assertEqual(gh.opened_prs, [])
-        self.assertEqual(gh.label_history, [])
-        # No pinned-state advancement: the session id, park flag, and action
-        # watermark all stay exactly as the prior tick left them.
-        self.assertEqual(gh.write_state_calls, before_writes)
-        pinned_state = gh.pinned_data(POISONED_RESUME_ISSUE)
-        self.assertEqual(pinned_state.get("dev_session_id"), "sess-old")
-        self.assertTrue(pinned_state.get("awaiting_human"))
-        self.assertEqual(pinned_state.get("last_action_comment_id"), ACTION_COMMENT_ID)
+        _assert_poisoned_pause_state(
+            self,
+            gh,
+            get_issue_mock,
+            self._before_writes,
+            self._mocks,
+        )
 
 
 class ImplementingLivePauseRecoveryTest(unittest.TestCase, _PatchedWorkflowMixin):
@@ -171,7 +206,8 @@ class ImplementingLivePauseRecoveryTest(unittest.TestCase, _PatchedWorkflowMixin
         before_writes = gh.write_state_calls
         with patch.object(gh, GET_ISSUE, return_value=_paused_view(RECOVERY_ISSUE)):
             self._run_implementing(
-                gh, issue,
+                gh,
+                issue,
                 run_agent=_agent(session_id="sess-1", last_message="implemented"),
                 has_new_commits=[False, True],
                 dirty_files=(),
@@ -185,7 +221,8 @@ class ImplementingLivePauseRecoveryTest(unittest.TestCase, _PatchedWorkflowMixin
         # issue, so the recovered-worktree path skips the agent, publishes, and
         # relabels normally.
         mocks = self._run_implementing(
-            gh, issue,
+            gh,
+            issue,
             run_agent=_agent(),
             has_new_commits=True,
             dirty_files=(),
@@ -197,9 +234,7 @@ class ImplementingLivePauseRecoveryTest(unittest.TestCase, _PatchedWorkflowMixin
         self.assertIn((RECOVERY_ISSUE, "validating"), gh.label_history)
 
 
-class ImplementingLivePauseRetryWindowTest(
-    unittest.TestCase, _PatchedWorkflowMixin
-):
+class ImplementingLivePauseRetryWindowTest(unittest.TestCase, _PatchedWorkflowMixin):
     def test_retry_pause_stops_before_persistence(self) -> None:
         # The first resume trips a poisoned Claude session marker, so the helper
         # drops the session and retries once as a fresh spawn. An operator
@@ -218,16 +253,18 @@ class ImplementingLivePauseRetryWindowTest(
             awaiting_human=True,
             silent_park_count=0,
         )
-        state = gh.read_pinned_state(issue)
+        self._state = gh.read_pinned_state(issue)
 
-        run_agent = MagicMock(side_effect=[
-            _agent(
-                session_id="",
-                last_message="",
-                stderr="No conversation found with session ID poisoned-sess",
-            ),
-            _agent(session_id="fresh-sess", last_message="done"),
-        ])
+        self._run_agent = MagicMock(
+            side_effect=[
+                _agent(
+                    session_id="",
+                    last_message="",
+                    stderr="No conversation found with session ID poisoned-sess",
+                ),
+                _agent(session_id="fresh-sess", last_message="done"),
+            ]
+        )
 
         # First fetch (before the retry) is clean so the first-run guard passes;
         # the second fetch (after the retry) sees the label.
@@ -236,19 +273,21 @@ class ImplementingLivePauseRetryWindowTest(
         with (
             patch.object(gh, GET_ISSUE, get_issue_mock),
             patch.object(workflow, "_ensure_worktree", return_value=_FAKE_WT),
-            patch.object(workflow, "run_agent", run_agent),
+            patch.object(workflow, "run_agent", self._run_agent),
         ):
             _, _, paused = workflow._resume_dev_with_text(
-                gh, _TEST_SPEC, issue, state, "go", pause_guard=True,
+                gh,
+                _TEST_SPEC,
+                issue,
+                self._state,
+                "go",
+                pause_guard=True,
             )
 
         # Both runs happened -- the poisoned resume and one bounded fresh retry
         # -- and only then did the guard fire, on the SECOND run's fetch.
         self.assertEqual(
-            [
-                agent_call.kwargs.get("resume_session_id")
-                for agent_call in run_agent.call_args_list
-            ],
+            [agent_call.kwargs.get("resume_session_id") for agent_call in self._run_agent.call_args_list],
             ["poisoned-sess", None],
         )
         self.assertEqual(get_issue_mock.call_count, 2)
@@ -256,8 +295,8 @@ class ImplementingLivePauseRetryWindowTest(
         # The retry's fresh session id is NOT persisted (the poisoned id was
         # dropped and left cleared) and the park is NOT cleared, so the caller
         # returns leaving durable state untouched.
-        self.assertIsNone(state.get("dev_session_id"))
-        self.assertTrue(state.get("awaiting_human"))
+        self.assertIsNone(self._state.get("dev_session_id"))
+        self.assertTrue(self._state.get("awaiting_human"))
 
 
 if __name__ == "__main__":

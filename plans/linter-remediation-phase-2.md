@@ -148,7 +148,7 @@ direct-launch command remain covered by tests.
 | Stage | Goal | Findings owned | Packages complete | Status |
 |---|---|---:|---:|---:|
 | 1 | Production cleanup | 223 | 3/3 | [x] |
-| 2 | Test cleanup | 1,350 | 4/7 | [ ] |
+| 2 | Test cleanup | 1,350 | 5/7 | [ ] |
 | 3 | Final zero-finding validation | 0 | 0/1 | [ ] |
 
 Package counts are ownership counts from the baseline scan. Refactoring can move line numbers or expose a new finding,
@@ -303,12 +303,14 @@ Test accounting: 225 collected tests and 4 subtests before and after the package
 
 Baseline: `WPS201` 2, `WPS202` 3, `WPS204` 44, `WPS210` 62, `WPS213` 15, and `WPS235` 2.
 
-- [ ] Split by fresh run, retry/backend behavior, drift, full spec, PR reuse, timeout, pause, feedback, and terminal
+- [x] Split by fresh run, retry/backend behavior, drift, full spec, PR reuse, timeout, pause, feedback, and terminal
   routing.
-- [ ] Replace large scenario setup blocks with typed state and agent-result cases while keeping per-field expectations
+- [x] Replace large scenario setup blocks with typed state and agent-result cases while keeping per-field expectations
   in each test.
-- [ ] Import production collaborators through modules or smaller focused groups after splitting files.
-- [ ] Reduce all 128 findings to zero without combining different retry, feedback, or terminal routes.
+- [x] Import production collaborators through modules or smaller focused groups after splitting files.
+- [x] Reduce all 128 findings to zero without combining different retry, feedback, or terminal routes.
+
+Test accounting: 234 collected tests and 38 subtests before and after the package.
 
 ### Package 2.6 — Validating, in-review, and conflict tests (220 findings, 30 files)
 
