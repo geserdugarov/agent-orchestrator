@@ -78,10 +78,15 @@ lockfile.
 uv sync --locked                              # creates .venv/ and installs runtime + dev deps from uv.lock
 uv run ruff check orchestrator tests          # run Ruff
 uv run flake8 orchestrator tests --select=WPS # run wemake-python-styleguide
-uv run pytest                                 # run the test suite
+uv run pytest tests                           # run the test suite
 uv run python -m orchestrator.main --once     # one polling tick then exit
 uv run python -m orchestrator.main --log-level DEBUG
 ```
+
+`analytics-db/data/` is the operator-owned Docker bind mount holding the local analytics Postgres volume. It is
+runtime state, not source: **never traverse, read, modify, permission-repair, delete, or re-run any command against it
+with elevated privileges.** If a tool reports it as unreadable, that is expected — target `tests` explicitly (the
+default `pytest` config already ignores the directory) rather than escalating access.
 
 Dev tools (`pytest`, `ruff`, and `wemake-python-styleguide`, which supplies the WPS Flake8 plugin) live in the `dev`
 dependency group in `pyproject.toml`; exact versions are pinned in `uv.lock`. CI installs the same set via

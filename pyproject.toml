@@ -26,7 +26,13 @@ dashboard = ["streamlit>=1.36", "plotly>=6.8.0"]
 # tests and the opt-in live-Postgres analytics integration class -- and
 # under the default `pytest` invocation they collapse to a bare "N skipped"
 # line that hides their `_SKIP_REASON` / `SkipTest` messages.
-addopts = ["-rs"]
+# The --ignore keeps a bare `pytest` from recursing into the operator-owned
+# `analytics-db/data/` Docker bind mount, which may be unreadable and would
+# otherwise abort collection with a PermissionError on a phantom conftest.py.
+addopts = ["-rs", "--ignore=analytics-db/data"]
+# Restrict default discovery to the tracked test tree so bare `pytest` and
+# `pytest tests` collect the same inventory without probing runtime volumes.
+testpaths = ["tests"]
 
 [tool.ruff]
 # Repository-wide line-length target. Ruff enforces it for Python (E501,
