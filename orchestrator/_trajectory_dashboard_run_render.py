@@ -40,12 +40,15 @@ def _render_run_usage_and_chips(
     usage_html = _run_usage_html(run)
     if usage_html:
         st.markdown(usage_html, unsafe_allow_html=True)
-    for label, names in (
-        ("Tools offered", run.tools),
-        ("Skills triggered", run.skills_triggered),
-        ("Skills available", run.skills_available),
+    # Skills triggered always renders (with a "none" marker when empty) so a
+    # reviewer can tell "no skill fired this session" apart from an omitted
+    # row. Tools offered and Skills available keep the generic empty omission.
+    for label, names, empty_marker in (
+        ("Tools offered", run.tools, ""),
+        ("Skills triggered", run.skills_triggered, "none"),
+        ("Skills available", run.skills_available, ""),
     ):
-        chips = _labeled_chips_html(label, names)
+        chips = _labeled_chips_html(label, names, empty_marker)
         if chips:
             st.markdown(chips, unsafe_allow_html=True)
 

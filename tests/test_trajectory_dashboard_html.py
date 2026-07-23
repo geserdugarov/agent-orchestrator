@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Trajectory dashboard topbar, KPI, metadata, chip, and run-table HTML tests."""
 
-import unittest
+from unittest import TestCase, mock
 
 
 from orchestrator import trajectory_reader as tr
@@ -53,7 +53,7 @@ def _run(**overrides):
     return tr.parse_record(record, seq=0)
 
 
-class TopbarHtmlTest(unittest.TestCase):
+class TopbarHtmlTest(TestCase):
     def test_carries_title_and_in_view_pill(self) -> None:
         html = _td()._topbar_html(10, 3)
         self.assertIn("orch-topbar", html)
@@ -62,7 +62,7 @@ class TopbarHtmlTest(unittest.TestCase):
         self.assertIn("3 / 10", html)
 
 
-class KpiStripHtmlTest(unittest.TestCase):
+class KpiStripHtmlTest(TestCase):
     def test_tiles_truncated_foot_and_cost(self) -> None:
         summary = tr.TrajectorySummary(
             total_runs=5,
@@ -87,7 +87,7 @@ class KpiStripHtmlTest(unittest.TestCase):
         self.assertIn(">$0.00</div>", html)
 
 
-class MetaHtmlTest(unittest.TestCase):
+class MetaHtmlTest(TestCase):
     def test_only_present_fields_render(self) -> None:
         run = _run(session_id="sess-1", review_round=2)
         html = _td()._meta_html(run)
@@ -105,7 +105,7 @@ class MetaHtmlTest(unittest.TestCase):
         self.assertNotIn(_REPO_UNSAFE, html)
 
 
-class ChipsHtmlTest(unittest.TestCase):
+class ChipsHtmlTest(TestCase):
     def test_label_and_pills(self) -> None:
         html = _td()._labeled_chips_html("Tools offered", [_TOOL_BASH, "Edit"])
         self.assertIn("Tools offered", html)
@@ -115,13 +115,43 @@ class ChipsHtmlTest(unittest.TestCase):
     def test_empty_is_blank(self) -> None:
         self.assertEqual(_td()._labeled_chips_html("Tools", []), "")
 
+    def test_empty_marker_renders_none_state(self) -> None:
+        # With a marker, an empty list still renders the row and flags the
+        # chip with the `none` empty-state class instead of a real pill.
+        html = _td()._labeled_chips_html("Skills triggered", [], empty_marker="none")
+        self.assertIn(">Skills triggered</span>", html)
+        self.assertIn('class="orch-traj-chip none"', html)
+        self.assertIn(">none</span>", html)
+
     def test_escaped(self) -> None:
         html = _td()._labeled_chips_html("Skills", ["<x>"])
         self.assertIn("&lt;x&gt;", html)
         self.assertNotIn("<x>", html)
 
+    def test_render_shows_empty_skills_triggered(self) -> None:
+        # A session that fired no skill still shows the row, marked `none`, so
+        # it is distinguishable from an omitted row; the equally-empty Tools
+        # and Skills-available rows stay omitted.
+        blob = self._render_chips()
+        self.assertIn(">Skills triggered</span>", blob)
+        self.assertIn('class="orch-traj-chip none"', blob)
+        self.assertIn(">none</span>", blob)
+        self.assertNotIn("Tools offered", blob)
+        self.assertNotIn("Skills available", blob)
 
-class RunsTableHtmlTest(unittest.TestCase):
+    def test_render_triggered_skills_are_plain_chips(self) -> None:
+        blob = self._render_chips(skills_triggered=["develop", "review"])
+        self.assertIn(">develop</span>", blob)
+        self.assertIn(">review</span>", blob)
+        self.assertNotIn('class="orch-traj-chip none"', blob)
+
+    def _render_chips(self, **overrides) -> str:
+        st = mock.Mock()
+        _td()._render_run_usage_and_chips(st, _run(**overrides))
+        return "".join(call.args[0] for call in st.markdown.call_args_list)
+
+
+class RunsTableHtmlTest(TestCase):
     def test_headers_and_row_cells(self) -> None:
         run = _run(
             issue=_ISSUE,
