@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import unittest
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from orchestrator import config, workflow
@@ -50,6 +51,8 @@ PICKUP_COMMENT_ID = 900
 PR_OPEN_COMMENT_ID = 901
 HANDOFF_FEEDBACK_ID = 950
 REVIEW_DEBOUNCE_SECONDS = 600
+TRACKED_ID_START = 1001
+TRACKED_ID_STOP = 1011
 INLINE_FEEDBACK_ID = 4242
 INLINE_WATERMARK = 4241
 SUMMARY_FEEDBACK_ID = 5000
@@ -75,7 +78,29 @@ FEEDBACK_SURFACES = (
 )
 
 
-class SameAccountHumanFeedbackTest(unittest.TestCase, _PatchedWorkflowMixin):
+class _DebouncedInReviewMixin(_PatchedWorkflowMixin):
+    def _run_debounced(self, github, issue):
+        with patch.object(config, DEBOUNCE_SETTING, REVIEW_DEBOUNCE_SECONDS):
+            return self._run_in_review(
+                github,
+                issue,
+                run_agent=_agent(),
+            )
+
+    def _assert_ready_ping(self, github) -> None:
+        self.assertTrue(
+            any(
+                "ready for review/merge" in body
+                for _, body in github.posted_comments
+            )
+        )
+
+    def _ensure_in_review_label(self, issue) -> None:
+        if not any(label.name == LABEL_IN_REVIEW for label in issue.labels):
+            issue.labels = [FakeLabel(LABEL_IN_REVIEW)]
+
+
+class SameAccountHumanFeedbackTest(unittest.TestCase, _DebouncedInReviewMixin):
     """Operators commonly run the orchestrator with a personal PAT and also
     review PRs by hand from that same GitHub account. The self-comment filter
     must not key on author login -- if it did, real human review feedback from
@@ -129,12 +154,7 @@ class SameAccountHumanFeedbackTest(unittest.TestCase, _PatchedWorkflowMixin):
             pickup_comment_id=PICKUP_COMMENT_ID,
         )
 
-        with patch.object(config, DEBOUNCE_SETTING, REVIEW_DEBOUNCE_SECONDS):
-            mocks = self._run_in_review(
-                gh,
-                issue,
-                run_agent=_agent(),
-            )
+        mocks = self._run_debounced(gh, issue)
 
         # No merge (humans drive the merge), and the human's standing
         # objection routes the issue to `fixing`.
@@ -157,7 +177,35 @@ class SameAccountHumanFeedbackTest(unittest.TestCase, _PatchedWorkflowMixin):
         # handoff would advance the watermark past the human comment as if
         # it were the orchestrator's own self-run, then silently swallow
         # it on the next in_review tick.
-        gh = FakeGitHubClient()
+        gh, issue = self._seed_handoff_case()
+
+        # Step 1: validating approves; watermark seed must STOP at id=950.
+        self._run_validating(
+            gh,
+            issue,
+            run_agent=_agent(last_message=REVIEW_APPROVED_MESSAGE),
+        )
+        last_comment_id = gh.pinned_data(HANDOFF_ISSUE).get("pr_last_comment_id")
+        self.assertIsNotNone(last_comment_id)
+        self.assertLess(
+            last_comment_id,
+            HANDOFF_FEEDBACK_ID,
+            f"watermark must stop before same-account human comment id=950 (got {last_comment_id})",
+        )
+
+        self._ensure_in_review_label(issue)
+        mocks = self._run_debounced(gh, issue)
+
+        mocks[RUN_AGENT].assert_not_called()
+        self.assertEqual(gh.merge_calls, [])
+        self.assertIn((HANDOFF_ISSUE, LABEL_FIXING), gh.label_history)
+        self.assertEqual(
+            gh.pinned_data(HANDOFF_ISSUE).get(PENDING_ISSUE_MAX_ID),
+            HANDOFF_FEEDBACK_ID,
+        )
+
+    def _seed_handoff_case(self):
+        github = FakeGitHubClient()
         long_ago = datetime.now(timezone.utc) - timedelta(hours=1)
         issue = make_issue(
             HANDOFF_ISSUE,
@@ -186,7 +234,7 @@ class SameAccountHumanFeedbackTest(unittest.TestCase, _PatchedWorkflowMixin):
                 ),
             ],
         )
-        gh.add_issue(issue)
+        github.add_issue(issue)
         pr = FakePR(
             number=HANDOFF_PR,
             head_branch=_issue_branch(HANDOFF_ISSUE),
@@ -194,8 +242,8 @@ class SameAccountHumanFeedbackTest(unittest.TestCase, _PatchedWorkflowMixin):
             mergeable=True,
             check_state=CHECKS_SUCCESS,
         )
-        gh.add_pr(pr)
-        gh.seed_state(
+        github.add_pr(pr)
+        github.seed_state(
             HANDOFF_ISSUE,
             pr_number=HANDOFF_PR,
             branch=_issue_branch(HANDOFF_ISSUE),
@@ -205,45 +253,12 @@ class SameAccountHumanFeedbackTest(unittest.TestCase, _PatchedWorkflowMixin):
             orchestrator_comment_ids=[PICKUP_COMMENT_ID, PR_OPEN_COMMENT_ID],
             pickup_comment_id=PICKUP_COMMENT_ID,
         )
-
-        # Step 1: validating approves; watermark seed must STOP at id=950.
-        self._run_validating(
-            gh,
-            issue,
-            run_agent=_agent(last_message=REVIEW_APPROVED_MESSAGE),
-        )
-        last_comment_id = gh.pinned_data(HANDOFF_ISSUE).get("pr_last_comment_id")
-        self.assertIsNotNone(last_comment_id)
-        self.assertLess(
-            last_comment_id,
-            HANDOFF_FEEDBACK_ID,
-            f"watermark must stop before same-account human comment id=950 (got {last_comment_id})",
-        )
-
-        # Step 2: in_review tick. Human comment is still past the watermark
-        # and the in_review handler hands it off to `fixing` (no inline
-        # dev resume).
-        if not any(label.name == LABEL_IN_REVIEW for label in issue.labels):
-            issue.labels = [FakeLabel(LABEL_IN_REVIEW)]
-        with patch.object(config, DEBOUNCE_SETTING, REVIEW_DEBOUNCE_SECONDS):
-            mocks = self._run_in_review(
-                gh,
-                issue,
-                run_agent=_agent(),
-            )
-
-        mocks[RUN_AGENT].assert_not_called()
-        self.assertEqual(gh.merge_calls, [])
-        self.assertIn((HANDOFF_ISSUE, LABEL_FIXING), gh.label_history)
-        self.assertEqual(
-            gh.pinned_data(HANDOFF_ISSUE).get(PENDING_ISSUE_MAX_ID),
-            HANDOFF_FEEDBACK_ID,
-        )
+        return github, issue
 
 
 class OrchestratorMarkerFeedbackFilterTest(
     unittest.TestCase,
-    _PatchedWorkflowMixin,
+    _DebouncedInReviewMixin,
 ):
     """The in_review fresh-feedback scan must filter orchestrator-authored
     issue / PR-conversation comments by hidden body marker as well as by
@@ -291,23 +306,13 @@ class OrchestratorMarkerFeedbackFilterTest(
             docs_verdict="no_change",
         )
 
-        with patch.object(config, DEBOUNCE_SETTING, REVIEW_DEBOUNCE_SECONDS):
-            mocks = self._run_in_review(
-                gh,
-                issue,
-                run_agent=_agent(),
-            )
+        mocks = self._run_debounced(gh, issue)
 
         mocks[RUN_AGENT].assert_not_called()
         self.assertNotIn((MARKER_FILTER_ISSUE, LABEL_FIXING), gh.label_history)
         self.assertEqual(gh.merge_calls, [])
         self.assertEqual(gh.pinned_data(MARKER_FILTER_ISSUE).get(READY_PING_SHA), "ready-sha")
-        self.assertTrue(
-            any(
-                "ready for review/merge" in body
-                for _, body in gh.posted_comments
-            )
-        )
+        self._assert_ready_ping(gh)
 
     def test_legacy_marker_only_loop_is_filtered(self) -> None:
         # Regression test for #437 / PR #433 loop: an issue that reached
@@ -325,57 +330,62 @@ class OrchestratorMarkerFeedbackFilterTest(
         # indefinitely. The handler must drop the marker-bearing bot
         # comments on the id-OR-marker filter and reach the ready-ping
         # branch instead.
-        gh = FakeGitHubClient()
-        issue = make_issue(LEGACY_LOOP_ISSUE, label=LABEL_IN_REVIEW)
-        gh.add_issue(issue)
-        long_ago = datetime.now(timezone.utc) - timedelta(hours=1)
-        marker = workflow._ORCH_COMMENT_MARKER
+        gh, issue = self._seed_legacy_loop()
         # Mix of orchestrator-marked PR-conversation comments: most tracked
         # in orchestrator_comment_ids, three deliberately untracked to
         # model the eviction / race case the marker filter must catch. The
         # ids are above the watermark (0) so every one of them is scanned.
-        tracked_ids = [
-            1001,
-            1002,
-            1003,
-            1004,
-            1005,
-            1006,
-            1007,
-            1008,
-            1009,
-            1010,
-        ]
-        untracked_ids = [2001, 2002, 2003]
-        pr_issue_comments = []
-        for comment_id in tracked_ids:
-            pr_issue_comments.append(
-                FakeComment(
-                    id=comment_id,
-                    body=f":books: orchestrator post {comment_id}.\n\n{marker}",
-                    user=FakeUser(BOT_LOGIN),
-                    created_at=long_ago,
-                )
-            )
-        for comment_id in untracked_ids:
-            pr_issue_comments.append(
-                FakeComment(
-                    id=comment_id,
-                    body=(f":eyes: codex review (round 1/10) requested changes (comment {comment_id}).\n\n{marker}"),
-                    user=FakeUser(BOT_LOGIN),
-                    created_at=long_ago,
-                )
-            )
-        pr = FakePR(
+        mocks = self._run_debounced(gh, issue)
+
+        mocks[RUN_AGENT].assert_not_called()
+        self.assertNotIn((LEGACY_LOOP_ISSUE, LABEL_FIXING), gh.label_history)
+        self.assertEqual(gh.merge_calls, [])
+        self.assertEqual(
+            gh.pinned_data(LEGACY_LOOP_ISSUE).get(READY_PING_SHA),
+            "553237e1",
+        )
+        self._assert_ready_ping(gh)
+
+    def _seed_legacy_loop(self):
+        scenario = SimpleNamespace(
+            github=FakeGitHubClient(),
+            created_at=datetime.now(timezone.utc) - timedelta(hours=1),
+            marker=workflow._ORCH_COMMENT_MARKER,
+            tracked_ids=list(range(TRACKED_ID_START, TRACKED_ID_STOP)),
+            untracked_ids=[2001, 2002, 2003],
+        )
+        scenario.issue = make_issue(LEGACY_LOOP_ISSUE, label=LABEL_IN_REVIEW)
+        scenario.github.add_issue(scenario.issue)
+        scenario.pull_request = FakePR(
             number=LEGACY_LOOP_PR,
             head_branch=_issue_branch(LEGACY_LOOP_ISSUE),
             head=FakePRRef(sha="553237e1"),
             mergeable=True,
             check_state=CHECKS_SUCCESS,
-            issue_comments=pr_issue_comments,
+            issue_comments=[
+                FakeComment(
+                    id=comment_id,
+                    body=f":books: orchestrator post {comment_id}.\n\n{scenario.marker}",
+                    user=FakeUser(BOT_LOGIN),
+                    created_at=scenario.created_at,
+                )
+                for comment_id in scenario.tracked_ids
+            ]
+            + [
+                FakeComment(
+                    id=comment_id,
+                    body=(
+                        f":eyes: codex review (round 1/10) requested changes "
+                        f"(comment {comment_id}).\n\n{scenario.marker}"
+                    ),
+                    user=FakeUser(BOT_LOGIN),
+                    created_at=scenario.created_at,
+                )
+                for comment_id in scenario.untracked_ids
+            ],
         )
-        gh.add_pr(pr)
-        gh.seed_state(
+        scenario.github.add_pr(scenario.pull_request)
+        scenario.github.seed_state(
             LEGACY_LOOP_ISSUE,
             pr_number=LEGACY_LOOP_PR,
             branch=_issue_branch(LEGACY_LOOP_ISSUE),
@@ -390,36 +400,14 @@ class OrchestratorMarkerFeedbackFilterTest(
             pr_last_review_summary_id=0,
             # pickup_comment_id deliberately missing -- the issue was
             # picked up via operator relabel out of `question`.
-            orchestrator_comment_ids=tracked_ids,
+            orchestrator_comment_ids=scenario.tracked_ids,
             docs_checked_sha="553237e1",
             docs_verdict="no_change",
         )
-
-        with patch.object(config, DEBOUNCE_SETTING, REVIEW_DEBOUNCE_SECONDS):
-            mocks = self._run_in_review(
-                gh,
-                issue,
-                run_agent=_agent(),
-            )
-
-        mocks[RUN_AGENT].assert_not_called()
-        self.assertNotIn((LEGACY_LOOP_ISSUE, LABEL_FIXING), gh.label_history)
-        self.assertEqual(gh.merge_calls, [])
-        # The HITL ping must fire so the manual-merge loop can actually
-        # complete instead of silently bouncing through fixing every tick.
-        self.assertEqual(
-            gh.pinned_data(LEGACY_LOOP_ISSUE).get(READY_PING_SHA),
-            "553237e1",
-        )
-        self.assertTrue(
-            any(
-                "ready for review/merge" in body
-                for _, body in gh.posted_comments
-            )
-        )
+        return scenario.github, scenario.issue
 
 
-class CrossNamespaceFilterTest(unittest.TestCase, _PatchedWorkflowMixin):
+class CrossNamespaceFilterTest(unittest.TestCase, _DebouncedInReviewMixin):
     """orchestrator_comment_ids records ids from the IssueComment namespace
     only. Inline review comments and PR review summaries live in different
     id namespaces, where numeric collisions with recorded bot comment ids
@@ -464,12 +452,7 @@ class CrossNamespaceFilterTest(unittest.TestCase, _PatchedWorkflowMixin):
             orchestrator_comment_ids=[INLINE_FEEDBACK_ID],
         )
 
-        with patch.object(config, DEBOUNCE_SETTING, REVIEW_DEBOUNCE_SECONDS):
-            mocks = self._run_in_review(
-                gh,
-                issue,
-                run_agent=_agent(),
-            )
+        mocks = self._run_debounced(gh, issue)
 
         # Inline review comment id=4242 surfaces despite colliding with
         # the recorded IssueComment id 4242; the handler routes to
@@ -517,12 +500,7 @@ class CrossNamespaceFilterTest(unittest.TestCase, _PatchedWorkflowMixin):
             orchestrator_comment_ids=[SUMMARY_FEEDBACK_ID],
         )
 
-        with patch.object(config, DEBOUNCE_SETTING, REVIEW_DEBOUNCE_SECONDS):
-            mocks = self._run_in_review(
-                gh,
-                issue,
-                run_agent=_agent(),
-            )
+        mocks = self._run_debounced(gh, issue)
 
         mocks[RUN_AGENT].assert_not_called()
         self.assertEqual(gh.merge_calls, [])
@@ -589,6 +567,24 @@ class _AllowlistFeedbackFixtureMixin(_PatchedWorkflowMixin):
         )
         return gh, issue
 
+    def _run_allowed_in_review(self, github, issue):
+        with (
+            patch.object(config, "ALLOWED_ISSUE_AUTHORS", (ALLOWED_LOGIN,)),
+            patch.object(config, DEBOUNCE_SETTING, REVIEW_DEBOUNCE_SECONDS),
+        ):
+            return self._run_in_review(
+                github,
+                issue,
+                run_agent=_agent(),
+            )
+
+    def _assert_allowed_feedback(self, bookmark_key, github) -> None:
+        self.assertIn((ALLOWLIST_ISSUE, LABEL_FIXING), github.label_history)
+        pinned_state = github.pinned_data(ALLOWLIST_ISSUE)
+        self.assertIn("pending_fix_at", pinned_state)
+        self.assertEqual(pinned_state.get(bookmark_key), FEEDBACK_ID)
+        self.assertIsNone(pinned_state.get(READY_PING_SHA))
+
 
 class InReviewAllowlistFeedbackFilterTest(
     unittest.TestCase,
@@ -600,17 +596,9 @@ class InReviewAllowlistFeedbackFilterTest(
         for surface, _ in FEEDBACK_SURFACES:
             with self.subTest(surface=surface):
                 gh, issue = self._seed(surface, OUTSIDER_LOGIN)
-                with (
-                    patch.object(config, "ALLOWED_ISSUE_AUTHORS", (ALLOWED_LOGIN,)),
-                    patch.object(config, DEBOUNCE_SETTING, REVIEW_DEBOUNCE_SECONDS),
-                ):
-                    mocks = self._run_in_review(
-                        gh,
-                        issue,
-                        run_agent=_agent(),
-                    )
+                allowlist_patches = self._run_allowed_in_review(gh, issue)
 
-                mocks[RUN_AGENT].assert_not_called()
+                allowlist_patches[RUN_AGENT].assert_not_called()
                 self.assertNotIn((ALLOWLIST_ISSUE, LABEL_FIXING), gh.label_history)
                 pinned_state = gh.pinned_data(ALLOWLIST_ISSUE)
                 self.assertNotIn("pending_fix_at", pinned_state)
@@ -622,23 +610,10 @@ class InReviewAllowlistFeedbackFilterTest(
         for surface, bookmark_key in FEEDBACK_SURFACES:
             with self.subTest(surface=surface):
                 gh, issue = self._seed(surface, ALLOWED_LOGIN)
-                with (
-                    patch.object(config, "ALLOWED_ISSUE_AUTHORS", (ALLOWED_LOGIN,)),
-                    patch.object(config, DEBOUNCE_SETTING, REVIEW_DEBOUNCE_SECONDS),
-                ):
-                    mocks = self._run_in_review(
-                        gh,
-                        issue,
-                        run_agent=_agent(),
-                    )
+                allowlist_patches = self._run_allowed_in_review(gh, issue)
 
-                mocks[RUN_AGENT].assert_not_called()
-                self.assertIn((ALLOWLIST_ISSUE, LABEL_FIXING), gh.label_history)
-                pinned_state = gh.pinned_data(ALLOWLIST_ISSUE)
-                self.assertIn("pending_fix_at", pinned_state)
-                self.assertEqual(pinned_state.get(bookmark_key), FEEDBACK_ID)
-                # Routed on the trusted feedback, so the ready-ping never fired.
-                self.assertIsNone(pinned_state.get(READY_PING_SHA))
+                allowlist_patches[RUN_AGENT].assert_not_called()
+                self._assert_allowed_feedback(bookmark_key, gh)
 
 
 if __name__ == "__main__":

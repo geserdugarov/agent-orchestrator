@@ -19,6 +19,41 @@ INTERRUPTED_PR = 5001
 DEV_SESSION = "dev-sess"
 
 
+def _seed_drift_case(issue_number: int, pr_number: int):
+    github = FakeGitHubClient()
+    issue = make_issue(
+        issue_number,
+        label="resolving_conflict",
+        body="updated body",
+    )
+    github.add_issue(issue)
+    github.add_pr(FakePR(number=pr_number, head_branch=_issue_branch(issue_number)))
+    github.seed_state(
+        issue_number,
+        pr_number=pr_number,
+        dev_agent="claude",
+        dev_session_id=DEV_SESSION,
+        conflict_round=0,
+        branch=_issue_branch(issue_number),
+        user_content_hash="stale-hash",
+    )
+    return github, issue
+
+
+def _assert_interrupted_drift_state(test_case, github) -> None:
+    state = github.pinned_data(INTERRUPTED_ISSUE)
+    test_case.assertEqual(state.get("user_content_hash"), "stale-hash")
+    test_case.assertFalse(state.get("awaiting_human"))
+    test_case.assertEqual(state.get("conflict_round"), 0)
+    test_case.assertNotIn((INTERRUPTED_ISSUE, "validating"), github.label_history)
+    test_case.assertFalse(
+        any(
+            "agent needs your input" in body or "existing work" in body or "timed out" in body
+            for _, body in github.posted_comments
+        )
+    )
+
+
 class HandleResolvingConflictHashDriftTest(
     unittest.TestCase,
     _PatchedWorkflowMixin,
@@ -28,24 +63,7 @@ class HandleResolvingConflictHashDriftTest(
     the dev. Mirrors the in_review pattern: post a PR notice and resume."""
 
     def test_drift_posts_pr_notice_and_resumes_dev(self) -> None:
-        gh = FakeGitHubClient()
-        issue = make_issue(
-            DRIFT_ISSUE,
-            label="resolving_conflict",
-            body="updated body",
-        )
-        gh.add_issue(issue)
-        pr = FakePR(number=DRIFT_PR, head_branch=_issue_branch(DRIFT_ISSUE))
-        gh.add_pr(pr)
-        gh.seed_state(
-            DRIFT_ISSUE,
-            pr_number=pr.number,
-            dev_agent="claude",
-            dev_session_id=DEV_SESSION,
-            conflict_round=0,
-            branch=_issue_branch(DRIFT_ISSUE),
-            user_content_hash="stale-hash",
-        )
+        gh, issue = _seed_drift_case(DRIFT_ISSUE, DRIFT_PR)
 
         self._run_resolving_conflict(
             gh,
@@ -78,24 +96,7 @@ class HandleResolvingConflictHashDriftTest(
         # of its own. The conflicts caller must short-circuit BEFORE it so a
         # shutdown-sweep-killed run cannot ACK / park off partial output and
         # then persist the consumed-comment / refreshed-hash changes.
-        gh = FakeGitHubClient()
-        issue = make_issue(
-            INTERRUPTED_ISSUE,
-            label="resolving_conflict",
-            body="updated body",
-        )
-        gh.add_issue(issue)
-        pr = FakePR(number=INTERRUPTED_PR, head_branch=_issue_branch(INTERRUPTED_ISSUE))
-        gh.add_pr(pr)
-        gh.seed_state(
-            INTERRUPTED_ISSUE,
-            pr_number=pr.number,
-            dev_agent="claude",
-            dev_session_id=DEV_SESSION,
-            conflict_round=0,
-            branch=_issue_branch(INTERRUPTED_ISSUE),
-            user_content_hash="stale-hash",
-        )
+        gh, issue = _seed_drift_case(INTERRUPTED_ISSUE, INTERRUPTED_PR)
         before_writes = gh.write_state_calls
 
         mocks = self._run_resolving_conflict(
@@ -117,18 +118,7 @@ class HandleResolvingConflictHashDriftTest(
         # No durable state churn: the refreshed `user_content_hash`,
         # consumed-comment, and session mutations are all discarded.
         self.assertEqual(gh.write_state_calls, before_writes)
-        state = gh.pinned_data(INTERRUPTED_ISSUE)
-        self.assertEqual(state.get("user_content_hash"), "stale-hash")
-        self.assertFalse(state.get("awaiting_human"))
-        self.assertEqual(state.get("conflict_round"), 0)
-        # No flip back to validating and no HITL question / ack on the issue.
-        self.assertNotIn((INTERRUPTED_ISSUE, "validating"), gh.label_history)
-        self.assertFalse(
-            any(
-                "agent needs your input" in body or "existing work" in body or "timed out" in body
-                for _, body in gh.posted_comments
-            )
-        )
+        _assert_interrupted_drift_state(self, gh)
 
 
 if __name__ == "__main__":

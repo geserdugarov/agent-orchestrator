@@ -303,7 +303,6 @@ class StaleParkReasonClearedOnFixingRouteTest(unittest.TestCase, _PatchedWorkflo
 
     def test_fixing_route_clears_stale_reason(self) -> None:
         gh = FakeGitHubClient()
-        long_ago = datetime.now(timezone.utc) - timedelta(hours=1)
         # Tick 0 already parked for unmergeable; the human posted a
         # follow-up comment ("any update?") to nudge the orchestrator.
         issue = make_issue(
@@ -314,7 +313,7 @@ class StaleParkReasonClearedOnFixingRouteTest(unittest.TestCase, _PatchedWorkflo
                     id=STALE_PARK_COMMENT_ID,
                     body="any update?",
                     user=FakeUser("alice"),
-                    created_at=long_ago,
+                    created_at=datetime.now(timezone.utc) - timedelta(hours=1),
                 ),
             ],
         )

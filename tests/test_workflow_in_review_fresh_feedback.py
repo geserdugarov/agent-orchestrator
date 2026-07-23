@@ -83,6 +83,53 @@ class _FreshFeedbackFixtureMixin(_PatchedWorkflowMixin):
         gh.seed_state(FRESH_FEEDBACK_ISSUE, **seed_state)
         return gh, issue, pr
 
+    def _assert_surface_bookmarks(self, github, state) -> None:
+        self.assertIn((FRESH_FEEDBACK_ISSUE, LABEL_FIXING), github.label_history)
+        self.assertEqual(
+            state.get("pending_fix_issue_ids"),
+            [ISSUE_COMMENT_ID, FIRST_PR_COMMENT_ID, SECOND_PR_COMMENT_ID],
+        )
+        self.assertEqual(state.get("pending_fix_issue_max_id"), SECOND_PR_COMMENT_ID)
+        self.assertEqual(state.get("pending_fix_review_ids"), [FIRST_INLINE_COMMENT_ID, SECOND_INLINE_COMMENT_ID])
+        self.assertEqual(state.get("pending_fix_review_max_id"), SECOND_INLINE_COMMENT_ID)
+        self.assertEqual(state.get("pending_fix_review_summary_ids"), [7])
+        self.assertEqual(state.get("pending_fix_review_summary_max_id"), 7)
+        self.assertEqual(state.get("pr_last_comment_id"), FEEDBACK_WATERMARK)
+
+    def _seed_drift_feedback(self):
+        github = FakeGitHubClient()
+        issue = make_issue(DRIFT_FEEDBACK_ISSUE, label="in_review")
+        issue.comments.append(
+            FakeComment(
+                id=DRIFT_FEEDBACK_ID,
+                body="please tighten the docstring",
+                user=FakeUser(HUMAN_LOGIN),
+                created_at=datetime.now(timezone.utc) - timedelta(hours=1),
+            ),
+        )
+        github.add_issue(issue)
+        github.add_pr(
+            FakePR(
+                number=DRIFT_FEEDBACK_PR,
+                head_branch=_issue_branch(DRIFT_FEEDBACK_ISSUE),
+                head=FakePRRef(sha=REVIEWED_SHA),
+                mergeable=True,
+                check_state=CHECKS_SUCCESS,
+            ),
+        )
+        github.seed_state(
+            DRIFT_FEEDBACK_ISSUE,
+            pr_number=DRIFT_FEEDBACK_PR,
+            branch=_issue_branch(DRIFT_FEEDBACK_ISSUE),
+            dev_agent="claude",
+            dev_session_id="dev-sess",
+            pr_last_comment_id=DRIFT_FEEDBACK_WATERMARK,
+            pr_last_review_comment_id=0,
+            pr_last_review_summary_id=0,
+            user_content_hash="stale-hash-from-before-the-human-comment",
+        )
+        return github, issue
+
 
 class InReviewRoutesFreshFeedbackToFixingTest(
     unittest.TestCase,
@@ -99,7 +146,6 @@ class InReviewRoutesFreshFeedbackToFixingTest(
         # `_handle_in_review` any more -- the fixing stage owns that step.
         # Run through the full dispatcher (`_process_issue`) so the test
         # also covers the routing wiring end-to-end.
-        now = datetime.now(timezone.utc)
         pr = FakePR(
             number=FRESH_FEEDBACK_PR,
             head_branch=FRESH_FEEDBACK_BRANCH,
@@ -111,11 +157,11 @@ class InReviewRoutesFreshFeedbackToFixingTest(
                     id=PR_FEEDBACK_ID,
                     body="please tighten the integration test",
                     user=FakeUser(HUMAN_LOGIN),
-                    created_at=now,  # well inside the debounce window
+                    created_at=datetime.now(timezone.utc),
                 ),
             ],
         )
-        gh, issue, _ = self._seed_in_review_with_pr(pr=pr)
+        gh, issue = self._seed_in_review_with_pr(pr=pr)[:2]
 
         with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", REVIEW_DEBOUNCE_SECONDS):
             mocks = self._run(
@@ -190,7 +236,7 @@ class InReviewRoutesFreshFeedbackToFixingTest(
                 ),
             ],
         )
-        gh, issue, _ = self._seed_in_review_with_pr(pr=pr)
+        gh, issue = self._seed_in_review_with_pr(pr=pr)[:2]
         # Also seed a fresh issue-thread comment on the issue itself so the
         # issue-space id list mixes issue-thread and PR-conversation ids.
         issue.comments.append(
@@ -209,20 +255,7 @@ class InReviewRoutesFreshFeedbackToFixingTest(
         )
 
         state = gh.pinned_data(FRESH_FEEDBACK_ISSUE)
-        self.assertIn((FRESH_FEEDBACK_ISSUE, LABEL_FIXING), gh.label_history)
-        # Issue space combines issue-thread (2050) + PR-conversation
-        # (2100, 2200), sorted ascending.
-        self.assertEqual(
-            state.get("pending_fix_issue_ids"),
-            [ISSUE_COMMENT_ID, FIRST_PR_COMMENT_ID, SECOND_PR_COMMENT_ID],
-        )
-        self.assertEqual(state.get("pending_fix_issue_max_id"), SECOND_PR_COMMENT_ID)
-        self.assertEqual(state.get("pending_fix_review_ids"), [FIRST_INLINE_COMMENT_ID, SECOND_INLINE_COMMENT_ID])
-        self.assertEqual(state.get("pending_fix_review_max_id"), SECOND_INLINE_COMMENT_ID)
-        self.assertEqual(state.get("pending_fix_review_summary_ids"), [7])
-        self.assertEqual(state.get("pending_fix_review_summary_max_id"), 7)
-        # Watermarks stay put so the fixing rescan can still reach them.
-        self.assertEqual(state.get("pr_last_comment_id"), FEEDBACK_WATERMARK)
+        self._assert_surface_bookmarks(gh, state)
 
     def test_no_feedback_pings_for_manual_merge(self) -> None:
         # The in_review -> fixing route must NOT preempt the mergeable /
@@ -293,43 +326,7 @@ class InReviewRoutesFreshFeedbackToFixingTest(
         # routes to `fixing`. Seed a stale prior `user_content_hash` so
         # the drift path WOULD fire if the ordering were wrong, then
         # confirm the fresh-feedback scan wins.
-        long_ago = datetime.now(timezone.utc) - timedelta(hours=1)
-        gh = FakeGitHubClient()
-        issue = make_issue(DRIFT_FEEDBACK_ISSUE, label="in_review")
-        # Issue-thread comment posted after the watermark; the hash that
-        # was recorded earlier did not include it, so the drift detector
-        # WOULD fire on the next tick if the scan order were wrong.
-        issue.comments.append(
-            FakeComment(
-                id=DRIFT_FEEDBACK_ID,
-                body="please tighten the docstring",
-                user=FakeUser(HUMAN_LOGIN),
-                created_at=long_ago,
-            )
-        )
-        gh.add_issue(issue)
-        pr = FakePR(
-            number=DRIFT_FEEDBACK_PR,
-            head_branch=_issue_branch(DRIFT_FEEDBACK_ISSUE),
-            head=FakePRRef(sha=REVIEWED_SHA),
-            mergeable=True,
-            check_state=CHECKS_SUCCESS,
-        )
-        gh.add_pr(pr)
-        gh.seed_state(
-            DRIFT_FEEDBACK_ISSUE,
-            pr_number=pr.number,
-            branch=_issue_branch(DRIFT_FEEDBACK_ISSUE),
-            dev_agent="claude",
-            dev_session_id="dev-sess",
-            pr_last_comment_id=DRIFT_FEEDBACK_WATERMARK,
-            pr_last_review_comment_id=0,
-            pr_last_review_summary_id=0,
-            # Stale hash that doesn't cover the human comment above --
-            # the drift path WOULD fire on this tick if the scan order
-            # were wrong (this is the reviewer's reproducer).
-            user_content_hash="stale-hash-from-before-the-human-comment",
-        )
+        gh, issue = self._seed_drift_feedback()
 
         with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", REVIEW_DEBOUNCE_SECONDS):
             mocks = self._run_in_review(

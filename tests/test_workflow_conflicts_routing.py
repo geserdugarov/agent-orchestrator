@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from orchestrator import workflow
 
@@ -23,7 +23,8 @@ class HandleResolvingConflictDispatchTest(unittest.TestCase):
         issue = make_issue(CONFLICT_ISSUE, label="resolving_conflict")
         gh.add_issue(issue)
 
-        with patch.object(workflow, "_handle_resolving_conflict") as conflict_handler:
+        conflict_handler = MagicMock()
+        with patch.object(workflow, "_handle_resolving_conflict", conflict_handler):
             workflow._process_issue(gh, _TEST_SPEC, issue)
 
         conflict_handler.assert_called_once_with(gh, _TEST_SPEC, issue)

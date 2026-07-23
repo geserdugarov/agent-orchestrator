@@ -32,6 +32,60 @@ UNCHANGED_HEAD = "samehead"
 MAX_CONFLICT_ROUNDS_SETTING = "MAX_CONFLICT_ROUNDS"
 
 
+def _seed_fetch_case():
+    github = FakeGitHubClient()
+    issue = make_issue(FETCH_ISSUE, label="resolving_conflict")
+    github.add_issue(issue)
+    github.add_pr(
+        FakePR(
+            number=FETCH_PR,
+            head_branch=_issue_branch(FETCH_ISSUE),
+            head=FakePRRef(sha="cafe1234"),
+            mergeable=False,
+            check_state="success",
+        ),
+    )
+    github.seed_state(
+        FETCH_ISSUE,
+        pr_number=FETCH_PR,
+        branch=_issue_branch(FETCH_ISSUE),
+        dev_agent="claude",
+        dev_session_id="dev-sess",
+        conflict_round=0,
+    )
+    return github, issue
+
+
+def _assert_fetch_calls(test_case, authed_fetch_mock) -> None:
+    test_case.assertEqual(authed_fetch_mock.call_count, 2)
+    fetch_calls = authed_fetch_mock.call_args_list
+    for fetch_call in fetch_calls:
+        test_case.assertEqual(fetch_call.kwargs["cwd"], _FAKE_WT)
+        test_case.assertTrue(
+            fetch_call.args[1].startswith("+"),
+            f"refspec {fetch_call.args[1]!r} should start with '+' for force-update",
+        )
+    joined_refspecs = " ".join(recorded_call.args[1] for recorded_call in fetch_calls)
+    test_case.assertIn(
+        f"refs/remotes/origin/{_TEST_SPEC.base_branch}",
+        joined_refspecs,
+        "expected base-branch fetch refspec",
+    )
+    test_case.assertIn(
+        "refs/remotes/origin/orchestrator/geserdugarov__agent-orchestrator/issue-450",
+        joined_refspecs,
+        "expected PR-branch fetch refspec",
+    )
+
+
+def _clean_state(github):
+    return github.pinned_data(CONFLICT_ISSUE)
+
+
+def _terminal_state(github):
+    return github.pinned_data(CONFLICT_ISSUE)
+
+
 class AuthedFetchRoutingTest(unittest.TestCase, _PatchedWorkflowMixin):
     """The conflict-resolution fetch must run inside the agent-writable
     worktree under the same security envelope as `_push_branch`: askpass-
@@ -42,26 +96,7 @@ class AuthedFetchRoutingTest(unittest.TestCase, _PatchedWorkflowMixin):
     """
 
     def test_fetch_uses_explicit_refspec(self) -> None:
-        gh = FakeGitHubClient()
-        issue = make_issue(FETCH_ISSUE, label="resolving_conflict")
-        gh.add_issue(issue)
-        pr = FakePR(
-            number=FETCH_PR,
-            head_branch=_issue_branch(FETCH_ISSUE),
-            head=FakePRRef(sha="cafe1234"),
-            mergeable=False,
-            check_state="success",
-        )
-        gh.add_pr(pr)
-        gh.seed_state(
-            FETCH_ISSUE,
-            pr_number=FETCH_PR,
-            branch=_issue_branch(FETCH_ISSUE),
-            dev_agent="claude",
-            dev_session_id="dev-sess",
-            conflict_round=0,
-        )
-
+        gh, issue = _seed_fetch_case()
         merge_mock = MagicMock(return_value=(True, []))
 
         # The mixin's `_run` itself patches `_authed_fetch` to a default
@@ -86,32 +121,7 @@ class AuthedFetchRoutingTest(unittest.TestCase, _PatchedWorkflowMixin):
         # PR branch (so the SHA-alignment / unpushed-recovery check sees
         # current `origin/<branch>`), then for the base branch (so the
         # upcoming `git rebase` sees current `origin/<base>`).
-        self.assertEqual(authed_fetch_mock.call_count, 2)
-        refspecs = [call.args[1] for call in authed_fetch_mock.call_args_list]
-        cwds = [call.kwargs["cwd"] for call in authed_fetch_mock.call_args_list]
-        # All fetches run inside the WORKTREE (agent-writable), where
-        # the hardening actually matters -- not `target_root`.
-        for cwd in cwds:
-            self.assertEqual(cwd, _FAKE_WT)
-        # All refspecs use the explicit `+refs/heads/X:refs/remotes/origin/X`
-        # form so single-branch clones still create the remote-tracking ref.
-        for refspec in refspecs:
-            self.assertTrue(
-                refspec.startswith("+"),
-                f"refspec {refspec!r} should start with '+' for force-update",
-            )
-        # Verify both refs are fetched: the PR branch and the base branch.
-        joined = " ".join(refspecs)
-        self.assertIn(
-            f"refs/remotes/origin/{_TEST_SPEC.base_branch}",
-            joined,
-            "expected base-branch fetch refspec",
-        )
-        self.assertIn(
-            "refs/remotes/origin/orchestrator/geserdugarov__agent-orchestrator/issue-450",
-            joined,
-            "expected PR-branch fetch refspec",
-        )
+        _assert_fetch_calls(self, authed_fetch_mock)
 
 
 class ResolvingConflictCleanRebaseTest(unittest.TestCase, _ResolvingConflictMixin):
@@ -125,8 +135,8 @@ class ResolvingConflictCleanRebaseTest(unittest.TestCase, _ResolvingConflictMixi
         # rebased branch and hands straight back to `validating`. Docs
         # do not run here -- the single docs pass runs after reviewer
         # approval before `in_review` via the final-docs handoff.
-        gh, issue, pr = self._seed()
-        mocks, merge_mock, git_mock = self._run_with_merge(
+        gh, issue, _ = self._seed()
+        mocks, merge_mock, _ = self._run_with_merge(
             gh,
             issue,
             merge_succeeded=True,
@@ -145,7 +155,7 @@ class ResolvingConflictCleanRebaseTest(unittest.TestCase, _ResolvingConflictMixi
         )
         self.assertIn((CONFLICT_ISSUE, "validating"), gh.label_history)
         self.assertNotIn((CONFLICT_ISSUE, "documenting"), gh.label_history)
-        state = gh.pinned_data(CONFLICT_ISSUE)
+        state = _clean_state(gh)
         self.assertEqual(state.get("review_round"), 0)
         self.assertEqual(state.get(CONFLICT_ROUND), 1)
         self.assertIn("last_conflict_resolved_at", state)
@@ -162,8 +172,8 @@ class ResolvingConflictCleanRebaseTest(unittest.TestCase, _ResolvingConflictMixi
         # every other resolving_conflict exit also targets `validating`
         # now, so there's no `documenting` detour to skip relative to
         # the pushed paths.
-        gh, issue, pr = self._seed()
-        mocks, merge_mock, git_mock = self._run_with_merge(
+        gh, issue, _ = self._seed()
+        mocks, _, _ = self._run_with_merge(
             gh,
             issue,
             merge_succeeded=True,
@@ -175,7 +185,7 @@ class ResolvingConflictCleanRebaseTest(unittest.TestCase, _ResolvingConflictMixi
         mocks["_push_branch"].assert_not_called()
         self.assertIn((CONFLICT_ISSUE, "validating"), gh.label_history)
         self.assertNotIn((CONFLICT_ISSUE, "documenting"), gh.label_history)
-        state = gh.pinned_data(CONFLICT_ISSUE)
+        state = _clean_state(gh)
         self.assertEqual(state.get("review_round"), 0)
         self.assertEqual(state.get(CONFLICT_ROUND), 1)
 
@@ -184,9 +194,9 @@ class ResolvingConflictCleanRebaseTest(unittest.TestCase, _ResolvingConflictMixi
         # bounce between in_review and resolving_conflict with the rebase
         # always a no-op. The cap must fire after MAX_CONFLICT_ROUNDS
         # such no-op rounds.
-        gh, issue, pr = self._seed(extra_state={CONFLICT_ROUND: 2})
+        gh, issue, _ = self._seed(extra_state={CONFLICT_ROUND: 2})
         with patch.object(config, MAX_CONFLICT_ROUNDS_SETTING, 3):
-            mocks, merge_mock, git_mock = self._run_with_merge(
+            self._run_with_merge(
                 gh,
                 issue,
                 merge_succeeded=True,
@@ -197,22 +207,22 @@ class ResolvingConflictCleanRebaseTest(unittest.TestCase, _ResolvingConflictMixi
         self.assertEqual(gh.pinned_data(CONFLICT_ISSUE).get(CONFLICT_ROUND), 3)
         # On the next tick we'd be at the cap; simulate by re-running:
         with patch.object(config, MAX_CONFLICT_ROUNDS_SETTING, 3):
-            mocks2, merge_mock2, _ = self._run_with_merge(
+            _, merge_mock, _ = self._run_with_merge(
                 gh,
                 issue,
                 merge_succeeded=True,
                 head_shas=[UNCHANGED_HEAD, UNCHANGED_HEAD],
                 push_branch=True,
             )
-        merge_mock2.assert_not_called()
-        self.assertTrue(gh.pinned_data(CONFLICT_ISSUE).get("awaiting_human"))
+        merge_mock.assert_not_called()
+        self.assertTrue(_clean_state(gh).get("awaiting_human"))
 
     def test_cap_exhausted_parks_awaiting_human(self) -> None:
         # `MAX_CONFLICT_ROUNDS` defaults to 3; once the counter reaches it,
         # the handler must park instead of attempting another round.
-        gh, issue, pr = self._seed(extra_state={CONFLICT_ROUND: 3})
+        gh, issue, _ = self._seed(extra_state={CONFLICT_ROUND: 3})
         with patch.object(config, MAX_CONFLICT_ROUNDS_SETTING, 3):
-            mocks, merge_mock, git_mock = self._run_with_merge(
+            mocks, merge_mock, _ = self._run_with_merge(
                 gh,
                 issue,
                 merge_succeeded=True,
@@ -220,13 +230,12 @@ class ResolvingConflictCleanRebaseTest(unittest.TestCase, _ResolvingConflictMixi
         # Neither merge nor agent runs on the cap branch.
         merge_mock.assert_not_called()
         mocks[RUN_AGENT].assert_not_called()
-        state = gh.pinned_data(CONFLICT_ISSUE)
+        state = _clean_state(gh)
         self.assertTrue(state.get("awaiting_human"))
         # Label stays on `resolving_conflict` -- no flip.
         self.assertNotIn((CONFLICT_ISSUE, "validating"), gh.label_history)
         self.assertNotIn((CONFLICT_ISSUE, "done"), gh.label_history)
-        last_comment = gh.posted_comments[-1][1]
-        self.assertIn(MAX_CONFLICT_ROUNDS_SETTING, last_comment)
+        self.assertIn(MAX_CONFLICT_ROUNDS_SETTING, gh.posted_comments[-1][1])
 
 
 class ResolvingConflictTerminalRoutingTest(
@@ -238,8 +247,8 @@ class ResolvingConflictTerminalRoutingTest(
     def test_pr_merged_externally_finalizes_to_done(self) -> None:
         # Mirror the in_review terminal: a human merged the PR (perhaps
         # after manually resolving conflicts) while we were resolving.
-        gh, issue, pr = self._seed(pr_merged=True, pr_state="closed")
-        mocks, merge_mock, git_mock = self._run_with_merge(
+        gh, issue, _ = self._seed(pr_merged=True, pr_state="closed")
+        mocks, merge_mock, _ = self._run_with_merge(
             gh,
             issue,
             merge_succeeded=True,
@@ -249,12 +258,12 @@ class ResolvingConflictTerminalRoutingTest(
         mocks[RUN_AGENT].assert_not_called()
         mocks["_push_branch"].assert_not_called()
         self.assertIn((CONFLICT_ISSUE, "done"), gh.label_history)
-        self.assertIn("merged_at", gh.pinned_data(CONFLICT_ISSUE))
+        self.assertIn("merged_at", _terminal_state(gh))
         self.assertTrue(issue.closed)
 
     def test_pr_closed_unmerged_finalizes_to_rejected(self) -> None:
-        gh, issue, pr = self._seed(pr_state="closed")
-        mocks, merge_mock, git_mock = self._run_with_merge(
+        gh, issue, _ = self._seed(pr_state="closed")
+        mocks, merge_mock, _ = self._run_with_merge(
             gh,
             issue,
             merge_succeeded=True,
@@ -262,7 +271,7 @@ class ResolvingConflictTerminalRoutingTest(
         merge_mock.assert_not_called()
         mocks[RUN_AGENT].assert_not_called()
         self.assertIn((CONFLICT_ISSUE, "rejected"), gh.label_history)
-        self.assertIn("closed_without_merge_at", gh.pinned_data(CONFLICT_ISSUE))
+        self.assertIn("closed_without_merge_at", _terminal_state(gh))
         # PR is gone -- the orchestrator-owned branch and worktree must
         # come down on the rejected terminal too, mirroring the merged
         # path. Failure to clean up here is exactly the bug this test
@@ -283,7 +292,7 @@ class ResolvingConflictTerminalRoutingTest(
         # worktree alone (operator may still want to salvage the PR).
         gh, issue, pr = self._seed(pr_state="open")
         issue.closed = True
-        mocks, merge_mock, git_mock = self._run_with_merge(
+        mocks, merge_mock, _ = self._run_with_merge(
             gh,
             issue,
             merge_succeeded=True,
@@ -291,7 +300,7 @@ class ResolvingConflictTerminalRoutingTest(
         merge_mock.assert_not_called()
         mocks[RUN_AGENT].assert_not_called()
         self.assertIn((CONFLICT_ISSUE, "rejected"), gh.label_history)
-        self.assertIn("closed_without_merge_at", gh.pinned_data(CONFLICT_ISSUE))
+        self.assertIn("closed_without_merge_at", _terminal_state(gh))
         mocks["_cleanup_terminal_branch"].assert_not_called()
 
         # Documented caveat: a subsequent PR close is not observed by
@@ -299,10 +308,9 @@ class ResolvingConflictTerminalRoutingTest(
         # `in_review` / `resolving_conflict`, and `rejected` is terminal
         # in the dispatcher. Operator must clean up by hand.
         pr.state = "closed"
-        pollable_numbers = {pollable_issue.number for pollable_issue in gh.list_pollable_issues()}
         self.assertNotIn(
             CONFLICT_ISSUE,
-            pollable_numbers,
+            {pollable_issue.number for pollable_issue in gh.list_pollable_issues()},
             "rejected closed issues are not swept, so the orchestrator "
             "cannot observe the later PR close; cleanup must be manual.",
         )

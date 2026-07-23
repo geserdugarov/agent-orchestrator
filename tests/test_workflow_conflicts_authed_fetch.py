@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import unittest
+from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import MagicMock, patch as mock_patch
 
@@ -22,6 +23,27 @@ FAKE_TOKEN = "fake-token-xyz"
 FORCED_MAIN_REFSPEC = "+refs/heads/main:refs/remotes/origin/main"
 TEMP_ROOT = "/tmp"
 REPOSITORY_SLUG = "acme/widgets"
+
+
+def _assert_hardened_fetch(test_case, run_recorder) -> None:
+    environment = run_recorder.env
+    test_case.assertIn("GIT_ASKPASS", environment)
+    test_case.assertEqual(environment.get("GIT_TOKEN"), FAKE_TOKEN)
+    test_case.assertEqual(environment.get("GIT_CONFIG_GLOBAL"), os.devnull)
+    test_case.assertEqual(environment.get("GIT_CONFIG_SYSTEM"), os.devnull)
+    arguments = run_recorder.args
+    for argument in arguments:
+        test_case.assertNotIn(FAKE_TOKEN, str(argument))
+    test_case.assertIn("core.hooksPath=/dev/null", arguments)
+    test_case.assertIn("credential.helper=", arguments)
+    test_case.assertIn("core.fsmonitor=", arguments)
+    test_case.assertTrue(
+        any(
+            isinstance(candidate, str) and candidate.startswith("https://x-access-token@github.com/")
+            for candidate in arguments
+        ),
+        f"expected x-access-token auth URL in argv, got {arguments!r}",
+    )
 
 
 class AuthedFetchHardeningTest(unittest.TestCase):
@@ -53,30 +75,7 @@ class AuthedFetchHardeningTest(unittest.TestCase):
                 cwd=Path(TEMP_ROOT),
             )
 
-        env = run_recorder.env
-        # askpass wires the token via env, NOT argv.
-        self.assertIn("GIT_ASKPASS", env)
-        self.assertEqual(env.get("GIT_TOKEN"), FAKE_TOKEN)
-        # Token must NOT appear in argv.
-        for arg in run_recorder.args:
-            self.assertNotIn(FAKE_TOKEN, str(arg))
-        # Global/system config detached so url rewrites planted there
-        # cannot redirect the fetch to an attacker-controlled host.
-        self.assertEqual(env.get("GIT_CONFIG_GLOBAL"), os.devnull)
-        self.assertEqual(env.get("GIT_CONFIG_SYSTEM"), os.devnull)
-        # Hooks / fsmonitor / credential helpers blocked via -c overrides.
-        argv = run_recorder.args
-        self.assertIn("core.hooksPath=/dev/null", argv)
-        self.assertIn("credential.helper=", argv)
-        self.assertIn("core.fsmonitor=", argv)
-        # Auth URL carries only the username, not the token.
-        self.assertTrue(
-            any(
-                isinstance(argument, str) and argument.startswith("https://x-access-token@github.com/")
-                for argument in argv
-            ),
-            f"expected x-access-token auth URL in argv, got {argv!r}",
-        )
+        _assert_hardened_fetch(self, run_recorder)
 
     def test_url_rewrite_rule_is_refused(self) -> None:
         # Rewrite-rule probe returns a hit; the real fetch must NOT run.
@@ -111,15 +110,21 @@ class AuthedFetchHardeningTest(unittest.TestCase):
         # can't prove the broadened regexp actually catches http.* keys. Use
         # real git config resolution: a worktree carrying `http.proxy` must
         # make `_authed_fetch` fail closed before the token-bearing fetch runs.
-        with (
-            _temp_git_repo_with_local_config([("http.proxy", "http://evil.example:8080")]) as repo,
-            mock_patch.object(
-                workflow.config,
-                TOKEN_RESOLVER,
-                return_value=FAKE_TOKEN,
-            ),
-            self.assertLogs(git_plumbing.log, level="ERROR") as cm,
-        ):
+        log_capture = MagicMock()
+        with ExitStack() as stack:
+            repo = stack.enter_context(
+                _temp_git_repo_with_local_config([("http.proxy", "http://evil.example:8080")]),
+            )
+            stack.enter_context(
+                mock_patch.object(
+                    workflow.config,
+                    TOKEN_RESOLVER,
+                    return_value=FAKE_TOKEN,
+                ),
+            )
+            log_capture.records = stack.enter_context(
+                self.assertLogs(git_plumbing.log, level="ERROR"),
+            )
             fetch = workflow._authed_fetch(
                 _TEST_SPEC,
                 FORCED_MAIN_REFSPEC,
@@ -127,8 +132,8 @@ class AuthedFetchHardeningTest(unittest.TestCase):
             )
         self.assertNotEqual(fetch.returncode, 0)
         self.assertTrue(
-            any("http.proxy" in line for line in cm.output),
-            f"expected http.proxy in refusal log, got {cm.output!r}",
+            any("http.proxy" in line for line in log_capture.records.output),
+            "expected http.proxy in refusal log, got {!r}".format(log_capture.records.output),
         )
 
     def test_no_token_fails_without_subprocess(self) -> None:
@@ -200,11 +205,15 @@ class AuthedFetchHardeningTest(unittest.TestCase):
             target_root=Path("/tmp/orchestrator-test-target-root"),
             base_branch="main",
         )
-        with (
-            mock_patch(SUBPROCESS_RUN, subprocess_run),
-            mock_patch.object(workflow.config, TOKEN_RESOLVER, return_value=""),
-            self.assertLogs(git_plumbing.log, level="ERROR") as cm,
-        ):
+        log_capture = MagicMock()
+        with ExitStack() as stack:
+            stack.enter_context(mock_patch(SUBPROCESS_RUN, subprocess_run))
+            stack.enter_context(
+                mock_patch.object(workflow.config, TOKEN_RESOLVER, return_value=""),
+            )
+            log_capture.records = stack.enter_context(
+                self.assertLogs(git_plumbing.log, level="ERROR"),
+            )
             fetch = workflow._authed_fetch(
                 repo,
                 FORCED_MAIN_REFSPEC,
@@ -214,8 +223,8 @@ class AuthedFetchHardeningTest(unittest.TestCase):
         subprocess_run.assert_not_called()
         self.assertNotEqual(fetch.returncode, 0)
         self.assertTrue(
-            any(REPOSITORY_SLUG in line for line in cm.output),
-            f"expected slug 'acme/widgets' in log output, got {cm.output!r}",
+            any(REPOSITORY_SLUG in line for line in log_capture.records.output),
+            "expected slug 'acme/widgets' in log output, got {!r}".format(log_capture.records.output),
         )
 
 

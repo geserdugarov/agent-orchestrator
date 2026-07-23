@@ -148,7 +148,7 @@ direct-launch command remain covered by tests.
 | Stage | Goal | Findings owned | Packages complete | Status |
 |---|---|---:|---:|---:|
 | 1 | Production cleanup | 223 | 3/3 | [x] |
-| 2 | Test cleanup | 1,350 | 5/7 | [ ] |
+| 2 | Test cleanup | 1,350 | 6/7 | [ ] |
 | 3 | Final zero-finding validation | 0 | 0/1 | [ ] |
 
 Package counts are ownership counts from the baseline scan. Refactoring can move line numbers or expose a new finding,
@@ -316,12 +316,14 @@ Test accounting: 234 collected tests and 38 subtests before and after the packag
 
 Baseline: `WPS201` 2, `WPS202` 4, `WPS204` 67, `WPS210` 96, `WPS213` 33, `WPS235` 2, and `WPS441` 16.
 
-- [ ] Split by review, verify, squash, handoff, watermark, checks, feedback filtering, migration, rebase, recovery,
+- [x] Split by review, verify, squash, handoff, watermark, checks, feedback filtering, migration, rebase, recovery,
   publication, resume, authenticated fetch, and worktree restoration.
-- [ ] Model watermark/state/comment/command inputs as typed cases and separate setup, operation, and event assertions.
-- [ ] Replace post-context capture reads with focused recorder results.
-- [ ] Reduce all 220 findings to zero while preserving command ordering, security probes, retry budgets, and review-loop
+- [x] Model watermark/state/comment/command inputs as typed cases and separate setup, operation, and event assertions.
+- [x] Replace post-context capture reads with focused recorder results.
+- [x] Reduce all 220 findings to zero while preserving command ordering, security probes, retry budgets, and review-loop
   semantics.
+
+Test accounting: 265 collected tests and 29 subtests before and after the package.
 
 ### Package 2.7 — Shared fakes, workflow harness, and cross-cutting tests (114 findings, 20 files)
 
