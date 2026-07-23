@@ -8,6 +8,7 @@ handler returns before the ACK fast path, `_handle_dev_fix_result`, the
 watermark advance, or any relabel / pinned-state write -- so the feedback stays
 unconsumed and the committed work stays on the branch until the label is
 removed, when a later tick re-discovers the feedback and republishes."""
+
 from __future__ import annotations
 
 import unittest
@@ -52,16 +53,22 @@ def _seed_fixing_pause(gh: FakeGitHubClient) -> object:
     issue = make_issue(ISSUE, label="fixing")
     issue.comments.append(
         FakeComment(
-            id=TRIGGER_ID, body="rename foo to bar",
-            user=FakeUser("alice"), created_at=old,
+            id=TRIGGER_ID,
+            body="rename foo to bar",
+            user=FakeUser("alice"),
+            created_at=old,
         )
     )
     gh.add_issue(issue)
-    gh.add_pr(FakePR(
-        number=PR_NUMBER, head_branch=BRANCH,
-        head=FakePRRef(sha=PR_HEAD_SHA), mergeable=True,
-        check_state="success",
-    ))
+    gh.add_pr(
+        FakePR(
+            number=PR_NUMBER,
+            head_branch=BRANCH,
+            head=FakePRRef(sha=PR_HEAD_SHA),
+            mergeable=True,
+            check_state="success",
+        )
+    )
     gh.seed_state(
         ISSUE,
         pr_number=PR_NUMBER,
@@ -78,8 +85,33 @@ def _seed_fixing_pause(gh: FakeGitHubClient) -> object:
     return issue
 
 
-class FixingLivePauseTest(unittest.TestCase, _PatchedWorkflowMixin):
+def _assert_fixing_pause_preserves_state(
+    test_case,
+    github,
+    mocks,
+    before_writes,
+) -> None:
+    mocks["_push_branch"].assert_not_called()
+    test_case.assertEqual(github.label_history, [])
+    test_case.assertEqual(github.posted_comments, [])
+    test_case.assertEqual(github.write_state_calls, before_writes)
+    pinned_data = github.pinned_data(ISSUE)
+    test_case.assertEqual(
+        pinned_data.get("pr_last_comment_id"),
+        INITIAL_COMMENT_WATERMARK,
+    )
+    test_case.assertEqual(
+        pinned_data.get("pending_fix_at"),
+        "2026-05-24T00:00:00+00:00",
+    )
+    test_case.assertFalse(pinned_data.get("awaiting_human"))
+    test_case.assertEqual(
+        pinned_data.get("dev_session_id"),
+        DEV_SESSION,
+    )
 
+
+class FixingLivePauseTest(unittest.TestCase, _PatchedWorkflowMixin):
     def test_resume_pause_blocks_publish_and_relabel(
         self,
     ) -> None:
@@ -94,10 +126,13 @@ class FixingLivePauseTest(unittest.TestCase, _PatchedWorkflowMixin):
         before_writes = gh.write_state_calls
 
         get_issue_mock = MagicMock(return_value=_paused_view(ISSUE))
-        with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", DEBOUNCE_SECONDS), \
-             patch.object(gh, "get_issue", get_issue_mock):
+        with (
+            patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", DEBOUNCE_SECONDS),
+            patch.object(gh, "get_issue", get_issue_mock),
+        ):
             mocks = self._run_fixing(
-                gh, issue,
+                gh,
+                issue,
                 run_agent=_agent(session_id=DEV_SESSION, last_message="pushed fix"),
                 head_shas=("sha-before", "sha-after"),
                 push_branch=True,
@@ -105,19 +140,12 @@ class FixingLivePauseTest(unittest.TestCase, _PatchedWorkflowMixin):
 
         mocks["run_agent"].assert_called_once()
         get_issue_mock.assert_called_with(ISSUE)
-        # No publish, no relabel, no ACK / park comment.
-        mocks["_push_branch"].assert_not_called()
-        self.assertEqual(gh.label_history, [])
-        self.assertEqual(gh.posted_comments, [])
-        # Durable state untouched: watermark stays below the feedback, the
-        # route bookmark and park flag survive, and nothing is written -- so a
-        # later tick re-discovers the same feedback once the label is removed.
-        self.assertEqual(gh.write_state_calls, before_writes)
-        pinned_data = gh.pinned_data(ISSUE)
-        self.assertEqual(pinned_data.get("pr_last_comment_id"), INITIAL_COMMENT_WATERMARK)
-        self.assertEqual(pinned_data.get("pending_fix_at"), "2026-05-24T00:00:00+00:00")
-        self.assertFalse(pinned_data.get("awaiting_human"))
-        self.assertEqual(pinned_data.get("dev_session_id"), DEV_SESSION)
+        _assert_fixing_pause_preserves_state(
+            self,
+            gh,
+            mocks,
+            before_writes,
+        )
 
     def test_unpause_republishes_via_resume(self) -> None:
         # End-to-end: tick 1 is frozen by a live pause and leaves the feedback
@@ -128,10 +156,13 @@ class FixingLivePauseTest(unittest.TestCase, _PatchedWorkflowMixin):
         gh = FakeGitHubClient()
         issue = _seed_fixing_pause(gh)
 
-        with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", DEBOUNCE_SECONDS), \
-             patch.object(gh, "get_issue", MagicMock(return_value=_paused_view(ISSUE))):
+        with (
+            patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", DEBOUNCE_SECONDS),
+            patch.object(gh, "get_issue", MagicMock(return_value=_paused_view(ISSUE))),
+        ):
             self._run_fixing(
-                gh, issue,
+                gh,
+                issue,
                 run_agent=_agent(session_id=DEV_SESSION, last_message="pushed fix"),
                 head_shas=("sha-before", "sha-after"),
                 push_branch=True,
@@ -141,10 +172,13 @@ class FixingLivePauseTest(unittest.TestCase, _PatchedWorkflowMixin):
         # Tick 2: `paused` removed -> the fresh fetch is clean, so the resume's
         # pushed fix publishes and relabels to `validating`.
         unpaused = make_issue(ISSUE, label="fixing")
-        with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", DEBOUNCE_SECONDS), \
-             patch.object(gh, "get_issue", MagicMock(return_value=unpaused)):
+        with (
+            patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", DEBOUNCE_SECONDS),
+            patch.object(gh, "get_issue", MagicMock(return_value=unpaused)),
+        ):
             mocks = self._run_fixing(
-                gh, issue,
+                gh,
+                issue,
                 run_agent=_agent(session_id=DEV_SESSION, last_message="pushed fix"),
                 head_shas=("sha-before", "sha-after"),
                 push_branch=True,
