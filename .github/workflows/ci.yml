@@ -30,4 +30,4 @@ jobs:
         run: uv run flake8 orchestrator tests --select=WPS
 
       - name: Tests (pytest)
-        run: uv run python -m pytest
+        run: uv run python -m pytest tests
