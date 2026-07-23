@@ -1,13 +1,15 @@
 # Agent Orchestrator — Roadmap
 
-## Status as of 2026-07-06
+## Status as of 2026-07-23
 
 The full label lifecycle is wired end-to-end: pickup → `decomposing` →
 `ready` / `blocked` / `umbrella` → `implementing` → `validating` →
 `documenting` (final-docs handoff) → `in_review` → terminal
 `done` / `rejected`, with `fixing` and `resolving_conflict` as the
 review-side loops back to `validating`, and `question` as an
-operator-applied read-only Q&A side branch.
+operator-applied read-only Q&A side branch. The `backlog` and `paused`
+control labels hold fresh or in-flight work without changing that
+workflow state.
 
 The orchestrator runs as a single long-lived Python process
 (`python -m orchestrator.main`, wrapped by `run.sh` for self-restart),
@@ -19,11 +21,12 @@ github.com. Per-repo ticks fan out concurrently; per-issue handlers
 within each repo run in parallel up to configurable caps.
 
 The observability stack is also in place: audit events, analytics JSONL
-with Postgres rollups, skill-trigger tracking, repo skill catalogs, the
-Streamlit analytics dashboard, and an opt-in file-backed trajectory sink
-and viewer for redacted agent run timelines. Agent token / cost usage is
-captured both as run-level analytics and as per-issue pinned counters
-that produce a terminal receipt comment.
+with Postgres rollups, repo skill catalogs, session-aware skill adoption
+with confirmed / inferred / incidental evidence, the Streamlit analytics
+dashboard, and an opt-in file-backed trajectory sink and viewer for
+redacted agent run timelines. Agent token / cost usage is captured both
+as run-level analytics and as per-issue pinned counters that produce a
+terminal receipt comment.
 
 For the authoritative behavior, see:
 
@@ -59,17 +62,27 @@ linked docs.
   [`docs/workflow.md`](../docs/workflow.md).
 - **Security hardening.** Agent and verify-command env strip GitHub
   tokens and secret-shaped vars; provider keys are exact-name
-  allowlisted for agent subprocesses only; `git push` runs under a
-  neutered git-config envelope with a stamped commit identity. See
+  allowlisted for agent subprocesses only; authenticated git operations
+  reject repo-local proxy / TLS overrides; `git push` runs under a
+  neutered git-config envelope with a stamped commit identity. Pinned
+  state is accepted only from the token-backed account in a state-only
+  comment, while `ALLOWED_ISSUE_AUTHORS` can exclude untrusted comments
+  from prompts, drift, resumes, and PR-feedback routing. See
   [`docs/security.md`](../docs/security.md).
 - **Stage handlers.** Per-stage flow, drift detection, the final-docs
   handoff, manual-merge-only HITL ping, the two `fixing` routes
   (in_review→fixing PR-feedback and validating→fixing
   CHANGES_REQUESTED), the conflict-only `resolving_conflict` route,
-  the `/orchestrator continue` replay / refusal flow for parked fixing
-  sessions, and the read-only `question` side branch all live under
-  `orchestrator/stages/`. See
+  `/orchestrator continue` retry / replay / refusal semantics across
+  parked developer paths, and the read-only `question` side branch all
+  live under `orchestrator/stages/`. See
   [`docs/state-machine.md#stage-handlers`](../docs/state-machine.md#stage-handlers).
+- **Control labels.** `backlog` keeps not-yet work out of dispatch;
+  `paused` freezes in-flight work across dispatch, base sync, and fresh
+  post-agent checks without discarding durable state; and, when
+  `ALLOWED_ISSUE_AUTHORS` is configured, `community_contribution` flags
+  non-allowlisted PR authors for human review. See
+  [`docs/state-machine.md#workflow-labels`](../docs/state-machine.md#workflow-labels).
 - **Typed state machine.** `WorkflowLabel` / `ControlLabel` enums in
   `orchestrator/state_machine.py`, with a typo guard and a configurable
   transition guard at the single label-write chokepoint. See
@@ -92,20 +105,22 @@ linked docs.
   cap-exempt on a dedicated pool. See
   [`docs/architecture.md#per-tick-flow-workflowtick`](../docs/architecture.md#per-tick-flow-workflowtick)
   and [`orchestrator/scheduler.py`](../orchestrator/scheduler.py).
-- **Workflow module split.** `workflow.py` is a slim facade; stage
-  bodies live under `orchestrator/stages/`; shared helpers live in
-  `workflow_drift.py`, `workflow_messages.py`, `worktree_lifecycle.py`,
-  `git_plumbing.py`, `verify.py`, `branch_publication.py`,
-  `base_sync.py`, with `worktrees.py` as a compatibility re-export
-  hub. See [`docs/architecture.md#top-level-layout`](../docs/architecture.md#top-level-layout).
-- **Tests.** Per-stage and per-routing suites under `tests/`, shared
-  helpers in `tests/workflow_helpers.py`, in-memory fakes in
-  `tests/fakes.py`. See [`CLAUDE.md`](../CLAUDE.md).
-- **Project CI.** GitHub Actions runs `ruff` and `pytest` on PRs under
-  read-only token scope; the 120-column repository line-length limit is
-  enforced by Ruff E501 for Python and `tests/test_line_length.py` for
-  tracked Markdown / text; Dependabot opens weekly updates with a
-  30-day cooldown; `dependency-review` blocks vulnerable PRs.
+- **Compatibility-facade decomposition.** Runtime core, workflow,
+  stages, worktree subsystems, analytics reads, and dashboards expose
+  stable lazy facades backed by immutable export manifests and focused
+  responsibility-named leaves. Historical imports, object identity, and
+  test patch points remain intact. See
+  [`docs/architecture.md#top-level-layout`](../docs/architecture.md#top-level-layout).
+- **Tests.** Large suites are split into focused per-behavior modules
+  with subsystem-specific support harnesses; reusable GitHub behavior
+  stays in the in-memory fakes in `tests/fakes.py`. See
+  [`CLAUDE.md`](../CLAUDE.md).
+- **Project CI.** GitHub Actions runs Ruff, WPS-focused Flake8, and
+  pytest on PRs under read-only token scope; the 120-column repository
+  line-length limit is enforced by Ruff E501 for Python and
+  `tests/test_line_length.py` for tracked Markdown / text; Dependabot
+  opens weekly updates with a 30-day cooldown; `dependency-review`
+  blocks vulnerable PRs.
 - **Audit event log.** Optional opt-in JSONL sink at `EVENT_LOG_PATH`,
   one record per workflow event, including opt-in `skill_triggered`
   events when `TRACK_SKILL_TRIGGERS` is enabled. See
@@ -117,8 +132,8 @@ linked docs.
   (`orchestrator/analytics/read.py`), and a Streamlit dashboard
   (`orchestrator/dashboard.py`) over the standalone analytics view.
   Records include stage evaluations, agent exits, repo skill catalogs,
-  opt-in skill-trigger fields, skill-trigger-rate rollups, and the
-  per-skill trigger matrix. See
+  opt-in skill-observation fields, logical-session adoption, and
+  invocation-level trigger diagnostics. See
   [`docs/observability.md`](../docs/observability.md).
 - **Trajectory sink and viewer.** Opt-in `TRAJECTORY_LOG_PATH` records
   redacted, head/tail-truncated `agent_trajectory` JSONL records for
@@ -129,8 +144,9 @@ linked docs.
 - **Agent usage / cost parser.** `orchestrator/usage.py` decodes JSONL
   agent stdout into a `UsageMetrics` dataclass; CLI-reported cost wins,
   otherwise a baked-in price table estimates and unknown SKUs yield
-  `unknown-price`. The same module parses triggered skills and agent
-  trajectories for the opt-in observability surfaces above. See
+  `unknown-price`. The same surface parses agent trajectories and
+  distinguishes confirmed Claude skill loads, inferred direct Codex
+  `SKILL.md` reads, and incidental path references. See
   [`docs/observability.md#usage-parser-orchestratorusagepy`](../docs/observability.md#usage-parser-orchestratorusagepy).
 - **Per-issue usage receipts.** Developer, reviewer, decomposer, and
   question runs fold parsed `UsageMetrics` into pinned-state
@@ -145,6 +161,11 @@ linked docs.
 
 Short actionable entries; expand into design docs only when picked up.
 
+- **Domain package refactor.** Replace the flat production and test
+  trees with domain packages, narrow explicit package APIs, and remove
+  the manifest-backed lazy compatibility system through phased PRs that
+  preserve runtime behavior. Full plan in
+  [`domain-package-refactor.md`](domain-package-refactor.md).
 - **Spec-first split.** Insert a `specifying` stage between `ready` and
   `implementing` so a separate spec agent writes failing tests first
   (scoped to test paths) and the orchestrator verifies they fail
@@ -178,10 +199,9 @@ Short actionable entries; expand into design docs only when picked up.
 ## Risks
 
 - **R1 — Codex / Claude CLI output format drift.** Isolated in
-  `agents.parse_session_id` and the per-backend last-message capture;
-  failures surface as `session_id=None` (logged) or empty
-  `last_message` (park with stderr quoted via
-  `_format_stderr_diagnostics`).
+  provider-specific agent and usage-parser leaves; failures surface as
+  `session_id=None` (logged) or empty `last_message` (park with stderr
+  quoted via `_format_stderr_diagnostics`).
 - **R2 — Self-mutation while running.** Per-issue worktrees +
   ancestry-aware self-update detection in
   `main._self_modifying_merge_happened` + the `run.sh` self-restart
@@ -190,12 +210,15 @@ Short actionable entries; expand into design docs only when picked up.
   (`AGENT_TIMEOUT`, `REVIEW_TIMEOUT`), per-issue retry budget
   (`MAX_RETRIES_PER_DAY`), review / fix cap (`MAX_REVIEW_ROUNDS`),
   conflict-resolution cap (`MAX_CONFLICT_ROUNDS`).
-- **R4 — GitHub rate limits.** PyGithub handles backoff; 60s ticks are
-  well under the 5000 req/hr limit.
-- **R5 — Race between human comments and orchestrator action.** Each
-  handler re-fetches the issue + pinned-state immediately before any
-  transition; any comment newer than the recorded watermark drives the
-  awaiting-human resume branch.
+- **R4 — GitHub rate limits.** Idle per-repo polls and closed-issue
+  sweeps can exhaust a PAT's 5000 requests/hour at the default cadence
+  once enough repos are tracked. Label caching and
+  `CLOSED_ISSUE_SWEEP_EVERY_N_TICKS` reduce the floor; operators can
+  raise `POLL_INTERVAL` or split repos across tokens.
+- **R5 — Race between human controls and orchestrator action.** Trusted
+  comment filters, per-surface watermarks, content hashes, and fresh
+  post-agent label reads keep late comments from being silently consumed
+  and keep agent output from being published after a mid-run pause.
 
 [typed-states]: ../docs/state-machine.md#typed-states-and-the-transition-guard
 [trajectory-sink]: ../docs/observability.md#trajectory-sink-trajectory_log_path
