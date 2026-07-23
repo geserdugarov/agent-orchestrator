@@ -38,16 +38,16 @@ from tests.analytics_jsonl_helpers import (
 )
 
 
-_REPO_KEY = 'repo'
+_REPO_KEY = "repo"
 
 
-_TIMESTAMP_KEY = 'ts'
+_TIMESTAMP_KEY = "ts"
 
 
-_ISSUE_KEY = 'issue'
+_ISSUE_KEY = "issue"
 
 
-_EVENT_KEY = 'event'
+_EVENT_KEY = "event"
 
 
 _PRUNE_NOW_DAY = 25
@@ -160,9 +160,7 @@ def _reject_github_mutations(client_type, method_names: tuple[str, ...]):
                     client_type,
                     method_name,
                     MagicMock(
-                        side_effect=AssertionError(
-                            f"prune must not call GitHubClient.{method_name}"
-                        ),
+                        side_effect=AssertionError(f"prune must not call GitHubClient.{method_name}"),
                     ),
                 )
             )
@@ -262,7 +260,7 @@ class PruneWithRetentionLoggingTest(unittest.TestCase):
         # the boundary: the prune helper takes no GitHub client and the
         # real `prune_old_records` implementation never imports `github`
         # at all. This pairs with the main-loop wiring tests in
-        # `tests/test_main.py`: those verify the wrapper is called once
+        # The polling-loop tests verify the wrapper is called once
         # per tick; this verifies that calling it cannot mutate pinned
         # state through any client method.
         from orchestrator.github import GitHubClient
