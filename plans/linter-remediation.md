@@ -45,7 +45,7 @@ Do not mark a stage complete until its completion gate is satisfied.
 | 4 | Remaining production style and structure | 5/5 | [x] |
 | 5 | Test structure and complexity | 7/7 | [x] |
 | 6 | Test literals and naming | 7/7 | [x] |
-| 7 | Long-tail cleanup and final verification | 4/5 | [ ] |
+| 7 | Long-tail cleanup and final verification | 5/5 | [x] |
 
 ## Finding-count progress
 
@@ -54,11 +54,11 @@ signal between scans.
 
 | Metric | Initial | Current | Target |
 |---|---:|---:|---:|
-| Parsed findings | 7,683 | 1,573 | 0 |
-| Unique findings | 7,660 | 1,573 | 0 |
-| Production findings | 1,468 | 223 | 0 |
-| Test findings | 6,215 | 1,350 | 0 |
-| Affected files | 172 | 163 | 0 |
+| Parsed findings | 7,683 | 0 | 0 |
+| Unique findings | 7,660 | 0 | 0 |
+| Production findings | 1,468 | 0 | 0 |
+| Test findings | 6,215 | 0 | 0 |
+| Affected files | 172 | 0 | 0 |
 | Standard `E...` findings | 29 | 0 | 0 |
 
 Minimum acceptable fallback: reduce the total by at least 90%, leave no production correctness or formatting
@@ -87,13 +87,16 @@ move.
 
 ## Validation gate for every completed package
 
-- [ ] Focused tests for the changed module pass during implementation.
-- [ ] `.venv/bin/python -m ruff check orchestrator tests` passes.
-- [ ] `git diff --check origin/main...HEAD` passes.
-- [ ] `.venv/bin/python -m pytest` passes.
-- [ ] Added or modified tests have distinct coverage and no avoidable duplicated setup.
-- [ ] Comments describe current invariants and contain no diff-relative wording.
-- [ ] The package is recorded in the session log.
+- [x] Focused tests for the changed module pass during implementation.
+- [x] `.venv/bin/python -m ruff check orchestrator tests` passes.
+- [x] `git diff --check origin/main...HEAD` passes.
+- [x] `.venv/bin/python -m pytest tests` passes.
+- [x] Added or modified tests have distinct coverage and no avoidable duplicated setup.
+- [x] Comments describe current invariants and contain no diff-relative wording.
+- [x] The package is recorded in the session log.
+
+The tracked `tests/` tree is the full package gate because bare repository-root discovery also traverses the ignored,
+externally owned `analytics-db/data` volume, which is not readable by the development user.
 
 ## Stage 1 — Concrete formatting and correctness cleanup
 
@@ -450,7 +453,7 @@ packages and accepted-remainder review.
 
 - [x] Run the full validation gate from a clean worktree.
 - [x] Update all progress tables and close every completed package.
-- [ ] Confirm the final result reaches zero findings or the minimum acceptable fallback.
+- [x] Confirm the final result reaches zero findings or the minimum acceptable fallback.
 
 Completion gate: the primary zero-finding target is achieved, or at least 90% of findings are removed with no
 unexplained remainder and no production correctness or formatting findings.
@@ -459,6 +462,9 @@ unexplained remainder and no production correctness or formatting findings.
 
 Use this register only when a finding cannot be removed safely. Do not add an entry until a concrete refactor has been
 considered.
+
+Status: cleared. The entries below document the reviewed intermediate state from 2026-07-22; the Phase 2 remediation
+removed every registered finding.
 
 ### Issue scheduler submission API
 
@@ -1401,20 +1407,14 @@ Add one row for every implementation session, including partial sessions.
 | 2026-07-21 | 7.3 | Complete | Tests 1621->1350; Ruff/diff; tracked gate 2204p/3s | Not committed | Start 7.4 |
 | 2026-07-22 | 7.4 | Complete | 66 entries; WPS402 24; 199 focused; Ruff/diff; 2204p/3s | Not committed | Start 7.5 |
 | 2026-07-22 | 7.5 | Partial | Scan 1573; 79.5% removed; checks pass | Not committed | Clear 807 or revise fallback |
+| 2026-07-23 | 7.5 / Phase 2 3.1 | Complete | Scan 0; 109 focused; Ruff/diffs; 2228p/3s | This commit | None |
 
-Package 7.5 is **partial**. The clean-worktree validation used Flake8 7.3.0, wemake-python-styleguide 1.6.2, and
-Python 3.12.3 with the Package 7.1 scan command. It reports 1,573 parsed / 1,573 unique findings across 163 files:
-production 223, tests 1,350, and no standard `E...` or `F...` findings. The inventory is unchanged from Package 7.4,
-and every finding remains covered by the reviewed accepted-remainder register.
-
-Ruff and both working-tree and committed-range diff checks pass. The unscoped pytest command collects all 2,207
-tracked tests but cannot traverse the ignored, externally owned `analytics-db/data` volume; the established tracked-tree
-gate passes with 2,204 tests and the three expected live-Postgres skips.
-
-The final count removes 79.5% of both the parsed and unique initial inventories. The fallback requires at most 768
-parsed and 766 unique findings, so Package 7.5 needs 807 additional unique removals to reach the stated 90% threshold.
-The final completion checkbox and Stage 7 therefore remain open pending either more remediation or an explicit change
-to the fallback criterion.
+Package 7.5 is **complete**. The 2026-07-23 clean-worktree validation used Python 3.12.3 and the exact Package 7.1
+scan command. It reports 0 parsed findings, 0 unique findings, 0 affected files, and no newly exposed rule family.
+Ruff and both working-tree and committed-range diff checks pass. The re-export, direct-launch, public-signature,
+serialized-shape, and real-git selection passes 109 tests and 964 subtests. The tracked suite collects 2,231 tests
+and passes 2,228 with the three expected live-Postgres skips. The 24-test increase over the 2,207-test baseline is
+fully accounted for by compatibility coverage added during Phase 2; no baseline behavior case was removed.
 
 Package 7.4 is **complete**. All 66 accepted-remainder entries were challenged against the refreshed 1,573-finding
 scan and the current implementation. Each retained entry protects a public keyword, attribute, serialized-data,
