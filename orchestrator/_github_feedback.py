@@ -10,8 +10,9 @@ from github import GithubException
 from github.IssueComment import IssueComment
 from github.PullRequest import PullRequest
 
-from orchestrator import _github_labels, _github_pinned, _github_reviews
+from orchestrator import _github_labels, _github_reviews
 from orchestrator._github_pull_checks import GitHubPullChecksMixin
+from orchestrator.github import pinned_state
 
 log = logging.getLogger("orchestrator.github")
 
@@ -27,7 +28,7 @@ class GitHubFeedbackMixin(GitHubPullChecksMixin):
         """Return PR conversation comments newer than their watermark."""
         pr_comments: list[IssueComment] = []
         for pr_comment in pr.get_issue_comments():
-            if _github_pinned.PINNED_STATE_MARKER in (pr_comment.body or ""):
+            if pinned_state.PINNED_STATE_MARKER in (pr_comment.body or ""):
                 continue
             if after_id is None or pr_comment.id > after_id:
                 pr_comments.append(pr_comment)
@@ -42,7 +43,7 @@ class GitHubFeedbackMixin(GitHubPullChecksMixin):
         """Return inline review comments newer than their own watermark."""
         review_comments: list = []
         for review_comment in pr.get_review_comments():
-            if _github_pinned.PINNED_STATE_MARKER in (review_comment.body or ""):
+            if pinned_state.PINNED_STATE_MARKER in (review_comment.body or ""):
                 continue
             if after_id is None or review_comment.id > after_id:
                 review_comments.append(review_comment)

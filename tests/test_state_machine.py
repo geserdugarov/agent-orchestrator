@@ -199,7 +199,9 @@ class TransitionGraphReachabilityTest(unittest.TestCase):
         # Drift meta-test: every `set_workflow_label(..., WorkflowLabel.X)`
         # target in the package must be an allowed target somewhere in the
         # table, so a new write site can't outrun the declared graph.
-        package = pathlib.Path(github.__file__).parent
+        # `github` is a subpackage, so its grandparent is the orchestrator
+        # package root the drift scan must cover end to end.
+        package = pathlib.Path(github.__file__).parent.parent
         emitted: set[WorkflowLabel] = set()
         for py_file in package.rglob("*.py"):
             for match in _LABEL_WRITE_PATTERN.finditer(py_file.read_text()):

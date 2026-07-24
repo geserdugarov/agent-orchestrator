@@ -8,18 +8,11 @@ from orchestrator import (
     _github_events,
     _github_internals,
     _github_labels,
-    _github_pinned,
     _github_queries,
     _github_reviews,
 )
 
 GitHubClientBase = _github_internals.GitHubInternalsMixin
-PinnedState = _github_pinned.PinnedState
-PINNED_STATE_MARKER = _github_pinned.PINNED_STATE_MARKER
-PINNED_STATE_RE = _github_pinned.PINNED_STATE_RE
-PINNED_STATE_BODY_RE = _github_pinned.PINNED_STATE_BODY_RE
-PINNED_STATE_TEMPLATE = _github_pinned.PINNED_STATE_TEMPLATE
-pinned_state_from_comment = _github_pinned.pinned_state_from_comment
 
 WORKFLOW_LABEL_SPECS = _github_labels.WORKFLOW_LABEL_SPECS
 WORKFLOW_LABELS = _github_labels.WORKFLOW_LABELS
