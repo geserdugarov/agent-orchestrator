@@ -5,11 +5,14 @@
 Result / option models, credential filtering, session-id / Claude
 final-message parsing, and shared dispatch have direct owners in the ``agents``
 package (``models`` / ``environment`` / ``sessions`` / ``runner``). This
-inventory aggregates the codex/claude backend leaves the façade re-exports.
+inventory aggregates the backend leaves the façade re-exports: the Codex
+backend lives in the ``agents.backends`` subpackage, while the Claude backend
+stays the retained ``_agent_claude`` leaf until its own migration lands.
 """
 from __future__ import annotations
 
-from orchestrator import _agent_claude, _agent_codex
+from orchestrator import _agent_claude
+from orchestrator.agents.backends import codex as _agent_codex
 
 codex_last_message_file = _agent_codex.codex_last_message_file
 read_last_message = _agent_codex.read_last_message

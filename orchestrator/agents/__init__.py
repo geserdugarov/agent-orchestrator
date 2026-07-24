@@ -7,7 +7,9 @@ injected git identity in the ``environment`` owner, session-id / Claude
 final-message parsing in the ``sessions`` owner, the shared process registry /
 subprocess-group lifecycle in the ``processes`` owner, and shared dispatch --
 backend selection, result assembly, and spawn logging -- in the ``runner``
-owner; backend commands remain in focused private leaves. This facade
+owner; backend commands live in per-backend modules (the Codex backend in the
+``agents.backends`` subpackage, the Claude backend in the retained
+``_agent_claude`` leaf). This facade
 re-exports the narrow public surface (``__all__``): the model types, the
 ``run_agent`` dispatch entry, and the ``terminate_all_running`` shutdown hook.
 Runners and the verify runner reach the process owner directly.

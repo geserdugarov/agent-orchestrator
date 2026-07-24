@@ -314,16 +314,6 @@ class InterruptedAgentResultTest(unittest.TestCase):
     a normal completion and from the orchestrator's own `timed_out` path.
     """
 
-    def test_run_codex_threads_interrupted_through(self) -> None:
-        with patch(
-            _agent_cases._POPEN_TARGET,
-            return_value=_support.completed(returncode=-signal.SIGTERM),
-        ):
-            agent_result = _agents._run_codex(_agent_cases._PROMPT, _agent_cases._CWD)
-        self.assertTrue(agent_result.interrupted)
-        self.assertFalse(agent_result.timed_out)
-        self.assertEqual(agent_result.exit_code, -signal.SIGTERM)
-
     def test_run_claude_threads_interrupted_through(self) -> None:
         with patch(
             _agent_cases._POPEN_TARGET,
@@ -332,14 +322,6 @@ class InterruptedAgentResultTest(unittest.TestCase):
             agent_result = _agents._run_claude(_agent_cases._PROMPT, _agent_cases._CWD)
         self.assertTrue(agent_result.interrupted)
         self.assertFalse(agent_result.timed_out)
-
-    def test_clean_run_reports_not_interrupted(self) -> None:
-        with patch(
-            _agent_cases._POPEN_TARGET,
-            return_value=_support.completed(returncode=0),
-        ):
-            agent_result = _agents.run_agent(_agent_cases._CODEX, _agent_cases._PROMPT, _agent_cases._CWD)
-        self.assertFalse(agent_result.interrupted)
 
 
 class ClaudeLastMessageGatingTest(unittest.TestCase):

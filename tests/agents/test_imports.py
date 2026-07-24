@@ -9,11 +9,12 @@ import sys
 import typing
 import unittest
 
-from orchestrator import _agent_claude, _agent_codex
+from orchestrator import _agent_claude
 from orchestrator import agents as _agents
 from orchestrator.agents import models as _agent_models
 from orchestrator.agents import processes as _agent_processes
 from orchestrator.agents import runner as _agent_runner
+from orchestrator.agents.backends import codex as _agent_codex
 
 
 _MODULES = (
@@ -23,15 +24,16 @@ _MODULES = (
     "orchestrator.agents.sessions",
     "orchestrator.agents.processes",
     "orchestrator.agents.runner",
+    "orchestrator.agents.backends",
+    "orchestrator.agents.backends.codex",
     "orchestrator._agent_api",
-    "orchestrator._agent_codex",
     "orchestrator._agent_claude",
 )
 
 # Agent-package functions annotated against the `models` owner -- the runner
-# owner plus the retained codex/claude leaves. Their hints must resolve at
-# runtime, so the owner stays importable at module scope rather than only for
-# static type checkers.
+# owner plus the Codex backend and retained Claude leaf. Their hints must
+# resolve at runtime, so the owner stays importable at module scope rather than
+# only for static type checkers.
 _OWNER_ANNOTATED_FUNCS = (
     _agent_codex.codex_command,
     _agent_codex.run_codex,
@@ -48,11 +50,12 @@ _OWNER_ANNOTATED_FUNCS = (
 class CleanProcessImportTest(unittest.TestCase):
     """Each agent module imports standalone in a fresh interpreter.
 
-    The package `__init__` facade and the retained `_agent_*` leaves depend
-    on each other; importing any leaf before the package must not fail with a
-    partially-initialized-module error, so the owners are the only agent-package
-    import the leaves take at module load. A subprocess per module gives each
-    one a clean `sys.modules` no other test has already populated.
+    The package `__init__` facade, the `agents.backends.codex` backend, and
+    the retained `_agent_*` leaves depend on each other; importing any of them
+    before the package must not fail with a partially-initialized-module error,
+    so the owners are the only agent-package import the backend and leaves take
+    at module load. A subprocess per module gives each one a clean `sys.modules`
+    no other test has already populated.
     """
 
     def test_each_module_imports_standalone(self) -> None:
@@ -70,8 +73,8 @@ class CleanProcessImportTest(unittest.TestCase):
 class RuntimeAnnotationTest(unittest.TestCase):
     """Owner-typed annotations stay runtime-resolvable across the package.
 
-    The runner owner and the codex/claude leaves annotate against the `models`
-    owner, and `typing.get_type_hints()` -- exercised by tooling and
+    The runner owner, the Codex backend, and the Claude leaf annotate against
+    the `models` owner, and `typing.get_type_hints()` -- exercised by tooling and
     introspection -- evaluates those annotations in each function's globals.
     The owner names must therefore be bound at runtime, not only for static
     type checkers.
