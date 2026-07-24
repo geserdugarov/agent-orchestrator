@@ -69,7 +69,7 @@ orchestrator process is stateless.
   `tests/test_workflow_in_review_fresh_feedback.py`, `tests/test_workflow_community_contribution.py`,
   `tests/test_workflow_stage_analytics.py`, `tests/test_workflow_finalize_pr_merged.py`,
   `tests/test_workflow_drain_terminals.py`); shared helpers in `tests/workflow_helpers.py`. Configuration-package
-  tests live in `tests/config/`.
+  tests live in `tests/config/` and agent-package owner / import-cycle tests in `tests/agents/`.
 - `docs/` — architecture, workflow, and configuration references.
 - `run.sh` — production launcher that auto-restarts after self-modifying merges.
 - `.env.example` / `.env.example.advanced` — basic and advanced configuration templates; full reference is in
