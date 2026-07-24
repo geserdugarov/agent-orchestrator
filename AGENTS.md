@@ -35,7 +35,7 @@ orchestrator process is stateless.
   the configuration package (`config/`, whose `__init__.py` binds each setting resolved by the `environment.py`
   `_SettingsResolver`, which draws on the `_dotenv.py` / `credentials.py` / `models.py` / `repositories.py` leaves),
   the agents package (`agents/`, whose `__init__.py` is the stable runner facade over the `models.py` /
-  `environment.py` owners and the codex/claude/session `_agent_*.py` leaves),
+  `environment.py` / `sessions.py` owners and the codex/claude `_agent_*.py` leaves),
   and stable runtime-core facades
   (`main.py`, `github.py`, `state_machine.py`).
   Full module-by-module map: [`docs/architecture.md`](docs/architecture.md#top-level-layout).

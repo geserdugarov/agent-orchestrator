@@ -6,13 +6,10 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional, Unpack
 
-from orchestrator import (
-    _agent_claude_messages,
-    _agent_runner_common,
-    config,
-)
+from orchestrator import _agent_runner_common, config
 from orchestrator.agents import environment as _agent_environment
 from orchestrator.agents import models as _agent_models
+from orchestrator.agents import sessions as _agent_sessions
 
 
 def claude_command(
@@ -45,7 +42,7 @@ def claude_process_last_message(
         and not process_result.timed_out
         and not process_result.interrupted
     )
-    return _agent_claude_messages.claude_last_message(
+    return _agent_sessions.claude_last_message(
         process_result.stdout,
         allow_assistant_fallback=succeeded,
     )

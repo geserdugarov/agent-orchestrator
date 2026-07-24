@@ -2,17 +2,18 @@
 # SPDX-License-Identifier: Apache-2.0
 """Stable agent API and hardened subprocess-group lifecycle.
 
-Result and option models live in the ``models`` owner and credential
-filtering / injected git identity in the ``environment`` owner; backend
-commands, transcript parsing, session parsing, and shared runner helpers
-remain in focused private leaves. Process creation remains here so the
-historical ``orchestrator.agents.subprocess.Popen`` patch point and shared
-shutdown registry retain their exact behavior.
+Result and option models live in the ``models`` owner, credential filtering /
+injected git identity in the ``environment`` owner, and session-id / Claude
+final-message parsing in the ``sessions`` owner; backend commands and shared
+runner helpers remain in focused private leaves. Process creation remains here
+so the historical ``orchestrator.agents.subprocess.Popen`` patch point and
+shared shutdown registry retain their exact behavior.
 
-The retained leaves import the ``models`` / ``environment`` owners directly at
-module load; to keep those imports free of a package-initialization cycle, the
-session / backend / runner re-exports this facade owes ``_agent_api`` are
-resolved lazily by ``__getattr__`` rather than bound at import time.
+The retained leaves import the ``models`` / ``environment`` / ``sessions``
+owners directly at module load; to keep those imports free of a
+package-initialization cycle, the backend / runner re-exports this facade owes
+``_agent_api`` are resolved lazily by ``__getattr__`` rather than bound at
+import time.
 """
 from __future__ import annotations
 
@@ -26,6 +27,7 @@ from typing import Optional, Unpack
 
 from orchestrator.agents import environment as _agent_environment
 from orchestrator.agents import models as _agent_models
+from orchestrator.agents import sessions as _agent_sessions
 from orchestrator import _agent_process_registry
 
 _running_procs = _agent_process_registry._running_procs
@@ -51,30 +53,31 @@ _AGENT_SECRET_SUFFIXES = _agent_environment._AGENT_SECRET_SUFFIXES
 _AGENT_SECRET_BARE_NAMES = _agent_environment._AGENT_SECRET_BARE_NAMES
 _AGENT_PROVIDER_AUTH_ALLOWLIST = _agent_environment._AGENT_PROVIDER_AUTH_ALLOWLIST
 
+parse_session_id = _agent_sessions.parse_session_id
+_first_nested_uuid = _agent_sessions._first_nested_uuid
+_walk_mapping_for_uuid = _agent_sessions._walk_mapping_for_uuid
+_walk_for_uuid = _agent_sessions._walk_for_uuid
+_UUID_RE = _agent_sessions._UUID_RE
+_PRIORITY_KEYS = _agent_sessions._PRIORITY_KEYS
+_decode_claude_event = _agent_sessions._decode_claude_event
+_iter_claude_events = _agent_sessions._iter_claude_events
+_collect_claude_text_blocks = _agent_sessions._collect_claude_text_blocks
+_claude_result_text = _agent_sessions._claude_result_text
+_claude_assistant_text = _agent_sessions._claude_assistant_text
+_collect_claude_message_candidates = _agent_sessions._collect_claude_message_candidates
+_claude_last_message = _agent_sessions.claude_last_message
+
 # Facade re-export -> `_agent_api` attribute. Resolved lazily (see
 # `__getattr__`) so importing a retained leaf -- which reaches its owners
 # through this package -- never re-enters `_agent_api` mid-initialization.
 # An immutable tuple avoids a mutable module-level constant.
 _LAZY_API_EXPORTS = (
-    ("parse_session_id", "parse_session_id"),
-    ("_first_nested_uuid", "first_nested_uuid"),
-    ("_walk_mapping_for_uuid", "walk_mapping_for_uuid"),
-    ("_walk_for_uuid", "walk_for_uuid"),
-    ("_UUID_RE", "uuid_re"),
-    ("_PRIORITY_KEYS", "priority_keys"),
     ("_codex_last_message_file", "codex_last_message_file"),
     ("_read_last_message", "read_last_message"),
     ("_build_agent_result", "build_agent_result"),
     ("_codex_command", "codex_command"),
     ("_log_agent_spawn", "log_agent_spawn"),
     ("_run_codex", "run_codex"),
-    ("_decode_claude_event", "decode_claude_event"),
-    ("_iter_claude_events", "iter_claude_events"),
-    ("_collect_claude_text_blocks", "collect_claude_text_blocks"),
-    ("_claude_result_text", "claude_result_text"),
-    ("_claude_assistant_text", "claude_assistant_text"),
-    ("_collect_claude_message_candidates", "collect_claude_message_candidates"),
-    ("_claude_last_message", "claude_last_message"),
     ("_claude_command", "claude_command"),
     ("_claude_process_last_message", "claude_process_last_message"),
     ("_run_claude", "run_claude"),

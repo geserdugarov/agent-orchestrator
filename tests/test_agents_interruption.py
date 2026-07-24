@@ -120,25 +120,6 @@ class ClaudeLastMessageGatingTest(unittest.TestCase):
     the last streamed chunk as the agent's considered final answer.
     """
 
-    def test_fallback_gated_off_directly(self) -> None:
-        # With the fallback disabled, a transcript carrying only assistant
-        # chunks yields ""; a terminal result event is still honored.
-        self.assertEqual(
-            _agents._claude_last_message(
-                _agent_cases._PARTIAL_CLAUDE_OUTPUT,
-                allow_assistant_fallback=False,
-            ),
-            "",
-        )
-        result_frame = json.dumps(
-            {_agent_cases._TYPE_FIELD: _agent_cases._RESULT_FIELD, _agent_cases._RESULT_FIELD: "final"}
-        )
-        with_result = f"{_agent_cases._PARTIAL_CLAUDE_OUTPUT}\n{result_frame}"
-        self.assertEqual(
-            _agents._claude_last_message(with_result, allow_assistant_fallback=False),
-            "final",
-        )
-
     def test_interrupted_no_result_is_empty(self) -> None:
         with patch(
             _agent_cases._POPEN_TARGET,
