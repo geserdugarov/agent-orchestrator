@@ -408,9 +408,9 @@ an unmergeable PR.
 
 `ANALYTICS_LOG_PATH`, `ANALYTICS_RETENTION_DAYS`, `ANALYTICS_DB_URL`, `TRACK_SKILL_TRIGGERS`, `TRAJECTORY_LOG_PATH`, and
 `TRAJECTORY_RETENTION_DAYS` are parsed at import by `orchestrator/analytics/_recording.py` and bound as attributes of
-the `orchestrator/analytics` package (the package owns its own configuration surface). `EVENT_LOG_PATH` is parsed in
-`orchestrator/config/__init__.py` because the audit event log is a general-purpose audit surface rather than
-analytics-specific.
+the `orchestrator/analytics` package (the package owns its own configuration surface). `EVENT_LOG_PATH` is resolved by
+the `orchestrator/config` resolver and bound on the config package because the audit event log is a general-purpose
+audit surface rather than analytics-specific.
 
 ### Analytics dashboard quickstart
 
@@ -463,8 +463,9 @@ every push to `main` and every pull request, installing from the committed [`../
 `uv sync --locked`.
 Ruff rules live in [`../pyproject.toml`](../pyproject.toml) under `[tool.ruff.lint]`; WPS is selected inline so Flake8
 does not duplicate Ruff's checks; dev tools are declared in `[dependency-groups]`. The only on-disk Flake8 config is
-[`../.flake8`](../.flake8), which scopes a single `WPS412` per-file ignore to `orchestrator/config/__init__.py` because
-the config package deliberately assembles and validates its settings at import time in the package initializer.
+[`../.flake8`](../.flake8), which scopes `WPS412` and `WPS410` per-file ignores to `orchestrator/config/__init__.py`
+because the package initializer deliberately invokes the `environment` resolver and binds its results at import time
+(so a reload re-runs resolution) and publishes its narrow public surface through an explicit `__all__` there.
 
 Ruff and the line-length test enforce a repository-wide 120-column target set once as `line-length` under
 `[tool.ruff]` in [`../pyproject.toml`](../pyproject.toml). Ruff applies it to Python via the opted-in `E501` rule; the

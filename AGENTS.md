@@ -32,8 +32,9 @@ orchestrator process is stateless.
   `_branch_*`, `_git_*`, `_verify_*`, `_worktree_*`, and stage-specific prefixes). The package also contains per-tick
   repo skill-catalog analytics (`skill_catalog.py`), lazy analytics/read and dashboard facades backed by focused
   recording, query, rendering, usage-provider, and trajectory leaves, the process-local scheduler (`scheduler.py`),
-  the configuration package (`config/`, whose `__init__.py` assembles and validates every setting and imports the
-  `environment.py` / `credentials.py` / `models.py` / `repositories.py` leaves), and stable runtime-core facades
+  the configuration package (`config/`, whose `__init__.py` binds each setting resolved by the `environment.py`
+  `_SettingsResolver` and imports the `_dotenv.py` / `credentials.py` / `models.py` / `repositories.py` leaves), and
+  stable runtime-core facades
   (`main.py`, `agents.py`, `github.py`, `state_machine.py`).
   Full module-by-module map: [`docs/architecture.md`](docs/architecture.md#top-level-layout).
 - `tests/` — pytest suite. In-memory fakes in `tests/fakes.py`. Stage-handler tests in

@@ -1,13 +1,17 @@
 # Copyright 2026 Geser Dugarov
 # SPDX-License-Identifier: Apache-2.0
-"""Configuration loaded from .env / process environment.
+"""Configuration package: the public settings surface over resolved env values.
 
-Every knob is resolved and validated here as the package is imported, so a
-reload re-runs the whole assembly and callers and tests keep patching each
-value on `orchestrator.config` itself. The non-secret `.env` parser lives in
-`environment`, the token resolver in `credentials`, the repository-config
-data types (`RepoSpec`, `RepoEnvEntry`) in `models`, and the `REPOS` parsing /
-default-spec construction in `repositories`.
+This initializer is a binding / re-export surface, not a resolver. On every
+import (and every reload) it invokes `environment._SettingsResolver`, which
+loads the non-secret `.env`, reads each `os.environ` key, validates it, and
+returns the resolved mapping; this module then binds each value as a
+module-level attribute so callers and tests keep patching them on
+`orchestrator.config` itself. The resolution lives in the leaves: `_dotenv`
+owns the `.env` loader, `environment` the env-value parsers and the resolver,
+`credentials` the token resolver, `models` the repository-config data types
+(`RepoSpec`, `RepoEnvEntry`), and `repositories` the `REPOS` parsing /
+default-spec construction.
 
 Secrets are deliberately NOT loaded from REPO_ROOT/.env. The implementer agent
 runs in a sibling worktree with sandbox bypass, so anything readable inside
@@ -24,25 +28,72 @@ import sys
 from pathlib import Path
 from typing import NoReturn
 
-from orchestrator import _agent_config, _runtime_config
-from orchestrator.config import credentials, environment, repositories
+from orchestrator.config import _dotenv, credentials, environment
 # The repository-entry model lives in the config `models` leaf and the REPOS
 # parsing / default-spec construction in `repositories`; re-export `RepoSpec`
 # so `orchestrator.config` stays the compatibility import site for every
 # caller and test patch target.
 from orchestrator.config.models import RepoSpec as RepoSpec
 
+# The public package surface: resolved settings plus the repository-config
+# API. `__all__` bounds `from orchestrator.config import *`; the private
+# `_config_*` / `_parse_*` / `_load_dotenv` / `_strip_dotenv_quotes` /
+# `_resolve_github_token` aliases below are deliberately excluded and stay
+# reachable only by the unmigrated consumers that still import them by name.
+__all__ = [
+    "RepoSpec",
+    "default_repo_specs",
+    "REPO_ROOT",
+    "REPO",
+    "GITHUB_TOKEN",
+    "POLL_INTERVAL",
+    "AGENT_TIMEOUT",
+    "CLOSED_ISSUE_SWEEP_EVERY_N_TICKS",
+    "SHUTDOWN_GRACE_SECONDS",
+    "LOG_DIR",
+    "EVENT_LOG_PATH",
+    "REVIEW_TIMEOUT",
+    "MAX_REVIEW_ROUNDS",
+    "MAX_CONFLICT_ROUNDS",
+    "MAX_RETRIES_PER_DAY",
+    "DEV_SESSION_MAX_RESUMES",
+    "HITL_HANDLES",
+    "HITL_HANDLE",
+    "HITL_MENTIONS",
+    "ALLOWED_ISSUE_AUTHORS",
+    "CODEX_BIN",
+    "CLAUDE_BIN",
+    "DEV_AGENT_SPEC",
+    "DEV_AGENT",
+    "DEV_AGENT_ARGS",
+    "REVIEW_AGENT_SPEC",
+    "REVIEW_AGENT",
+    "REVIEW_AGENT_ARGS",
+    "DECOMPOSE_AGENT_SPEC",
+    "DECOMPOSE_AGENT",
+    "DECOMPOSE_AGENT_ARGS",
+    "AGENT_GIT_NAME",
+    "AGENT_GIT_EMAIL",
+    "TARGET_REPO_ROOT",
+    "WORKTREES_DIR",
+    "BASE_BRANCH",
+    "REMOTE_NAME",
+    "MAX_PARALLEL_ISSUES_PER_REPO",
+    "MAX_PARALLEL_ISSUES_GLOBAL",
+    "WORKFLOW_TRANSITION_GUARD",
+    "ORCHESTRATOR_BASE_BRANCH",
+    "IN_REVIEW_DEBOUNCE_SECONDS",
+    "DECOMPOSE",
+    "SQUASH_ON_APPROVAL",
+    "EXPOSE_TRACKED_REPOS",
+    "VERIFY_COMMANDS",
+    "VERIFY_TIMEOUT",
+]
+
 # The orchestrator checkout itself -- two levels above this package
 # (`orchestrator/config/`) -- which every other path default and the `.env`
 # lookup are derived from.
 REPO_ROOT = Path(__file__).resolve().parents[2]
-
-# Keys whose values must never be loaded from REPO_ROOT/.env. The agent has
-# read access to that file via the orchestrator checkout; secrets belong in
-# process env or in a file outside REPO_ROOT.
-# Default value for boolean env knobs that ship enabled.
-_DEFAULT_ENABLED = "on"
-_DOTENV_TRUE_VALUES = environment._TRUE_VALUES
 
 
 def _config_error(message: str) -> NoReturn:
@@ -67,23 +118,45 @@ def _config_warning(message: str) -> None:
 
 
 def _load_dotenv() -> None:
-    environment.load_dotenv(REPO_ROOT, os.environ, _config_warning)
+    """Load REPO_ROOT/.env into the process environment.
+
+    A compatibility shim over the `_dotenv` leaf: the resolver loads the
+    same file on every import, but reload tests still drive dotenv loading
+    directly after patching `REPO_ROOT`.
+    """
+    _dotenv.load_dotenv(REPO_ROOT, os.environ, _config_warning)
 
 
-_strip_dotenv_quotes = environment.strip_dotenv_quotes
+def _parse_agent_spec(name: str, spec: str) -> tuple[str, tuple[str, ...]]:
+    """Parse a shell-like backend spec into (backend, extra_args).
+
+    A thin binding over `environment.parse_agent_spec` on the config error
+    funnel. Reused at runtime by `workflow.py` to re-parse a spec persisted
+    to pinned state, so a legacy bare-backend value (`"codex"` / `"claude"`)
+    round-trips to `(backend, ())` and a full spec round-trips to its tokens.
+    """
+    return environment.parse_agent_spec(name, spec, _config_error)
+
+
+_strip_dotenv_quotes = _dotenv.strip_dotenv_quotes
 _resolve_github_token = credentials.resolve_github_token
+_parse_verify_commands = environment.parse_verify_commands
 
 
-_load_dotenv()
+# Resolve every setting from a `.env`-loaded process environment. Building a
+# fresh resolver here (not caching a module-level default) is what preserves
+# the reload / patch contract: re-importing `orchestrator.config` re-runs this
+# against the current `os.environ`, and each bound value below stays an
+# independently patchable module attribute.
+_RESOLVED = environment._SettingsResolver(
+    os.environ, REPO_ROOT, _config_error, _config_warning,
+).resolve()
 
 
-_parse_hitl_handles = _runtime_config.parse_hitl_handles
-
-
-REPO: str = os.environ.get("REPO", "geserdugarov/agent-orchestrator")
-GITHUB_TOKEN: str = _resolve_github_token(REPO)
-POLL_INTERVAL: int = int(os.environ.get("POLL_INTERVAL", "60"))
-AGENT_TIMEOUT: int = int(os.environ.get("AGENT_TIMEOUT", "1800"))
+REPO: str = _RESOLVED["REPO"]
+GITHUB_TOKEN: str = _RESOLVED["GITHUB_TOKEN"]
+POLL_INTERVAL: int = _RESOLVED["POLL_INTERVAL"]
+AGENT_TIMEOUT: int = _RESOLVED["AGENT_TIMEOUT"]
 
 # How many polling ticks apart the closed-issue recovery sweep in
 # `GitHubClient.list_pollable_issues` runs. That sweep issues one
@@ -100,9 +173,7 @@ AGENT_TIMEOUT: int = int(os.environ.get("AGENT_TIMEOUT", "1800"))
 # the only cost is that an externally-merged/closed issue may take up to N-1
 # extra ticks to finalize to `done` -- pinned GitHub state stays authoritative
 # in the meantime, so nothing is lost, only briefly deferred.
-CLOSED_ISSUE_SWEEP_EVERY_N_TICKS: int = max(
-    1, int(os.environ.get("CLOSED_ISSUE_SWEEP_EVERY_N_TICKS", "1"))
-)
+CLOSED_ISSUE_SWEEP_EVERY_N_TICKS: int = _RESOLVED["CLOSED_ISSUE_SWEEP_EVERY_N_TICKS"]
 
 # Hard ceiling, in seconds, on how long the polling loop may take to exit
 # after a SIGTERM/SIGINT before it force-terminates in-flight agent
@@ -113,14 +184,12 @@ CLOSED_ISSUE_SWEEP_EVERY_N_TICKS: int = max(
 # capped only by `AGENT_TIMEOUT` (1800s) -- 20x the stop deadline -- so a
 # restart issued while any agent was running always timed out into a brute
 # kill of both `run.sh` and python.
-SHUTDOWN_GRACE_SECONDS: int = max(
-    1, int(os.environ.get("SHUTDOWN_GRACE_SECONDS", "30"))
-)
+SHUTDOWN_GRACE_SECONDS: int = _RESOLVED["SHUTDOWN_GRACE_SECONDS"]
 
 # Persistent log location. main.py attaches a FileHandler here in addition to
 # the existing stderr stream, so post-mortems don't depend on the terminal
 # `run.sh` was started in. Already covered by the `*.log` .gitignore rule.
-LOG_DIR: Path = Path(os.environ.get("LOG_DIR", str(REPO_ROOT / "logs")))
+LOG_DIR: Path = _RESOLVED["LOG_DIR"]
 
 # Optional JSONL sink for structured audit events. When set, `GitHubClient`
 # (and `FakeGitHubClient`) append one JSON object per line whenever a
@@ -132,8 +201,7 @@ LOG_DIR: Path = Path(os.environ.get("LOG_DIR", str(REPO_ROOT / "logs")))
 # (the default) leaves the legacy behavior in place: no file is opened,
 # no IO happens. Synchronous append is intentional: tick volume is low
 # and ordering matters for the operator reading the file.
-_EVENT_LOG_PATH_RAW: str = os.environ.get("EVENT_LOG_PATH", "").strip()
-EVENT_LOG_PATH = Path(_EVENT_LOG_PATH_RAW) if _EVENT_LOG_PATH_RAW else None
+EVENT_LOG_PATH = _RESOLVED["EVENT_LOG_PATH"]
 
 # Sink settings for the project-local analytics JSONL file
 # (`ANALYTICS_LOG_PATH`, `ANALYTICS_RETENTION_DAYS`) and the libpq URL
@@ -144,18 +212,18 @@ EVENT_LOG_PATH = Path(_EVENT_LOG_PATH_RAW) if _EVENT_LOG_PATH_RAW else None
 # above stays here because `GitHubClient.emit_event` is a
 # general-purpose audit surface, not analytics-specific.
 
-REVIEW_TIMEOUT: int = int(os.environ.get("REVIEW_TIMEOUT", str(AGENT_TIMEOUT)))
-MAX_REVIEW_ROUNDS: int = int(os.environ.get("MAX_REVIEW_ROUNDS", "3"))
+REVIEW_TIMEOUT: int = _RESOLVED["REVIEW_TIMEOUT"]
+MAX_REVIEW_ROUNDS: int = _RESOLVED["MAX_REVIEW_ROUNDS"]
 # Cap on how many auto-conflict-resolution attempts one PR can use before
 # `_handle_resolving_conflict` parks awaiting human. Mirrors the
 # `MAX_REVIEW_ROUNDS` shape so a stuck rebase loop cannot burn tokens
 # indefinitely.
-MAX_CONFLICT_ROUNDS: int = int(os.environ.get("MAX_CONFLICT_ROUNDS", "3"))
+MAX_CONFLICT_ROUNDS: int = _RESOLVED["MAX_CONFLICT_ROUNDS"]
 # Cap on how many fresh implementing-codex spawns one issue can use within a
 # 24h window opened at the first counted attempt. The window resets once 24h
 # elapses since that start. Resumes on human reply do not count. 0 = unbounded
 # (matches MAX_REVIEW_ROUNDS's implied semantics).
-MAX_RETRIES_PER_DAY: int = int(os.environ.get("MAX_RETRIES_PER_DAY", "3"))
+MAX_RETRIES_PER_DAY: int = _RESOLVED["MAX_RETRIES_PER_DAY"]
 # Proactive dev-session rotation: after a single `dev_session_id` has been
 # resumed this many times, retire it and start a fresh spawn from durable
 # state (issue body + recent comments + the committed branch) instead of
@@ -166,13 +234,10 @@ MAX_RETRIES_PER_DAY: int = int(os.environ.get("MAX_RETRIES_PER_DAY", "3"))
 # `_resume_dev_with_text` still catches a session that blows the window in
 # fewer resumes (one huge round). 0 = unbounded (resume forever, old
 # behavior).
-DEV_SESSION_MAX_RESUMES: int = int(os.environ.get("DEV_SESSION_MAX_RESUMES", "10"))
-HITL_HANDLES: tuple[str, ...] = (
-    _parse_hitl_handles(os.environ.get("HITL_HANDLE", "geserdugarov"))
-    or ("geserdugarov",)
-)
-HITL_HANDLE: str = ",".join(HITL_HANDLES)
-HITL_MENTIONS: str = " ".join(f"@{hitl_handle}" for hitl_handle in HITL_HANDLES)
+DEV_SESSION_MAX_RESUMES: int = _RESOLVED["DEV_SESSION_MAX_RESUMES"]
+HITL_HANDLES: tuple[str, ...] = _RESOLVED["HITL_HANDLES"]
+HITL_HANDLE: str = _RESOLVED["HITL_HANDLE"]
+HITL_MENTIONS: str = _RESOLVED["HITL_MENTIONS"]
 # Comma-separated GitHub logins whose unlabeled issues the orchestrator is
 # willing to auto-pick-up. Empty (the default) disables the allowlist and
 # preserves the legacy "anyone can trigger" behavior. Set this on a public
@@ -188,31 +253,9 @@ HITL_MENTIONS: str = " ".join(f"@{hitl_handle}" for hitl_handle in HITL_HANDLES)
 # Pickup itself still fires only on unlabeled issues: a
 # maintainer who manually labels an outsider's issue (e.g. `implementing`)
 # drives it to completion.
-ALLOWED_ISSUE_AUTHORS: tuple[str, ...] = _parse_hitl_handles(
-    os.environ.get("ALLOWED_ISSUE_AUTHORS", "")
-)
-_CLAUDE = "claude"
-CODEX_BIN: str = os.environ.get("CODEX_BIN", "codex")
-CLAUDE_BIN: str = os.environ.get("CLAUDE_BIN", _CLAUDE)
-
-
-def _parse_agent_spec(name: str, spec: str) -> tuple[str, tuple[str, ...]]:
-    """Parse a shell-like backend spec into (backend, extra_args).
-
-    Accepts a bare backend (`claude`) or a backend with backend-CLI args
-    (`codex -m gpt-5.5 -c 'model_reasoning_effort="xhigh"'`). Tokens are
-    split with `shlex` so quoting works the same way an operator would
-    type the command in a shell. The first token must be `codex` or
-    `claude`; anything else aborts at import so a typo cannot silently
-    fall back to a default backend on next restart.
-
-    The same parser is reused at runtime by `workflow.py` to re-parse a
-    spec that was previously persisted to pinned state, so a legacy bare-
-    backend value (`"codex"` / `"claude"`) round-trips cleanly to
-    `(backend, ())` and a full spec with args round-trips to its tokens.
-    """
-    return _agent_config.parse_agent_spec(name, spec, _config_error)
-
+ALLOWED_ISSUE_AUTHORS: tuple[str, ...] = _RESOLVED["ALLOWED_ISSUE_AUTHORS"]
+CODEX_BIN: str = _RESOLVED["CODEX_BIN"]
+CLAUDE_BIN: str = _RESOLVED["CLAUDE_BIN"]
 
 # Default split: claude implements, codex reviews. Validated at import so a
 # typo in the deployment env aborts the process before the first GitHub call.
@@ -223,21 +266,18 @@ def _parse_agent_spec(name: str, spec: str) -> tuple[str, tuple[str, ...]]:
 # persists it verbatim in pinned state so a config flip mid-flight cannot
 # change what backend+args run on an in-flight issue (the stored spec is
 # re-parsed on every resume; current config is only consulted for fresh
-# spawns).
-DEV_AGENT_SPEC: str = os.environ.get("DEV_AGENT", _CLAUDE)
-DEV_AGENT, DEV_AGENT_ARGS = _parse_agent_spec("DEV_AGENT", DEV_AGENT_SPEC)
-REVIEW_AGENT_SPEC: str = os.environ.get("REVIEW_AGENT", "codex")
-REVIEW_AGENT, REVIEW_AGENT_ARGS = _parse_agent_spec(
-    "REVIEW_AGENT", REVIEW_AGENT_SPEC
-)
-# Decomposer is a separate role from implementing/reviewing -- it reads the
-# issue and produces a structured manifest. Parsed at import time even when
-# DECOMPOSE=off so flipping the kill switch back on does not introduce a
-# fresh "that env var was always invalid" failure.
-DECOMPOSE_AGENT_SPEC: str = os.environ.get("DECOMPOSE_AGENT", _CLAUDE)
-DECOMPOSE_AGENT, DECOMPOSE_AGENT_ARGS = _parse_agent_spec(
-    "DECOMPOSE_AGENT", DECOMPOSE_AGENT_SPEC
-)
+# spawns). The decomposer is a separate role and is parsed even when
+# DECOMPOSE=off so flipping the kill switch back on does not surface a fresh
+# "that env var was always invalid" failure.
+DEV_AGENT_SPEC: str = _RESOLVED["DEV_AGENT_SPEC"]
+DEV_AGENT: str = _RESOLVED["DEV_AGENT"]
+DEV_AGENT_ARGS: tuple[str, ...] = _RESOLVED["DEV_AGENT_ARGS"]
+REVIEW_AGENT_SPEC: str = _RESOLVED["REVIEW_AGENT_SPEC"]
+REVIEW_AGENT: str = _RESOLVED["REVIEW_AGENT"]
+REVIEW_AGENT_ARGS: tuple[str, ...] = _RESOLVED["REVIEW_AGENT_ARGS"]
+DECOMPOSE_AGENT_SPEC: str = _RESOLVED["DECOMPOSE_AGENT_SPEC"]
+DECOMPOSE_AGENT: str = _RESOLVED["DECOMPOSE_AGENT"]
+DECOMPOSE_AGENT_ARGS: tuple[str, ...] = _RESOLVED["DECOMPOSE_AGENT_ARGS"]
 
 # git identity injected into each agent spawn via GIT_AUTHOR_*/GIT_COMMITTER_*
 # env vars (see agents._agent_env). Env vars take precedence over user.name
@@ -245,94 +285,48 @@ DECOMPOSE_AGENT, DECOMPOSE_AGENT_ARGS = _parse_agent_spec(
 # the orchestrator without touching the host's git config or the shared repo
 # config. The default email uses the GitHub-recognized noreply form so it
 # won't bounce and won't link to a real user account.
-AGENT_GIT_NAME: str = os.environ.get("AGENT_GIT_NAME", "agent-orchestrator")
-AGENT_GIT_EMAIL: str = os.environ.get(
-    "AGENT_GIT_EMAIL", "agent-orchestrator@users.noreply.github.com"
-)
+AGENT_GIT_NAME: str = _RESOLVED["AGENT_GIT_NAME"]
+AGENT_GIT_EMAIL: str = _RESOLVED["AGENT_GIT_EMAIL"]
 
 # The repository whose issues / PRs this orchestrator manages. Defaults to
 # REPO_ROOT (self-bootstrap: orchestrator manages its own repo). Override when
 # the orchestrator code is installed in one clone but drives PRs into another.
 # Worktrees are `git worktree add`-ed from this path, so commits land on its
 # git history -- not the orchestrator's own.
-TARGET_REPO_ROOT: Path = Path(
-    os.environ.get("TARGET_REPO_ROOT", str(REPO_ROOT))
-)
+TARGET_REPO_ROOT: Path = _RESOLVED["TARGET_REPO_ROOT"]
 
-WORKTREES_DIR: Path = Path(
-    os.environ.get("WORKTREES_DIR", str(TARGET_REPO_ROOT.parent / "wt-orchestrator"))
-)
+WORKTREES_DIR: Path = _RESOLVED["WORKTREES_DIR"]
 
 # Base branch in the *target* repo: where worktrees branch from and where PRs
 # are opened against.
-BASE_BRANCH: str = os.environ.get("BASE_BRANCH", "main")
+BASE_BRANCH: str = _RESOLVED["BASE_BRANCH"]
 
 # Name of the git remote in `TARGET_REPO_ROOT` that points at REPO on GitHub.
 # Defaults to `origin`; override when the local clone uses several remotes
 # (e.g. a public `origin` and a private fork named `private`) and the
 # orchestrator should drive the non-default one. Ignored when `REPOS` is set
 # -- the per-entry fourth field on each `REPOS` row takes precedence there.
-REMOTE_NAME: str = os.environ.get("REMOTE_NAME", "origin")
-
-
-_parse_positive_int = _runtime_config.PositiveIntParser(_config_error)
-
+REMOTE_NAME: str = _RESOLVED["REMOTE_NAME"]
 
 # Per-repo cap on how many issues the orchestrator may advance in parallel
 # within one repo on a single tick. Default 1 keeps the legacy "one issue
 # at a time per repo" behavior. Each `REPOS` entry can override this via
 # its optional fifth pipe-separated field.
-MAX_PARALLEL_ISSUES_PER_REPO: int = _parse_positive_int(
-    "MAX_PARALLEL_ISSUES_PER_REPO",
-    os.environ.get("MAX_PARALLEL_ISSUES_PER_REPO", ""),
-    1,
-)
+MAX_PARALLEL_ISSUES_PER_REPO: int = _RESOLVED["MAX_PARALLEL_ISSUES_PER_REPO"]
 # Global cap across all configured repos. Default 3 limits concurrent
 # spawn fan-out when several `REPOS` entries are configured, regardless
 # of the per-repo cap each one declares. Set higher only on hosts with
 # the CPU / memory headroom to run that many agent CLIs at once.
-MAX_PARALLEL_ISSUES_GLOBAL: int = _parse_positive_int(
-    "MAX_PARALLEL_ISSUES_GLOBAL",
-    os.environ.get("MAX_PARALLEL_ISSUES_GLOBAL", ""),
-    3,
-)
+MAX_PARALLEL_ISSUES_GLOBAL: int = _RESOLVED["MAX_PARALLEL_ISSUES_GLOBAL"]
 
+# One of off / warn / enforce, governing only the transition-*legality* check
+# in `set_workflow_label` (the typo guard is always strict). Default `warn`
+# keeps production safe while the declared transition table soaks against live
+# issues; flip to `enforce` once the warn logs are clean. An invalid value
+# aborts at import so a typo can't silently disable the guard.
+WORKFLOW_TRANSITION_GUARD: str = _RESOLVED["WORKFLOW_TRANSITION_GUARD"]
 
-def _parse_transition_guard(raw: str) -> str:
-    """Parse `WORKFLOW_TRANSITION_GUARD`: one of off / warn / enforce.
-
-    Governs only the transition-*legality* check in `set_workflow_label`
-    (the typo guard is always strict). Default `warn` keeps production
-    safe while the declared transition table soaks against live issues;
-    flip to `enforce` once the warn logs are clean. An invalid value
-    aborts at import so a typo can't silently disable the guard.
-    """
-    mode = (raw or "").strip().lower() or "warn"
-    if mode not in ("off", "warn", "enforce"):
-        _config_error(
-            f"orchestrator: WORKFLOW_TRANSITION_GUARD={raw!r} is invalid; "
-            "expected one of: off, warn, enforce"
-        )
-    return mode
-
-
-WORKFLOW_TRANSITION_GUARD: str = _parse_transition_guard(
-    os.environ.get("WORKFLOW_TRANSITION_GUARD", "")
-)
-
-
-_REPO_SPECS: list[RepoSpec] = repositories.build_repo_specs(
-    os.environ.get("REPOS", ""),
-    default_spec=RepoSpec(
-        slug=REPO,
-        target_root=TARGET_REPO_ROOT,
-        base_branch=BASE_BRANCH,
-        remote_name=REMOTE_NAME,
-        parallel_limit=MAX_PARALLEL_ISSUES_PER_REPO,
-    ),
-    config_error=_config_error,
-    config_warning=_config_warning,
-)
+_REPO_SPECS: list[RepoSpec] = _RESOLVED["REPO_SPECS"]
 
 
 def default_repo_specs() -> list[RepoSpec]:
@@ -351,21 +345,17 @@ def default_repo_specs() -> list[RepoSpec]:
 # for new commits under `orchestrator/`, and `run.sh` fast-forwards to it on
 # every restart. Decoupled from BASE_BRANCH so the target repo can have a
 # different default branch (e.g. `master`) without breaking self-update.
-ORCHESTRATOR_BASE_BRANCH: str = os.environ.get("ORCHESTRATOR_BASE_BRANCH", "main")
+ORCHESTRATOR_BASE_BRANCH: str = _RESOLVED["ORCHESTRATOR_BASE_BRANCH"]
 
 # Quiet window after the most recent PR/issue comment before resuming the dev
 # session in `in_review`.
-IN_REVIEW_DEBOUNCE_SECONDS: int = int(
-    os.environ.get("IN_REVIEW_DEBOUNCE_SECONDS", "600")
-)
+IN_REVIEW_DEBOUNCE_SECONDS: int = _RESOLVED["IN_REVIEW_DEBOUNCE_SECONDS"]
 
 # Kill switch for the entire `decomposing` stage. off -> revert to the
 # legacy "no label -> implementing" pickup, no children, no manifest. The
 # rollout safety valve so the user can disable decomposition if manifest
 # output proves unreliable, without redeploying old binaries.
-DECOMPOSE: bool = (
-    os.environ.get("DECOMPOSE", _DEFAULT_ENABLED).strip().lower() in _DOTENV_TRUE_VALUES
-)
+DECOMPOSE: bool = _RESOLVED["DECOMPOSE"]
 
 # After the reviewer agent emits VERDICT: APPROVED, squash the dev's commits
 # on the PR branch into a single conventional-commit-shaped commit and
@@ -373,9 +363,7 @@ DECOMPOSE: bool = (
 # expect on merge. Off restores the legacy "leave the dev's commit history
 # as-is" behavior; useful if a workflow downstream (changelog generation,
 # bisect tooling) depends on the per-step commit history.
-SQUASH_ON_APPROVAL: bool = os.environ.get(
-    "SQUASH_ON_APPROVAL", _DEFAULT_ENABLED
-).strip().lower() in _DOTENV_TRUE_VALUES
+SQUASH_ON_APPROVAL: bool = _RESOLVED["SQUASH_ON_APPROVAL"]
 
 # Whether working agents are told about the *other* repos this orchestrator
 # tracks (slug, local `target_root`, base branch) for cross-repo reference.
@@ -386,13 +374,7 @@ SQUASH_ON_APPROVAL: bool = os.environ.get(
 # disclosed data is operator-configured and non-secret (no tokens, no remote
 # URLs), and write-containment is unchanged, so default-on-when-multi-repo is
 # the right posture; the kill switch keeps it reversible.
-EXPOSE_TRACKED_REPOS: bool = os.environ.get(
-    "EXPOSE_TRACKED_REPOS", _DEFAULT_ENABLED
-).strip().lower() in _DOTENV_TRUE_VALUES
-
-
-_parse_verify_commands = _runtime_config.parse_verify_commands
-
+EXPOSE_TRACKED_REPOS: bool = _RESOLVED["EXPOSE_TRACKED_REPOS"]
 
 # Local verification commands run in the per-issue worktree on
 # VERDICT: APPROVED, before the issue is labeled `in_review`. Default
@@ -402,10 +384,8 @@ _parse_verify_commands = _runtime_config.parse_verify_commands
 # is parked in `validating` with the failing command, exit/timeout, and
 # a redacted/truncated tail of the output. GitHub CI still runs against
 # the PR; the human merging it reads CI's verdict.
-VERIFY_COMMANDS: tuple[str, ...] = _parse_verify_commands(
-    os.environ.get("VERIFY_COMMANDS", "")
-)
+VERIFY_COMMANDS: tuple[str, ...] = _RESOLVED["VERIFY_COMMANDS"]
 # Per-command wall-clock cap in seconds. Each command in VERIFY_COMMANDS
 # is run with this timeout; a single slow command parks the issue rather
 # than burning the orchestrator's tick budget.
-VERIFY_TIMEOUT: int = int(os.environ.get("VERIFY_TIMEOUT", "600"))
+VERIFY_TIMEOUT: int = _RESOLVED["VERIFY_TIMEOUT"]
