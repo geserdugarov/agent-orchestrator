@@ -53,10 +53,11 @@ orchestrator/
                         and validation of every knob (reload / patch target)
     environment.py      non-secret `.env` parsing
     credentials.py      process/token-file GitHub credential resolution
+    models.py           `RepoSpec` / `RepoEnvEntry` repository-config types
+    repositories.py     REPOS entry parsing, validation, and default-spec
+                        construction
   _agent_config.py      agent-spec parsing
   _runtime_config.py    runtime toggles, commands, and numeric controls
-  _repo_config*.py      `RepoSpec`, REPOS entry parsing, validation, and
-                        default-spec construction
   state_machine.py      stable typed-label and transition-guard surface
   _workflow_labels.py   label enums and strict label-name coercion
   _state_transitions.py declared workflow transition graph

@@ -33,8 +33,8 @@ orchestrator process is stateless.
   repo skill-catalog analytics (`skill_catalog.py`), lazy analytics/read and dashboard facades backed by focused
   recording, query, rendering, usage-provider, and trajectory leaves, the process-local scheduler (`scheduler.py`),
   the configuration package (`config/`, whose `__init__.py` assembles and validates every setting and imports the
-  `environment.py` / `credentials.py` leaves), and stable runtime-core facades (`main.py`, `agents.py`, `github.py`,
-  `state_machine.py`).
+  `environment.py` / `credentials.py` / `models.py` / `repositories.py` leaves), and stable runtime-core facades
+  (`main.py`, `agents.py`, `github.py`, `state_machine.py`).
   Full module-by-module map: [`docs/architecture.md`](docs/architecture.md#top-level-layout).
 - `tests/` — pytest suite. In-memory fakes in `tests/fakes.py`. Stage-handler tests in
   `tests/test_workflow_<stage>*.py` (the validating stage is split across review, controls, drift, handoff, pause,

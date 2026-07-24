@@ -5,7 +5,9 @@
 Every knob is resolved and validated here as the package is imported, so a
 reload re-runs the whole assembly and callers and tests keep patching each
 value on `orchestrator.config` itself. The non-secret `.env` parser lives in
-`environment` and the token resolver in `credentials`.
+`environment`, the token resolver in `credentials`, the repository-config
+data types (`RepoSpec`, `RepoEnvEntry`) in `models`, and the `REPOS` parsing /
+default-spec construction in `repositories`.
 
 Secrets are deliberately NOT loaded from REPO_ROOT/.env. The implementer agent
 runs in a sibling worktree with sandbox bypass, so anything readable inside
@@ -22,12 +24,13 @@ import sys
 from pathlib import Path
 from typing import NoReturn
 
-from orchestrator import _agent_config, _repo_config, _runtime_config
-from orchestrator.config import credentials, environment
-# The repository-entry model and REPOS parsing / default-spec construction live
-# in a focused private module; re-export `RepoSpec` so `orchestrator.config`
-# stays the compatibility import site for every caller and test patch target.
-from orchestrator._repo_config import RepoSpec as RepoSpec
+from orchestrator import _agent_config, _runtime_config
+from orchestrator.config import credentials, environment, repositories
+# The repository-entry model lives in the config `models` leaf and the REPOS
+# parsing / default-spec construction in `repositories`; re-export `RepoSpec`
+# so `orchestrator.config` stays the compatibility import site for every
+# caller and test patch target.
+from orchestrator.config.models import RepoSpec as RepoSpec
 
 # The orchestrator checkout itself -- two levels above this package
 # (`orchestrator/config/`) -- which every other path default and the `.env`
@@ -318,25 +321,7 @@ WORKFLOW_TRANSITION_GUARD: str = _parse_transition_guard(
 )
 
 
-def _parse_repos_env(raw: str) -> list[RepoSpec]:
-    """Parse the REPOS env value into a list of RepoSpecs.
-
-    Narrow compatibility wrapper: the entry parsing, owner/name and option
-    validation, ordering, duplicate detection, and per-repo parallel-limit
-    defaulting live in `_repo_config.parse_repos_env`; this shim injects this
-    module's `MAX_PARALLEL_ISSUES_PER_REPO` default and the abort / warn
-    diagnostics. Kept on `orchestrator.config` so existing callers and test
-    patch targets resolve `config._parse_repos_env` unchanged.
-    """
-    return _repo_config.parse_repos_env(
-        raw,
-        default_parallel_limit=MAX_PARALLEL_ISSUES_PER_REPO,
-        config_error=_config_error,
-        config_warning=_config_warning,
-    )
-
-
-_REPO_SPECS: list[RepoSpec] = _repo_config.build_repo_specs(
+_REPO_SPECS: list[RepoSpec] = repositories.build_repo_specs(
     os.environ.get("REPOS", ""),
     default_spec=RepoSpec(
         slug=REPO,
