@@ -9,7 +9,11 @@ import sys
 import typing
 import unittest
 
-from orchestrator import _agent_claude, _agent_codex, _agent_runner_common
+from orchestrator import _agent_claude, _agent_codex
+from orchestrator import agents as _agents
+from orchestrator.agents import models as _agent_models
+from orchestrator.agents import processes as _agent_processes
+from orchestrator.agents import runner as _agent_runner
 
 
 _MODULES = (
@@ -18,23 +22,26 @@ _MODULES = (
     "orchestrator.agents.environment",
     "orchestrator.agents.sessions",
     "orchestrator.agents.processes",
+    "orchestrator.agents.runner",
     "orchestrator._agent_api",
-    "orchestrator._agent_runner_common",
     "orchestrator._agent_codex",
     "orchestrator._agent_claude",
 )
 
-# Retained-leaf functions annotated against the `models` owner. Their hints
-# must resolve at runtime, so the owner stays importable at module scope
-# rather than only for static type checkers.
+# Agent-package functions annotated against the `models` owner -- the runner
+# owner plus the retained codex/claude leaves. Their hints must resolve at
+# runtime, so the owner stays importable at module scope rather than only for
+# static type checkers.
 _OWNER_ANNOTATED_FUNCS = (
     _agent_codex.codex_command,
     _agent_codex.run_codex,
     _agent_claude.claude_command,
     _agent_claude.claude_process_last_message,
     _agent_claude.run_claude,
-    _agent_runner_common.build_agent_result,
-    _agent_runner_common.log_agent_spawn,
+    _agent_runner.resolve_agent_run_options,
+    _agent_runner.run_agent,
+    _agent_runner.build_agent_result,
+    _agent_runner.log_agent_spawn,
 )
 
 
@@ -61,12 +68,13 @@ class CleanProcessImportTest(unittest.TestCase):
 
 
 class RuntimeAnnotationTest(unittest.TestCase):
-    """Retained leaves keep their owner-typed annotations runtime-resolvable.
+    """Owner-typed annotations stay runtime-resolvable across the package.
 
-    The leaves annotate against the `models` owner, and
-    `typing.get_type_hints()` -- exercised by tooling and introspection --
-    evaluates those annotations in each leaf's globals. The owner names must
-    therefore be bound at runtime, not only for static type checkers.
+    The runner owner and the codex/claude leaves annotate against the `models`
+    owner, and `typing.get_type_hints()` -- exercised by tooling and
+    introspection -- evaluates those annotations in each function's globals.
+    The owner names must therefore be bound at runtime, not only for static
+    type checkers.
     """
 
     def test_leaf_function_hints_resolve(self) -> None:
@@ -74,3 +82,32 @@ class RuntimeAnnotationTest(unittest.TestCase):
             with self.subTest(function=owner_annotated.__qualname__):
                 # An unbound owner name surfaces here as NameError.
                 typing.get_type_hints(owner_annotated)
+
+
+class PublicSurfaceTest(unittest.TestCase):
+    """The facade publishes a narrow `__all__` backed by owner identities."""
+
+    def test_all_names_the_narrow_public_surface(self) -> None:
+        self.assertEqual(
+            _agents.__all__,
+            (
+                "AgentResult",
+                "AgentRunOptions",
+                "CodexResult",
+                "run_agent",
+                "terminate_all_running",
+            ),
+        )
+
+    def test_public_names_are_owner_re_exports(self) -> None:
+        # Each public name resolves to the owning module's object rather than a
+        # copy, so a caller reaching through the facade sees the owner's
+        # definition and a monkeypatch on it stays observable.
+        self.assertIs(_agents.run_agent, _agent_runner.run_agent)
+        self.assertIs(_agents.AgentResult, _agent_models.AgentResult)
+        self.assertIs(_agents.AgentRunOptions, _agent_models.AgentRunOptions)
+        self.assertIs(_agents.CodexResult, _agent_models.CodexResult)
+        self.assertIs(
+            _agents.terminate_all_running,
+            _agent_processes.terminate_all_running,
+        )

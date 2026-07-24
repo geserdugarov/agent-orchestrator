@@ -70,8 +70,9 @@ orchestrator/
     environment.py      credential filtering plus injected git identity
     sessions.py         session-id and Claude final-message JSONL parsing
     processes.py        shared process registry and subprocess-group lifecycle
-  _agent_*.py           shared runner helpers, codex/claude command runners,
-                        and the façade compatibility inventory
+    runner.py           shared agent dispatch, result assembly, spawn logging
+  _agent_*.py           codex/claude command runners and the façade
+                        compatibility inventory
   scheduler.py          stable `IssueScheduler` / `SubmissionRequest` surface
   _scheduler_*.py       typed legacy-call binding, scheduler views,
                         reservation, execution, and completion handling

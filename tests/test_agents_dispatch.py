@@ -1,77 +1,16 @@
 # Copyright 2026 Geser Dugarov
 # SPDX-License-Identifier: Apache-2.0
-"""Focused agent runtime tests."""
+"""Backend command construction and argv-shape tests."""
 
 from __future__ import annotations
 
-import json
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 from orchestrator import agents as _agents
 from tests import agent_test_support as _support
 from tests import agent_test_values as _agent_cases
-
-
-class RunAgentDispatchTest(unittest.TestCase):
-    def test_unknown_backend_raises_value_error(self) -> None:
-        with self.assertRaisesRegex(ValueError, "gemini"):
-            _agents.run_agent("gemini", "prompt", _agent_cases._CWD)
-
-    def test_dispatch_honors_patched_backend_alias(self) -> None:
-        # `agents._run_codex` / `agents._run_claude` are the historical patch
-        # site for redirecting a backend; dispatch reads the alias off the
-        # facade at call time, so an override installed with `patch.object`
-        # is honored rather than bypassed by the lazy re-export resolver.
-        for backend, alias in (
-            (_agent_cases._CODEX, "_run_codex"),
-            (_agent_cases._CLAUDE, "_run_claude"),
-        ):
-            with self.subTest(backend=backend):
-                sentinel = object()
-                fake = MagicMock(return_value=sentinel)
-                with patch.object(_agents, alias, fake):
-                    dispatched = _agents.run_agent(
-                        backend,
-                        _agent_cases._PROMPT,
-                        _agent_cases._CWD,
-                    )
-                self.assertIs(dispatched, sentinel)
-                fake.assert_called_once()
-
-    def test_dispatches_to_codex(self) -> None:
-        # Use stream-json-shaped output so _agents.parse_session_id has something to
-        # find; the codex runner doesn't care about claude shape.
-        sid = "abcdef12-3456-7890-abcd-ef1234567890"
-        with patch(
-            _agent_cases._POPEN_TARGET,
-            return_value=_support.completed(stdout=json.dumps({_agent_cases._SESSION_ID_FIELD: sid})),
-        ) as run_mock:
-            agent_result = _agents.run_agent(_agent_cases._CODEX, _agent_cases._PROMPT, _agent_cases._CWD)
-            argv = list(run_mock.call_args.args[0])
-        self.assertEqual(agent_result.session_id, sid)
-        self.assertEqual(agent_result.exit_code, 0)
-        self.assertIn("--dangerously-bypass-approvals-and-sandbox", argv)
-        self.assertEqual(argv[1], _agent_cases._CODEX_EXEC)
-
-    def test_dispatches_to_claude(self) -> None:
-        sid = "cafe1234-5678-90ab-cdef-1234567890ab"
-        events = [
-            json.dumps({_agent_cases._TYPE_FIELD: "system", _agent_cases._SESSION_ID_FIELD: sid}),
-            json.dumps({_agent_cases._TYPE_FIELD: _agent_cases._RESULT_FIELD, _agent_cases._RESULT_FIELD: "shipped"}),
-        ]
-        with patch(
-            _agent_cases._POPEN_TARGET,
-            return_value=_support.completed(stdout="\n".join(events)),
-        ) as run_mock:
-            agent_result = _agents.run_agent(_agent_cases._CLAUDE, _agent_cases._PROMPT, _agent_cases._CWD)
-            argv = list(run_mock.call_args.args[0])
-        self.assertEqual(agent_result.session_id, sid)
-        self.assertEqual(agent_result.last_message, "shipped")
-        self.assertIn("--dangerously-skip-permissions", argv)
-        self.assertIn("-p", argv)
-        self.assertIn("--output-format", argv)
 
 
 class RunCodexCwdTest(unittest.TestCase):
