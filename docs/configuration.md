@@ -471,8 +471,9 @@ The agent facade adds a second scope: `orchestrator/agents/__init__.py` (`WPS412
 runner facade. It binds the model / environment / session compatibility aliases and re-exports the runner owner's
 `run_agent` and the process owner's `terminate_all_running` eagerly, and publishes its narrow public surface through an
 explicit `__all__` (`WPS410`). Its PEP 562 module `__getattr__` (`WPS413`) resolves only the codex/claude backend
-re-exports lazily, so the retained `_agent_*` leaves can import the `models` / `environment` / `sessions` /
-`processes` / `runner` owners directly without re-entering the facade mid-initialization.
+re-exports lazily, so the `agents.backends.codex` backend and the retained `_agent_claude` leaf can import the
+`models` / `environment` / `sessions` / `processes` / `runner` owners directly without re-entering the facade
+mid-initialization.
 
 Ruff and the line-length test enforce a repository-wide 120-column target set once as `line-length` under
 `[tool.ruff]` in [`../pyproject.toml`](../pyproject.toml). Ruff applies it to Python via the opted-in `E501` rule; the

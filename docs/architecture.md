@@ -71,8 +71,10 @@ orchestrator/
     sessions.py         session-id and Claude final-message JSONL parsing
     processes.py        shared process registry and subprocess-group lifecycle
     runner.py           shared agent dispatch, result assembly, spawn logging
-  _agent_*.py           codex/claude command runners and the façade
-                        compatibility inventory
+    backends/           per-backend command leaves
+      codex.py          Codex command construction, scratch output, execution
+  _agent_claude.py      Claude command construction and execution
+  _agent_api.py         façade backend-re-export compatibility inventory
   scheduler.py          stable `IssueScheduler` / `SubmissionRequest` surface
   _scheduler_*.py       typed legacy-call binding, scheduler views,
                         reservation, execution, and completion handling
