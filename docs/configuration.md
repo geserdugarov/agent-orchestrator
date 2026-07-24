@@ -462,7 +462,9 @@ internals, read-model split, dashboard layout, and the in-app empty / error bann
 every push to `main` and every pull request, installing from the committed [`../uv.lock`](../uv.lock) via
 `uv sync --locked`.
 Ruff rules live in [`../pyproject.toml`](../pyproject.toml) under `[tool.ruff.lint]`; WPS is selected inline so Flake8
-does not duplicate Ruff's checks; dev tools are declared in `[dependency-groups]`.
+does not duplicate Ruff's checks; dev tools are declared in `[dependency-groups]`. The only on-disk Flake8 config is
+[`../.flake8`](../.flake8), which scopes a single `WPS412` per-file ignore to `orchestrator/config/__init__.py` because
+the config package deliberately assembles and validates its settings at import time in the package initializer.
 
 Ruff and the line-length test enforce a repository-wide 120-column target set once as `line-length` under
 `[tool.ruff]` in [`../pyproject.toml`](../pyproject.toml). Ruff applies it to Python via the opted-in `E501` rule; the
