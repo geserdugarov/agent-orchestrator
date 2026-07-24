@@ -8,11 +8,11 @@ from typing import Optional, Unpack
 
 from orchestrator import (
     _agent_claude_messages,
-    _agent_environment,
-    _agent_models,
     _agent_runner_common,
     config,
 )
+from orchestrator.agents import environment as _agent_environment
+from orchestrator.agents import models as _agent_models
 
 
 def claude_command(
@@ -61,10 +61,7 @@ def run_claude(
     """Run Claude through the stable agent-process façade."""
     from orchestrator import agents
 
-    run_options = _agent_models.resolve_agent_run_options(
-        options,
-        option_fields,
-    )
+    run_options = _agent_models.resolve_agent_run_options(options, option_fields)
     _agent_runner_common.log_agent_spawn("claude", cwd, run_options)
     process_result = agents._run_subprocess(
         claude_command(prompt, run_options),

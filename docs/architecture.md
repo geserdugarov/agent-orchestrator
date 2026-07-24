@@ -64,9 +64,13 @@ orchestrator/
   github.py             stable PyGithub client and compatibility surface
   _github_*.py          labels, queries, pinned state, issues, PRs, reviews,
                         checks, feedback, events, and composed client mixins
-  agents.py             stable runner API plus subprocess-group lifecycle
-  _agent_*.py           environment filtering, result/options models,
-                        session parsing, and codex/claude command runners
+  agents/
+    __init__.py         stable runner API plus subprocess-group lifecycle
+    models.py           agent result / run-option / subprocess-result models
+    environment.py      credential filtering plus injected git identity
+  _agent_*.py           session parsing, process registry, shared runner
+                        helpers, codex/claude command runners, and the
+                        façade compatibility inventory
   scheduler.py          stable `IssueScheduler` / `SubmissionRequest` surface
   _scheduler_*.py       typed legacy-call binding, scheduler views,
                         reservation, execution, and completion handling

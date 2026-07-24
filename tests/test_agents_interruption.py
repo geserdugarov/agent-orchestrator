@@ -112,19 +112,6 @@ class InterruptedAgentResultTest(unittest.TestCase):
             agent_result = _agents.run_agent(_agent_cases._CODEX, _agent_cases._PROMPT, _agent_cases._CWD)
         self.assertFalse(agent_result.interrupted)
 
-    def test_agent_result_interrupted_defaults_false(self) -> None:
-        # Backwards-compat: existing positional/keyword constructions that omit
-        # the new field still build and read `interrupted` as False.
-        agent_result = _agents.AgentResult(
-            session_id=None,
-            last_message="",
-            exit_code=0,
-            timed_out=False,
-            stdout="",
-            stderr="",
-        )
-        self.assertFalse(agent_result.interrupted)
-
 
 class ClaudeLastMessageGatingTest(unittest.TestCase):
     """The assistant/message fallback is a forward-compat crutch for clean

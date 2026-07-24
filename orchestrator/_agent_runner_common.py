@@ -6,7 +6,8 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from orchestrator import _agent_models, _agent_session
+from orchestrator import _agent_session
+from orchestrator.agents import models as _agent_models
 
 log = logging.getLogger("orchestrator.agents")
 

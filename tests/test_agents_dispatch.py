@@ -7,7 +7,7 @@ from __future__ import annotations
 import json
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from orchestrator import agents as _agents
 from tests import agent_test_support as _support
@@ -18,6 +18,27 @@ class RunAgentDispatchTest(unittest.TestCase):
     def test_unknown_backend_raises_value_error(self) -> None:
         with self.assertRaisesRegex(ValueError, "gemini"):
             _agents.run_agent("gemini", "prompt", _agent_cases._CWD)
+
+    def test_dispatch_honors_patched_backend_alias(self) -> None:
+        # `agents._run_codex` / `agents._run_claude` are the historical patch
+        # site for redirecting a backend; dispatch reads the alias off the
+        # facade at call time, so an override installed with `patch.object`
+        # is honored rather than bypassed by the lazy re-export resolver.
+        for backend, alias in (
+            (_agent_cases._CODEX, "_run_codex"),
+            (_agent_cases._CLAUDE, "_run_claude"),
+        ):
+            with self.subTest(backend=backend):
+                sentinel = object()
+                fake = MagicMock(return_value=sentinel)
+                with patch.object(_agents, alias, fake):
+                    dispatched = _agents.run_agent(
+                        backend,
+                        _agent_cases._PROMPT,
+                        _agent_cases._CWD,
+                    )
+                self.assertIs(dispatched, sentinel)
+                fake.assert_called_once()
 
     def test_dispatches_to_codex(self) -> None:
         # Use stream-json-shaped output so _agents.parse_session_id has something to
