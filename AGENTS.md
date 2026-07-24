@@ -32,7 +32,9 @@ orchestrator process is stateless.
   `_branch_*`, `_git_*`, `_verify_*`, `_worktree_*`, and stage-specific prefixes). The package also contains per-tick
   repo skill-catalog analytics (`skill_catalog.py`), lazy analytics/read and dashboard facades backed by focused
   recording, query, rendering, usage-provider, and trajectory leaves, the process-local scheduler (`scheduler.py`),
-  and stable runtime-core facades (`main.py`, `agents.py`, `github.py`, `config.py`, `state_machine.py`).
+  the configuration package (`config/`, whose `__init__.py` assembles and validates every setting and imports the
+  `environment.py` / `credentials.py` leaves), and stable runtime-core facades (`main.py`, `agents.py`, `github.py`,
+  `state_machine.py`).
   Full module-by-module map: [`docs/architecture.md`](docs/architecture.md#top-level-layout).
 - `tests/` — pytest suite. In-memory fakes in `tests/fakes.py`. Stage-handler tests in
   `tests/test_workflow_<stage>*.py` (the validating stage is split across review, controls, drift, handoff, pause,
@@ -63,7 +65,8 @@ orchestrator process is stateless.
   `tests/test_workflow_documenting_routing.py`, `tests/test_workflow_fixing_routing.py`,
   `tests/test_workflow_in_review_fresh_feedback.py`, `tests/test_workflow_community_contribution.py`,
   `tests/test_workflow_stage_analytics.py`, `tests/test_workflow_finalize_pr_merged.py`,
-  `tests/test_workflow_drain_terminals.py`); shared helpers in `tests/workflow_helpers.py`.
+  `tests/test_workflow_drain_terminals.py`); shared helpers in `tests/workflow_helpers.py`. Configuration-package
+  tests live in `tests/config/`.
 - `docs/` — architecture, workflow, and configuration references.
 - `run.sh` — production launcher that auto-restarts after self-modifying merges.
 - `.env.example` / `.env.example.advanced` — basic and advanced configuration templates; full reference is in

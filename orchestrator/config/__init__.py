@@ -2,6 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 """Configuration loaded from .env / process environment.
 
+Every knob is resolved and validated here as the package is imported, so a
+reload re-runs the whole assembly and callers and tests keep patching each
+value on `orchestrator.config` itself. The non-secret `.env` parser lives in
+`environment` and the token resolver in `credentials`.
+
 Secrets are deliberately NOT loaded from REPO_ROOT/.env. The implementer agent
 runs in a sibling worktree with sandbox bypass, so anything readable inside
 REPO_ROOT (including .env) is recoverable by a prompt-injected agent via a
@@ -17,26 +22,24 @@ import sys
 from pathlib import Path
 from typing import NoReturn
 
-from orchestrator import (
-    _agent_config,
-    _dotenv_config,
-    _repo_config,
-    _runtime_config,
-    _token_config,
-)
+from orchestrator import _agent_config, _repo_config, _runtime_config
+from orchestrator.config import credentials, environment
 # The repository-entry model and REPOS parsing / default-spec construction live
 # in a focused private module; re-export `RepoSpec` so `orchestrator.config`
 # stays the compatibility import site for every caller and test patch target.
 from orchestrator._repo_config import RepoSpec as RepoSpec
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+# The orchestrator checkout itself -- two levels above this package
+# (`orchestrator/config/`) -- which every other path default and the `.env`
+# lookup are derived from.
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 # Keys whose values must never be loaded from REPO_ROOT/.env. The agent has
 # read access to that file via the orchestrator checkout; secrets belong in
 # process env or in a file outside REPO_ROOT.
 # Default value for boolean env knobs that ship enabled.
 _DEFAULT_ENABLED = "on"
-_DOTENV_TRUE_VALUES = _dotenv_config._TRUE_VALUES
+_DOTENV_TRUE_VALUES = environment._TRUE_VALUES
 
 
 def _config_error(message: str) -> NoReturn:
@@ -61,11 +64,11 @@ def _config_warning(message: str) -> None:
 
 
 def _load_dotenv() -> None:
-    _dotenv_config.load_dotenv(REPO_ROOT, os.environ, _config_warning)
+    environment.load_dotenv(REPO_ROOT, os.environ, _config_warning)
 
 
-_strip_dotenv_quotes = _dotenv_config.strip_dotenv_quotes
-_resolve_github_token = _token_config.resolve_github_token
+_strip_dotenv_quotes = environment.strip_dotenv_quotes
+_resolve_github_token = credentials.resolve_github_token
 
 
 _load_dotenv()

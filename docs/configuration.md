@@ -409,7 +409,8 @@ an unmergeable PR.
 `ANALYTICS_LOG_PATH`, `ANALYTICS_RETENTION_DAYS`, `ANALYTICS_DB_URL`, `TRACK_SKILL_TRIGGERS`, `TRAJECTORY_LOG_PATH`, and
 `TRAJECTORY_RETENTION_DAYS` are parsed at import by `orchestrator/analytics/_recording.py` and bound as attributes of
 the `orchestrator/analytics` package (the package owns its own configuration surface). `EVENT_LOG_PATH` is parsed in
-`orchestrator/config.py` because the audit event log is a general-purpose audit surface rather than analytics-specific.
+`orchestrator/config/__init__.py` because the audit event log is a general-purpose audit surface rather than
+analytics-specific.
 
 ### Analytics dashboard quickstart
 
