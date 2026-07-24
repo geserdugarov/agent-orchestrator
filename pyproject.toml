@@ -10,7 +10,7 @@ license-files = ["LICENSE"]
 dependencies = ["PyGithub>=2.1", "psycopg[binary]>=3.3.4"]
 
 [dependency-groups]
-dev = ["pytest>=9.1.1", "ruff>=0.15.16", "wemake-python-styleguide>=1.6.2"]
+dev = ["pytest>=9.1.1", "ruff>=0.15.19", "wemake-python-styleguide>=1.6.2"]
 # Streamlit, Plotly, and Streamlit's transitive pandas are only needed
 # by the analytics dashboard (`orchestrator/dashboard.py`, the chart
 # builders in `orchestrator/dashboard_charts.py`, and the theme tokens
