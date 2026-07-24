@@ -12,10 +12,9 @@ import sys
 import unittest
 from unittest.mock import MagicMock, patch
 
-from orchestrator import agents as _agents
 from orchestrator.agents import processes as _processes
-from tests import agent_test_support as _support
-from tests import agent_test_values as _agent_cases
+from tests.agents import agent_test_support as _support
+from tests.agents import agent_test_values as _agent_cases
 
 
 class RunSubprocessRegistrationTest(unittest.TestCase):
@@ -305,77 +304,3 @@ class InterruptedSubprocessClassificationTest(unittest.TestCase):
             dict(os.environ),
             _agent_cases._SUBPROCESS_TIMEOUT_SECONDS,
         )
-
-
-class InterruptedAgentResultTest(unittest.TestCase):
-    """A run cut short by SIGTERM/SIGKILL -- the shape the orchestrator's
-    shutdown sweep (`terminate_all_running`) produces when it kills an
-    in-flight agent group -- must surface as `interrupted=True`, distinct from
-    a normal completion and from the orchestrator's own `timed_out` path.
-    """
-
-    def test_run_claude_threads_interrupted_through(self) -> None:
-        with patch(
-            _agent_cases._POPEN_TARGET,
-            return_value=_support.completed(returncode=-signal.SIGKILL),
-        ):
-            agent_result = _agents._run_claude(_agent_cases._PROMPT, _agent_cases._CWD)
-        self.assertTrue(agent_result.interrupted)
-        self.assertFalse(agent_result.timed_out)
-
-
-class ClaudeLastMessageGatingTest(unittest.TestCase):
-    """The assistant/message fallback is a forward-compat crutch for clean
-    runs only. An interrupted or non-zero claude run with no terminal
-    `result` event must expose an empty `last_message` rather than treating
-    the last streamed chunk as the agent's considered final answer.
-    """
-
-    def test_interrupted_no_result_is_empty(self) -> None:
-        with patch(
-            _agent_cases._POPEN_TARGET,
-            return_value=_support.completed(
-                stdout=_agent_cases._PARTIAL_CLAUDE_OUTPUT,
-                returncode=-signal.SIGTERM,
-            ),
-        ):
-            agent_result = _agents._run_claude(_agent_cases._PROMPT, _agent_cases._CWD)
-        self.assertTrue(agent_result.interrupted)
-        self.assertEqual(agent_result.last_message, "")
-
-    def test_nonzero_no_result_is_empty(self) -> None:
-        with patch(
-            _agent_cases._POPEN_TARGET,
-            return_value=_support.completed(stdout=_agent_cases._PARTIAL_CLAUDE_OUTPUT, returncode=1),
-        ):
-            agent_result = _agents._run_claude(_agent_cases._PROMPT, _agent_cases._CWD)
-        self.assertFalse(agent_result.interrupted)
-        self.assertEqual(agent_result.exit_code, 1)
-        self.assertEqual(agent_result.last_message, "")
-
-    def test_interrupted_result_is_kept(self) -> None:
-        # A run that emitted the terminal result before being killed still
-        # surfaces that result -- the gate only suppresses the partial-chunk
-        # fallback, never the documented final-message channel.
-        with patch(
-            _agent_cases._POPEN_TARGET,
-            return_value=_support.completed(
-                stdout=_agent_cases._CLAUDE_PARTIAL_THEN_RESULT,
-                returncode=-signal.SIGKILL,
-            ),
-        ):
-            agent_result = _agents._run_claude(_agent_cases._PROMPT, _agent_cases._CWD)
-        self.assertTrue(agent_result.interrupted)
-        self.assertEqual(agent_result.last_message, _agent_cases._RESULT_BEFORE_KILL)
-
-    def test_clean_run_still_uses_assistant_fallback(self) -> None:
-        # The clean-completion path keeps the forward-compat fallback so a
-        # schema drift that drops the result event does not silently blank the
-        # final message on a successful run.
-        with patch(
-            _agent_cases._POPEN_TARGET,
-            return_value=_support.completed(stdout=_agent_cases._PARTIAL_CLAUDE_OUTPUT, returncode=0),
-        ):
-            agent_result = _agents._run_claude(_agent_cases._PROMPT, _agent_cases._CWD)
-        self.assertFalse(agent_result.interrupted)
-        self.assertEqual(agent_result.last_message, "partial work so far")

@@ -269,8 +269,9 @@ The security posture:
   block's framing also states every listed path is read-only.
 - **Prompt-injection blast radius.** Untrusted issue / comment text could now point an agent at a named sibling path,
   but (a) the path was already discoverable and (b) exfiltration still needs an egress channel, and
-  `agents._filter_agent_env` already strips the GitHub token, secret-shaped vars, and credential / write-credential
-  locators, leaving the agent only its own model-provider auth. The net-new exposure is a *map*, not a new *door*.
+  `agents.environment.filter_agent_env` already strips the GitHub token, secret-shaped vars, and credential /
+  write-credential locators, leaving the agent only its own model-provider auth. The net-new exposure is a *map*,
+  not a new *door*.
 - **Local paths in GitHub.** An agent could quote a `target_root` into a PR body or park comment. Paths are not secret,
   but an operator who treats them as sensitive flips `EXPOSE_TRACKED_REPOS=off` to suppress the disclosure globally.
 

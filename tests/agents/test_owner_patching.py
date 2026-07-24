@@ -7,25 +7,26 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
-from orchestrator import agents as _agents
 from orchestrator.agents import environment as _environment
 from orchestrator.agents import runner as _runner
 from orchestrator.agents import sessions as _sessions
-from tests import agent_test_support as _support
-from tests import agent_test_values as _agent_cases
+from orchestrator.agents.backends import claude as _claude
+from orchestrator.agents.backends import codex as _codex
+from tests.agents import agent_test_support as _support
+from tests.agents import agent_test_values as _agent_cases
 
 # (label, backend runner) pairs so each owner-routing assertion runs against
-# both retained leaves without duplicating the body per backend.
+# both backends without duplicating the body per backend.
 _BACKENDS = (
-    (_agent_cases._CODEX, _agents._run_codex),
-    (_agent_cases._CLAUDE, _agents._run_claude),
+    (_agent_cases._CODEX, _codex.run_codex),
+    (_agent_cases._CLAUDE, _claude.run_claude),
 )
 
 
 class RunnerOwnerRoutingTest(unittest.TestCase):
     """Patching the `runner` / `environment` owners intercepts both backends.
 
-    The retained Codex / Claude leaves resolve run options through
+    The Codex / Claude backends resolve run options through
     `runner.resolve_agent_run_options` and the child environment through
     `environment.agent_env` -- the direct owners, not facade-captured
     aliases -- so a monkeypatch on the owner module is observed by the
@@ -76,10 +77,10 @@ class ParserOwnerRoutingTest(unittest.TestCase):
     """Patching the `sessions` owner intercepts both backends' parsing.
 
     Result assembly harvests the session id through
-    `sessions.parse_session_id`, and the Claude leaf resolves its final message
-    through `sessions.claude_last_message` -- the direct owner module, not a
-    parser captured onto a facade alias -- so a monkeypatch on the owner is
-    observed by the runner rather than silently bypassed.
+    `sessions.parse_session_id`, and the Claude backend resolves its final
+    message through `sessions.claude_last_message` -- the direct owner module,
+    not a parser captured onto a facade alias -- so a monkeypatch on the owner
+    is observed by the runner rather than silently bypassed.
     """
 
     def test_session_id_reaches_sessions_owner(self) -> None:
@@ -115,7 +116,7 @@ class ParserOwnerRoutingTest(unittest.TestCase):
                 return_value=_support.completed(),
             ),
         ):
-            agent_result = _agents._run_claude(
+            agent_result = _claude.run_claude(
                 _agent_cases._PROMPT,
                 _agent_cases._CWD,
             )

@@ -41,7 +41,7 @@ def _git_hardened(*args: str, cwd: Path) -> subprocess.CompletedProcess:
     that handles GIT_TOKEN.
 
     Injects `GIT_AUTHOR_*` / `GIT_COMMITTER_*` env vars (matching the
-    agent spawn's `_agent_env`) so a `git rebase` that needs to replay
+    agent spawn's `agent_env`) so a `git rebase` that needs to replay
     commits doesn't fail with "Committer identity unknown" -- stripping
     global config also strips any `user.name` / `user.email` set there,
     and env vars take precedence over config.

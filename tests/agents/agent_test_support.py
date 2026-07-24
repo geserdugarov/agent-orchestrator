@@ -11,7 +11,7 @@ import subprocess
 from unittest.mock import MagicMock
 
 from orchestrator.agents import processes as _processes
-from tests import agent_test_values as _agent_cases
+from tests.agents import agent_test_values as _agent_cases
 
 
 def completed(stdout: str = "", stderr: str = "", returncode: int = 0) -> MagicMock:

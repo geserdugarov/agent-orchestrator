@@ -147,7 +147,7 @@ class RedactSecretsTest(unittest.TestCase):
 
     def test_redacts_bare_name_secret(self) -> None:
         # Bare names like `TOKEN` or `PASSWORD` don't end in `_TOKEN` etc.,
-        # so the suffix predicate misses them. _agent_env only strips
+        # so the suffix predicate misses them. agent_env only strips
         # GitHub-aliased tokens, so a bare $TOKEN passes through to the
         # agent and would leak unredacted if echoed to stderr.
         with _patched_env(TOKEN="ghp_barenametokenvalue123"):

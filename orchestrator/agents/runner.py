@@ -70,15 +70,15 @@ def run_agent(
 ) -> _agent_models.AgentResult:
     """Dispatch to Codex or Claude with normalized optional controls."""
     run_options = resolve_agent_run_options(options, option_fields)
-    # Reach the backend runner through the facade module so a test that
-    # patches `agents._run_codex` / `agents._run_claude` intercepts dispatch;
-    # a plain attribute read honors an installed override before falling back
-    # to the facade's lazy `__getattr__` resolution.
-    from orchestrator import agents
+    # Import the backend owner at call time and read its `run_*` entry then,
+    # so a test that patches `codex.run_codex` / `claude.run_claude` on the
+    # owner module intercepts dispatch, and reaching a sibling subpackage
+    # never re-enters the package mid-initialization.
+    from orchestrator.agents.backends import claude, codex
     if backend == "codex":
-        backend_runner = agents._run_codex
+        backend_runner = codex.run_codex
     elif backend == "claude":
-        backend_runner = agents._run_claude
+        backend_runner = claude.run_claude
     else:
         raise ValueError(
             f"unknown agent backend {backend!r}; expected 'codex' or 'claude'",

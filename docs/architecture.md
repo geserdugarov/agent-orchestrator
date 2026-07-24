@@ -71,10 +71,9 @@ orchestrator/
     sessions.py         session-id and Claude final-message JSONL parsing
     processes.py        shared process registry and subprocess-group lifecycle
     runner.py           shared agent dispatch, result assembly, spawn logging
-    backends/           per-backend command leaves
+    backends/           per-backend command construction and execution
       codex.py          Codex command construction, scratch output, execution
-  _agent_claude.py      Claude command construction and execution
-  _agent_api.py         façade backend-re-export compatibility inventory
+      claude.py         Claude command construction and execution
   scheduler.py          stable `IssueScheduler` / `SubmissionRequest` surface
   _scheduler_*.py       typed legacy-call binding, scheduler views,
                         reservation, execution, and completion handling
@@ -258,8 +257,9 @@ documenting, validating, in_review, fixing, resolving_conflict, question — see
 
 ## Agent subprocess (`agents.run_agent`)
 
-`run_agent(backend, prompt, cwd, ...)` dispatches to the per-backend runner (`_run_codex` / `_run_claude`); `backend` is
-one of `"codex"` / `"claude"` and is re-validated at call time so a misuse fails loudly. Both runners return a unified
+`run_agent(backend, prompt, cwd, ...)` dispatches to the per-backend runner (`codex.run_codex` /
+`claude.run_claude`); `backend` is one of `"codex"` / `"claude"` and is re-validated at call time so a
+misuse fails loudly. Both runners return a unified
 `AgentResult(session_id, last_message, exit_code, timed_out, stdout, stderr, interrupted, usage)`. `interrupted`
 (default `False`) flags a run the runner observed exiting on SIGTERM/SIGKILL — the shape the orchestrator's
 shutdown sweep (`terminate_all_running`) produces when it kills an in-flight agent group — and is distinct
@@ -282,7 +282,7 @@ lock, and the resume mechanic are documented in [`workflow.md`](workflow.md). Wh
   `codex exec [-C cwd | resume <sid>] --dangerously-bypass-approvals-and-sandbox --json -o <tempfile> <prompt>`. The
   `-o` path is a per-spawn `tempfile.mkstemp` outside the worktree (so target repos without `.codex-*` in `.gitignore`
   don't see it as untracked); `last_message` is read from it and the tempfile is cleaned up on any exit path by a
-  per-spawn context manager (`_codex_last_message_file`).
+  per-spawn context manager (`codex.codex_last_message_file`).
 - **Claude command**:
   `claude -p --dangerously-skip-permissions --output-format stream-json --include-partial-messages --verbose <prompt>`
   (with `--resume <sid>` when resuming). `last_message` is parsed from the stream-json: prefers the terminal
@@ -300,7 +300,7 @@ lock, and the resume mechanic are documented in [`workflow.md`](workflow.md). Wh
   the timeout was recorded — the failure mode that stranded a late clean commit behind the implementing-stage
   `agent_timeout` park.
 
-### Environment filtering (`agents._filter_agent_env`)
+### Environment filtering (`agents.environment.filter_agent_env`)
 
 The agent subprocess env is filtered to keep host secrets and the orchestrator's own GitHub credentials out of agent
 reach. The same filter runs for the verify-command runner (with `allow_provider_auth=False`, which also strips provider

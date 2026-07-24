@@ -8,17 +8,18 @@ import json
 import unittest
 from unittest.mock import MagicMock, patch
 
-from orchestrator import agents as _agents
 from orchestrator.agents import models as _models
 from orchestrator.agents import runner as _runner
-from tests import agent_test_support as _support
-from tests import agent_test_values as _agent_cases
+from orchestrator.agents.backends import claude as _claude
+from orchestrator.agents.backends import codex as _codex
+from tests.agents import agent_test_support as _support
+from tests.agents import agent_test_values as _agent_cases
 
-# (backend, facade alias) pairs so dispatch assertions cover both backends
-# without duplicating the body per backend.
-_BACKEND_ALIASES = (
-    (_agent_cases._CODEX, "_run_codex"),
-    (_agent_cases._CLAUDE, "_run_claude"),
+# (backend, owner module, runner attr) triples so dispatch assertions cover
+# both backends without duplicating the body per backend.
+_BACKENDS = (
+    (_agent_cases._CODEX, _codex, "run_codex"),
+    (_agent_cases._CLAUDE, _claude, "run_claude"),
 )
 _OPTIONS_KWARG = "options"
 _LOGGER_NAME = "orchestrator.agents"
@@ -34,22 +35,21 @@ class RunAgentDispatchTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "gemini"):
             _runner.run_agent("gemini", _agent_cases._PROMPT, _agent_cases._CWD)
 
-    def test_dispatch_honors_patched_backend_alias(self) -> None:
-        # `agents._run_codex` / `agents._run_claude` are the historical patch
-        # site for redirecting a backend; dispatch reads the alias off the
-        # facade at call time, so an override installed with `patch.object`
-        # is honored rather than bypassed by the lazy re-export resolver.
-        for backend, alias in _BACKEND_ALIASES:
+    def test_dispatch_honors_patched_backend_runner(self) -> None:
+        # `codex.run_codex` / `claude.run_claude` on the backend owner modules
+        # are the patch site for redirecting a backend; dispatch reads the
+        # owner's runner at call time, so an override installed with
+        # `patch.object` is honored rather than bypassed by a captured import.
+        for backend, owner, runner_attr in _BACKENDS:
             with self.subTest(backend=backend):
-                sentinel = object()
-                fake = MagicMock(return_value=sentinel)
-                with patch.object(_agents, alias, fake):
+                fake = MagicMock()
+                with patch.object(owner, runner_attr, fake):
                     dispatched = _runner.run_agent(
                         backend,
                         _agent_cases._PROMPT,
                         _agent_cases._CWD,
                     )
-                self.assertIs(dispatched, sentinel)
+                self.assertIs(dispatched, fake.return_value)
                 fake.assert_called_once()
 
     def test_dispatches_to_codex(self) -> None:
@@ -97,10 +97,10 @@ class RunAgentOptionNormalizationTest(unittest.TestCase):
     """
 
     def test_legacy_keyword_fields_become_options(self) -> None:
-        for backend, alias in _BACKEND_ALIASES:
+        for backend, owner, runner_attr in _BACKENDS:
             with self.subTest(backend=backend):
                 fake = MagicMock()
-                with patch.object(_agents, alias, fake):
+                with patch.object(owner, runner_attr, fake):
                     _runner.run_agent(
                         backend,
                         _agent_cases._PROMPT,
@@ -114,10 +114,10 @@ class RunAgentOptionNormalizationTest(unittest.TestCase):
 
     def test_explicit_options_pass_through(self) -> None:
         options = _models.AgentRunOptions(resume_session_id=_KEPT_SESSION_ID)
-        for backend, alias in _BACKEND_ALIASES:
+        for backend, owner, runner_attr in _BACKENDS:
             with self.subTest(backend=backend):
                 fake = MagicMock()
-                with patch.object(_agents, alias, fake):
+                with patch.object(owner, runner_attr, fake):
                     _runner.run_agent(
                         backend,
                         _agent_cases._PROMPT,

@@ -54,8 +54,8 @@ EXPORTS = (
         ),
     ),
     *export_group(
-        "orchestrator.agents",
-        (("_filter_agent_env", "_filter_agent_env"),),
+        "orchestrator.agents.environment",
+        (("_filter_agent_env", "filter_agent_env"),),
     ),
     *export_group(
         "orchestrator.git_plumbing",

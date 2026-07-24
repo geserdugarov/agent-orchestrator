@@ -9,11 +9,11 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from orchestrator import agents as _agents
+from orchestrator.agents import environment as _environment
 from orchestrator.agents import models as _models
 from orchestrator.agents.backends import codex as _codex
-from tests import agent_test_support as _support
-from tests import agent_test_values as _agent_cases
+from tests.agents import agent_test_support as _support
+from tests.agents import agent_test_values as _agent_cases
 
 _LAST_MESSAGE_PATH = Path("/tmp/codex-last-message-doesnt-matter.txt")
 
@@ -180,7 +180,7 @@ class CodexEnvScrubTest(unittest.TestCase):
             _agent_cases._PATH_ENV: _agent_cases._SYSTEM_PATH,
         }
         passed_env = self._codex_child_env(env)
-        for stripped in _agents._AGENT_WRITE_CREDENTIAL_LOCATORS:
+        for stripped in _environment._AGENT_WRITE_CREDENTIAL_LOCATORS:
             self.assertNotIn(
                 stripped,
                 passed_env,

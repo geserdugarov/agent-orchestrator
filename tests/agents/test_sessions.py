@@ -8,7 +8,7 @@ import json
 import unittest
 
 from orchestrator.agents import sessions as _sessions
-from tests import agent_test_values as _agent_cases
+from tests.agents import agent_test_values as _agent_cases
 
 
 class ParseSessionIdTest(unittest.TestCase):

@@ -280,7 +280,7 @@ DECOMPOSE_AGENT: str = _RESOLVED["DECOMPOSE_AGENT"]
 DECOMPOSE_AGENT_ARGS: tuple[str, ...] = _RESOLVED["DECOMPOSE_AGENT_ARGS"]
 
 # git identity injected into each agent spawn via GIT_AUTHOR_*/GIT_COMMITTER_*
-# env vars (see agents._agent_env). Env vars take precedence over user.name
+# env vars (see agents.environment.agent_env). Env vars take precedence over user.name
 # and user.email from any config scope, so agent commits are attributable to
 # the orchestrator without touching the host's git config or the shared repo
 # config. The default email uses the GitHub-recognized noreply form so it

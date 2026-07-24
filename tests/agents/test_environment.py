@@ -7,7 +7,7 @@ from __future__ import annotations
 import unittest
 
 from orchestrator.agents import environment as _environment
-from tests import agent_test_values as _agent_cases
+from tests.agents import agent_test_values as _agent_cases
 
 
 class FilterAgentEnvTest(unittest.TestCase):

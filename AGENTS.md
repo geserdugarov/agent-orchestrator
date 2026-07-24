@@ -37,8 +37,8 @@ orchestrator process is stateless.
   the agents package (`agents/`, whose `__init__.py` is the stable runner facade over the `models.py` /
   `environment.py` / `sessions.py` / `processes.py` / `runner.py` owners -- `processes.py` owning the shared process
   registry and subprocess-group lifecycle (the facade re-exports only its `terminate_all_running`) and `runner.py`
-  owning shared agent dispatch, result assembly, and spawn logging (re-exported as `run_agent`) -- the Codex backend
-  in the `backends/` subpackage (`backends/codex.py`), and the retained `_agent_claude.py` / `_agent_api.py` leaves),
+  owning shared agent dispatch, result assembly, and spawn logging (re-exported as `run_agent`) -- and the
+  per-backend command modules in the `backends/` subpackage (`backends/codex.py`, `backends/claude.py`)),
   and stable runtime-core facades
   (`main.py`, `github.py`, `state_machine.py`).
   Full module-by-module map: [`docs/architecture.md`](docs/architecture.md#top-level-layout).

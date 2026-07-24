@@ -30,8 +30,8 @@ def _worktree_dirty_files(worktree: Path) -> list[str]:
     Used to refuse opening a PR when codex committed only part of its work and
     left other modifications behind -- the push would publish an incomplete
     branch. The orchestrator's own scratch (codex's `-o` file) lives outside
-    the worktree (a per-spawn tempfile in `_run_codex`), so it never surfaces
-    here regardless of the target repo's .gitignore.
+    the worktree (a per-spawn tempfile in `codex.run_codex`), so it never
+    surfaces here regardless of the target repo's .gitignore.
 
     Hardened unconditionally: `git status --porcelain` refreshes the index,
     which spawns a configured `core.fsmonitor` helper -- and the agent can

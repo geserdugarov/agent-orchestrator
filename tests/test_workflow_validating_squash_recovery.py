@@ -100,7 +100,7 @@ class SquashHelperRecoveryRealGitTest(
         # The squash commit must be authored under AGENT_GIT_NAME /
         # AGENT_GIT_EMAIL regardless of the dev's commit identity. This
         # keeps a single attribution for orchestrator-owned commits and
-        # matches the agent-spawn `_agent_env` behavior.
+        # matches the agent-spawn `agent_env` behavior.
         squash_run = self._squash(
             AGENT_GIT_NAME="orch-bot",
             AGENT_GIT_EMAIL="orch-bot@example.com",

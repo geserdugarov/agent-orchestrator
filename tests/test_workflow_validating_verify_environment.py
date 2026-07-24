@@ -93,7 +93,7 @@ class VerifyCommandEnvironmentTest(
         # injected `pytest` plugin (or a hostile dependency) could read
         # `$GITHUB_TOKEN` and push or call the GitHub API as us. The
         # runner now strips via `_filter_agent_env`, mirroring what
-        # `_agent_env` does for the implementer / reviewer subprocesses.
+        # `agent_env` does for the implementer / reviewer subprocesses.
         cmd = (
             # `printenv GITHUB_TOKEN` prints the value if the var is in
             # the child env and exits 0; if unset, it prints nothing and
