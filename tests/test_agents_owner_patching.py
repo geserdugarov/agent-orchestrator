@@ -10,6 +10,7 @@ from unittest.mock import patch
 from orchestrator import agents as _agents
 from orchestrator.agents import environment as _environment
 from orchestrator.agents import models as _models
+from orchestrator.agents import sessions as _sessions
 from tests import agent_test_support as _support
 from tests import agent_test_values as _agent_cases
 
@@ -69,3 +70,54 @@ class RunnerOwnerRoutingTest(unittest.TestCase):
                 ):
                     backend_runner(_agent_cases._PROMPT, _agent_cases._CWD)
                     self.assertEqual(resolve_owner.call_count, 1)
+
+
+class ParserOwnerRoutingTest(unittest.TestCase):
+    """Patching the `sessions` owner intercepts both backends' parsing.
+
+    Result assembly harvests the session id through
+    `sessions.parse_session_id`, and the Claude leaf resolves its final message
+    through `sessions.claude_last_message` -- the direct owner module, not a
+    parser captured onto a facade alias -- so a monkeypatch on the owner is
+    observed by the runner rather than silently bypassed.
+    """
+
+    def test_session_id_reaches_sessions_owner(self) -> None:
+        for label, backend_runner in _BACKENDS:
+            with self.subTest(backend=label):
+                with (
+                    patch.object(
+                        _sessions,
+                        "parse_session_id",
+                        return_value="owner-session-id",
+                    ) as parse_owner,
+                    patch(
+                        _agent_cases._POPEN_TARGET,
+                        return_value=_support.completed(),
+                    ),
+                ):
+                    agent_result = backend_runner(
+                        _agent_cases._PROMPT,
+                        _agent_cases._CWD,
+                    )
+                    self.assertEqual(parse_owner.call_count, 1)
+                    self.assertEqual(agent_result.session_id, "owner-session-id")
+
+    def test_final_message_reaches_sessions_owner(self) -> None:
+        with (
+            patch.object(
+                _sessions,
+                "claude_last_message",
+                return_value="owner-final-message",
+            ) as message_owner,
+            patch(
+                _agent_cases._POPEN_TARGET,
+                return_value=_support.completed(),
+            ),
+        ):
+            agent_result = _agents._run_claude(
+                _agent_cases._PROMPT,
+                _agent_cases._CWD,
+            )
+            self.assertEqual(message_owner.call_count, 1)
+            self.assertEqual(agent_result.last_message, "owner-final-message")

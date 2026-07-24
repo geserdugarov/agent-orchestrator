@@ -68,8 +68,9 @@ orchestrator/
     __init__.py         stable runner API plus subprocess-group lifecycle
     models.py           agent result / run-option / subprocess-result models
     environment.py      credential filtering plus injected git identity
-  _agent_*.py           session parsing, process registry, shared runner
-                        helpers, codex/claude command runners, and the
+    sessions.py         session-id and Claude final-message JSONL parsing
+  _agent_*.py           process registry, shared runner helpers,
+                        codex/claude command runners, and the
                         façade compatibility inventory
   scheduler.py          stable `IssueScheduler` / `SubmissionRequest` surface
   _scheduler_*.py       typed legacy-call binding, scheduler views,

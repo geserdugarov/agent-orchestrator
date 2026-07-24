@@ -6,8 +6,8 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from orchestrator import _agent_session
 from orchestrator.agents import models as _agent_models
+from orchestrator.agents import sessions as _agent_sessions
 
 log = logging.getLogger("orchestrator.agents")
 
@@ -21,7 +21,7 @@ def build_agent_result(
     return _agent_models.AgentResult(
         session_id=(
             options.resume_session_id
-            or _agent_session.parse_session_id(process_result.stdout)
+            or _agent_sessions.parse_session_id(process_result.stdout)
         ),
         last_message=last_message,
         exit_code=process_result.exit_code,
