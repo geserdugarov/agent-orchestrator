@@ -1,8 +1,11 @@
 [flake8]
-# WPS412 forbids logic in an __init__.py. The config package deliberately
-# assembles and validates every setting in its __init__ so that reloading or
-# patching `orchestrator.config` re-runs the resolution and reaches the same
-# module namespace the helpers read -- the reload / patch contract this
-# package exists to preserve. Scope the exemption to that one file.
+# WPS412 forbids logic in an __init__.py and WPS410 forbids module-level
+# metadata such as __all__. The config package initializer deliberately
+# invokes the `environment` resolver and binds its results at import time so
+# that reloading or patching `orchestrator.config` re-runs resolution and
+# reaches the same module namespace the helpers read -- the reload / patch
+# contract this package exists to preserve -- and publishes its narrow public
+# surface through an explicit __all__ in that same initializer. Scope both
+# exemptions to that one file.
 per-file-ignores =
-    orchestrator/config/__init__.py:WPS412
+    orchestrator/config/__init__.py:WPS412,WPS410

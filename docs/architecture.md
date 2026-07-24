@@ -49,15 +49,15 @@ orchestrator/
   _main_*.py            CLI/setup, tick fan-out, loop/drain, logging,
                         self-update probes, and shutdown/watchdog leaves
   config/
-    __init__.py         stable configuration surface; import-time assembly
-                        and validation of every knob (reload / patch target)
-    environment.py      non-secret `.env` parsing
+    __init__.py         stable configuration surface; binds each resolver
+                        result as a module attribute (reload / patch target)
+    environment.py      env-value parsers plus the `_SettingsResolver` that
+                        reads/validates every knob into a resolved mapping
+    _dotenv.py          non-secret `.env` loader
     credentials.py      process/token-file GitHub credential resolution
     models.py           `RepoSpec` / `RepoEnvEntry` repository-config types
     repositories.py     REPOS entry parsing, validation, and default-spec
                         construction
-  _agent_config.py      agent-spec parsing
-  _runtime_config.py    runtime toggles, commands, and numeric controls
   state_machine.py      stable typed-label and transition-guard surface
   _workflow_labels.py   label enums and strict label-name coercion
   _state_transitions.py declared workflow transition graph
