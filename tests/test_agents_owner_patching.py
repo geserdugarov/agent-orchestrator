@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 from orchestrator import agents as _agents
 from orchestrator.agents import environment as _environment
-from orchestrator.agents import models as _models
+from orchestrator.agents import runner as _runner
 from orchestrator.agents import sessions as _sessions
 from tests import agent_test_support as _support
 from tests import agent_test_values as _agent_cases
@@ -23,10 +23,10 @@ _BACKENDS = (
 
 
 class RunnerOwnerRoutingTest(unittest.TestCase):
-    """Patching the `models` / `environment` owners intercepts both backends.
+    """Patching the `runner` / `environment` owners intercepts both backends.
 
     The retained Codex / Claude leaves resolve run options through
-    `models.resolve_agent_run_options` and the child environment through
+    `runner.resolve_agent_run_options` and the child environment through
     `environment.agent_env` -- the direct owners, not facade-captured
     aliases -- so a monkeypatch on the owner module is observed by the
     runner rather than silently bypassed.
@@ -54,14 +54,14 @@ class RunnerOwnerRoutingTest(unittest.TestCase):
                         marker_env,
                     )
 
-    def test_options_reach_models_owner(self) -> None:
+    def test_options_reach_runner_owner(self) -> None:
         for label, backend_runner in _BACKENDS:
             with self.subTest(backend=label):
                 with (
                     patch.object(
-                        _models,
+                        _runner,
                         "resolve_agent_run_options",
-                        wraps=_models.resolve_agent_run_options,
+                        wraps=_runner.resolve_agent_run_options,
                     ) as resolve_owner,
                     patch(
                         _agent_cases._POPEN_TARGET,

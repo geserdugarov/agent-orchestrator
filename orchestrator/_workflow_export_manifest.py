@@ -181,6 +181,11 @@ EXPORTS = (
         "orchestrator.agents",
         (
             ("AgentResult", "AgentResult"),
+        ),
+    ),
+    *export_group(
+        "orchestrator.agents.runner",
+        (
             ("run_agent", "run_agent"),
         ),
     ),

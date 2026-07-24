@@ -58,15 +58,3 @@ class SubprocessResult(NamedTuple):
     exit_code: int
     timed_out: bool
     interrupted: bool
-
-
-def resolve_agent_run_options(
-    options: Optional[AgentRunOptions],
-    option_fields: AgentRunOptionFields,
-) -> AgentRunOptions:
-    """Normalize the object and legacy keyword option forms."""
-    if options is not None and option_fields:
-        raise TypeError("pass either options or keyword option fields, not both")
-    if options is not None:
-        return options
-    return AgentRunOptions(**option_fields)

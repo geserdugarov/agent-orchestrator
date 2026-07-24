@@ -467,10 +467,12 @@ does not duplicate Ruff's checks; dev tools are declared in `[dependency-groups]
 because the package initializer deliberately invokes the `environment` resolver and binds its results at import time
 (so a reload re-runs resolution) and publishes its narrow public surface through an explicit `__all__` there.
 
-The agent facade adds a second scope: `orchestrator/agents/__init__.py` (`WPS412`, `WPS413`, `WPS202`, `WPS201`) is
-the stable runner facade whose PEP 562 module `__getattr__` resolves the session / backend / runner re-exports lazily,
-so the retained `_agent_*` leaves can import the `models` / `environment` owners directly without re-entering the
-facade mid-initialization.
+The agent facade adds a second scope: `orchestrator/agents/__init__.py` (`WPS412`, `WPS413`, `WPS410`) is the stable
+runner facade. It binds the model / environment / session compatibility aliases and re-exports the runner owner's
+`run_agent` and the process owner's `terminate_all_running` eagerly, and publishes its narrow public surface through an
+explicit `__all__` (`WPS410`). Its PEP 562 module `__getattr__` (`WPS413`) resolves only the codex/claude backend
+re-exports lazily, so the retained `_agent_*` leaves can import the `models` / `environment` / `sessions` /
+`processes` / `runner` owners directly without re-entering the facade mid-initialization.
 
 Ruff and the line-length test enforce a repository-wide 120-column target set once as `line-length` under
 `[tool.ruff]` in [`../pyproject.toml`](../pyproject.toml). Ruff applies it to Python via the opted-in `E501` rule; the
