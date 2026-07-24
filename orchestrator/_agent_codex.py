@@ -12,6 +12,7 @@ from typing import Iterator, Optional, Unpack
 from orchestrator import _agent_runner_common, config
 from orchestrator.agents import environment as _agent_environment
 from orchestrator.agents import models as _agent_models
+from orchestrator.agents import processes as _agent_processes
 
 
 @contextmanager
@@ -81,13 +82,11 @@ def run_codex(
     options: Optional[_agent_models.AgentRunOptions] = None,
     **option_fields: Unpack[_agent_models.AgentRunOptionFields],
 ) -> _agent_models.AgentResult:
-    """Run Codex through the stable agent-process façade."""
-    from orchestrator import agents
-
+    """Run Codex through the shared process owner."""
     run_options = _agent_models.resolve_agent_run_options(options, option_fields)
     with codex_last_message_file() as last_message_path:
         _agent_runner_common.log_agent_spawn("codex", cwd, run_options)
-        process_result = agents._run_subprocess(
+        process_result = _agent_processes.run_subprocess(
             codex_command(prompt, cwd, last_message_path, run_options),
             cwd,
             _agent_environment.agent_env(run_options.extra_env),

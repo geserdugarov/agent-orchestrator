@@ -506,8 +506,8 @@ The hash is re-persisted on every reaction so a single edit triggers exactly one
        step 1's next-tick recovery. The `pre_implement_sha` watermark (not `_has_new_commits`, which only compares to
        `<remote>/<base>`) is what tells a commit produced by THIS run apart from commits already carried on the branch.
        (`_on_commits` clears the spent watermark + stale reason on publish.) Pairs with the hardened
-       `_terminate_process_group` (SIGKILLs surviving descendants after the leader exits) so a build grandchild cannot
-       keep committing into the worktree after the timeout is recorded.
+       `processes.terminate_process_group` (SIGKILLs surviving descendants after the leader exits) so a build grandchild
+       cannot keep committing into the worktree after the timeout is recorded.
      - new commits + clean tree → `_on_commits`: push branch, open PR (or reuse an existing open one), comment
        `:sparkles: PR opened: #N`, then set label `validating` (the docs pass runs only as the final-docs handoff after
        approval). Persists `pr_number` / `branch` and resets `review_round=0` and `retry_count=0` via

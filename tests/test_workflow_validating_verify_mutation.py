@@ -6,7 +6,8 @@ import subprocess
 import unittest
 from unittest.mock import MagicMock, patch
 
-from orchestrator import agents, verify, workflow
+from orchestrator import verify, workflow
+from orchestrator.agents import processes
 
 from tests import validating_verify_test_support as verify_support
 
@@ -82,7 +83,7 @@ class VerifyCommandMutationTest(
 
     def test_running_command_registered_for_shutdown(self) -> None:
         # The shutdown sweep (`agents.terminate_all_running`) only reaches
-        # process groups registered in `agents._running_procs`. A verify
+        # process groups registered in `processes._running_procs`. A verify
         # command must be registered for the lifetime of its run -- otherwise
         # the watchdog's `os._exit` leaves a slow command running and
         # mutating the worktree after the orchestrator has stopped -- and
@@ -107,5 +108,5 @@ class VerifyCommandMutationTest(
             seen.get("during"),
             "verify child not registered during the run",
         )
-        with agents._running_procs_lock:
-            self.assertNotIn(proc, agents._running_procs)
+        with processes._running_procs_lock:
+            self.assertNotIn(proc, processes._running_procs)

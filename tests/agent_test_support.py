@@ -10,7 +10,7 @@ import signal
 import subprocess
 from unittest.mock import MagicMock
 
-from orchestrator import agents as _agents
+from orchestrator.agents import processes as _processes
 from tests import agent_test_values as _agent_cases
 
 
@@ -35,8 +35,8 @@ def killpg_group_alive(_pid: int, _sent_signal: int) -> None:
 def registered_procs(*processes: object):
     with contextlib.ExitStack() as cleanup:
         for process in processes:
-            _agents._register_proc(process)
-            cleanup.callback(_agents._unregister_proc, process)
+            _processes.register_proc(process)
+            cleanup.callback(_processes.unregister_proc, process)
         yield
 
 
@@ -52,6 +52,6 @@ class RegistrationProbe:
         self.seen = False
 
     def __call__(self, *unused_args, **unused_kwargs) -> tuple[str, str]:
-        with _agents._running_procs_lock:
-            self.seen = self.process in _agents._running_procs
+        with _processes._running_procs_lock:
+            self.seen = self.process in _processes._running_procs
         return "{}", ""

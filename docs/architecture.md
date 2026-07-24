@@ -65,13 +65,13 @@ orchestrator/
   _github_*.py          labels, queries, pinned state, issues, PRs, reviews,
                         checks, feedback, events, and composed client mixins
   agents/
-    __init__.py         stable runner API plus subprocess-group lifecycle
+    __init__.py         stable runner API plus process-termination re-export
     models.py           agent result / run-option / subprocess-result models
     environment.py      credential filtering plus injected git identity
     sessions.py         session-id and Claude final-message JSONL parsing
-  _agent_*.py           process registry, shared runner helpers,
-                        codex/claude command runners, and the
-                        façade compatibility inventory
+    processes.py        shared process registry and subprocess-group lifecycle
+  _agent_*.py           shared runner helpers, codex/claude command runners,
+                        and the façade compatibility inventory
   scheduler.py          stable `IssueScheduler` / `SubmissionRequest` surface
   _scheduler_*.py       typed legacy-call binding, scheduler views,
                         reservation, execution, and completion handling
@@ -290,8 +290,8 @@ lock, and the resume mechanic are documented in [`workflow.md`](workflow.md). Wh
 - **Input**: prompt string; optional resume session id; timeout (`AGENT_TIMEOUT` / `REVIEW_TIMEOUT`).
 - **Output**: `AgentResult(...)`. `session_id` is harvested by walking the JSONL events for any UUID-shaped value at
   `session_id` / `conversation_id` / etc. (shared between both backends).
-- **Timeout cleanup** (`_terminate_process_group`): on timeout expiry the runner SIGTERMs the agent's whole process
-  group (every spawn uses `start_new_session=True`), waits for the leader, then — mirroring the shutdown sweep
+- **Timeout cleanup** (`processes.terminate_process_group`): on timeout expiry the runner SIGTERMs the agent's whole
+  process group (every spawn uses `start_new_session=True`), waits for the leader, then — mirroring the shutdown sweep
   (`terminate_all_running`) — probes the group with `killpg(_, 0)` and SIGKILLs any surviving descendant. Without the
   probe a build grandchild the agent forked (Maven, gradle, a JVM test runner) could keep mutating the worktree after
   the timeout was recorded — the failure mode that stranded a late clean commit behind the implementing-stage

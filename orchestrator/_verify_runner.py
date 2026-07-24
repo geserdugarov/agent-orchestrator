@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from orchestrator import _verify_state as _state
 from orchestrator import verify as _owner
+from orchestrator.agents import processes as _processes
 
 VerifyResult = _owner.VerifyResult
 Optional = _owner.Optional
@@ -22,8 +23,8 @@ def _run_verify_command(
 ) -> Optional[VerifyResult]:
     """Run and classify one command while registering its process group."""
     proc = _owner._spawn_verify_command(worktree, command, child_env)
-    with _owner._registered(proc):
-        drained = _owner._communicate_bounded(proc, timeout)
+    with _processes.registered(proc):
+        drained = _processes.communicate_bounded(proc, timeout)
         if drained is None:
             return _owner._timeout_verify_result(proc, command)
         return _owner._completed_verify_result(
