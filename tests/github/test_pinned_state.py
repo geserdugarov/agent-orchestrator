@@ -215,8 +215,8 @@ class BotLoginResolutionTest(unittest.TestCase):
     `GET /user` per worker."""
 
     def test_worker_clone_reuses_resolved_login(self) -> None:
-        with patch("orchestrator.github.Github") as GH, \
-             patch("orchestrator.github.Auth"):
+        with patch("orchestrator.github.client.Github") as GH, \
+             patch("orchestrator.github.client.Auth"):
             gh_inst = GH.return_value
             gh_inst.get_repo.return_value = MagicMock()
             gh_inst.get_user.return_value = MagicMock(login=BOT)

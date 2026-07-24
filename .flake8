@@ -13,6 +13,12 @@
 #   `terminate_all_running`, and publishes its narrow public surface through an
 #   explicit __all__ (WPS410) so `orchestrator.agents` stays the historical
 #   import site. WPS412 is waived for that import-time logic.
+# * orchestrator/github/__init__.py is the stable PyGithub client facade: it
+#   binds the pinned-state owner eagerly and resolves `GitHubClient` plus the
+#   composed mixin re-exports through a module `__getattr__` (WPS413) so a
+#   leaf-first import never re-enters a half-built initializer, keeping
+#   `orchestrator.github` the historical import site. WPS412 is waived for that
+#   import-time logic.
 #
 # orchestrator/agents/sessions.py is one owner for both JSONL parsing surfaces
 # -- session-id extraction and Claude final-message extraction -- and each
@@ -25,5 +31,6 @@
 per-file-ignores =
     orchestrator/config/__init__.py:WPS412,WPS410
     orchestrator/agents/__init__.py:WPS412,WPS410
+    orchestrator/github/__init__.py:WPS412,WPS413
     orchestrator/agents/sessions.py:WPS202
     orchestrator/agents/processes.py:WPS202

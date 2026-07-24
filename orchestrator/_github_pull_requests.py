@@ -9,7 +9,7 @@ from github import GithubException
 from github.IssueComment import IssueComment
 from github.PullRequest import PullRequest
 
-from orchestrator._github_state import GitHubStateMixin
+from orchestrator.github.pinned_state import GitHubStateMixin
 from orchestrator._static_alias import StaticMethodAlias
 
 _ISSUE_STATE_OPEN = "open"
