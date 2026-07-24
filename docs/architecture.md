@@ -42,6 +42,9 @@ other workflow and stage leaves.
 orchestrator/
   __init__.py           lazy package/version compatibility surface;
   _package_exports.py   owns root-package export resolution and caching
+  cli.py                `agent-orchestrator` console-script entry point,
+                        delegating to the `main.py` runtime
+  __main__.py           `python -m orchestrator` launch form over `cli.main`
   main.py               stable entry-point and test-patch facade
   _main_*.py            CLI/setup, tick fan-out, loop/drain, logging,
                         self-update probes, and shutdown/watchdog leaves
