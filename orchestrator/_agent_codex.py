@@ -9,12 +9,9 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator, Optional, Unpack
 
-from orchestrator import (
-    _agent_environment,
-    _agent_models,
-    _agent_runner_common,
-    config,
-)
+from orchestrator import _agent_runner_common, config
+from orchestrator.agents import environment as _agent_environment
+from orchestrator.agents import models as _agent_models
 
 
 @contextmanager
@@ -87,10 +84,7 @@ def run_codex(
     """Run Codex through the stable agent-process façade."""
     from orchestrator import agents
 
-    run_options = _agent_models.resolve_agent_run_options(
-        options,
-        option_fields,
-    )
+    run_options = _agent_models.resolve_agent_run_options(options, option_fields)
     with codex_last_message_file() as last_message_path:
         _agent_runner_common.log_agent_spawn("codex", cwd, run_options)
         process_result = agents._run_subprocess(

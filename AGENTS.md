@@ -34,8 +34,10 @@ orchestrator process is stateless.
   recording, query, rendering, usage-provider, and trajectory leaves, the process-local scheduler (`scheduler.py`),
   the configuration package (`config/`, whose `__init__.py` binds each setting resolved by the `environment.py`
   `_SettingsResolver`, which draws on the `_dotenv.py` / `credentials.py` / `models.py` / `repositories.py` leaves),
+  the agents package (`agents/`, whose `__init__.py` is the stable runner facade over the `models.py` /
+  `environment.py` owners and the codex/claude/session `_agent_*.py` leaves),
   and stable runtime-core facades
-  (`main.py`, `agents.py`, `github.py`, `state_machine.py`).
+  (`main.py`, `github.py`, `state_machine.py`).
   Full module-by-module map: [`docs/architecture.md`](docs/architecture.md#top-level-layout).
 - `tests/` — pytest suite. In-memory fakes in `tests/fakes.py`. Stage-handler tests in
   `tests/test_workflow_<stage>*.py` (the validating stage is split across review, controls, drift, handoff, pause,

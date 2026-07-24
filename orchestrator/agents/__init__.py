@@ -2,10 +2,17 @@
 # SPDX-License-Identifier: Apache-2.0
 """Stable agent API and hardened subprocess-group lifecycle.
 
-Backend commands, transcript parsing, environment filtering, and result
-models live in focused private leaves. Process creation remains here so the
+Result and option models live in the ``models`` owner and credential
+filtering / injected git identity in the ``environment`` owner; backend
+commands, transcript parsing, session parsing, and shared runner helpers
+remain in focused private leaves. Process creation remains here so the
 historical ``orchestrator.agents.subprocess.Popen`` patch point and shared
 shutdown registry retain their exact behavior.
+
+The retained leaves import the ``models`` / ``environment`` owners directly at
+module load; to keep those imports free of a package-initialization cycle, the
+session / backend / runner re-exports this facade owes ``_agent_api`` are
+resolved lazily by ``__getattr__`` rather than bound at import time.
 """
 from __future__ import annotations
 
@@ -17,7 +24,9 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Optional, Unpack
 
-from orchestrator import _agent_api, _agent_process_registry
+from orchestrator.agents import environment as _agent_environment
+from orchestrator.agents import models as _agent_models
+from orchestrator import _agent_process_registry
 
 _running_procs = _agent_process_registry._running_procs
 _running_procs_lock = _agent_process_registry._running_procs_lock
@@ -25,47 +34,63 @@ _register_proc = _agent_process_registry.register_proc
 _unregister_proc = _agent_process_registry.unregister_proc
 _registered = _agent_process_registry.registered
 
-AgentResult = _agent_api.AgentResult
-CodexResult = _agent_api.CodexResult
-AgentRunOptions = _agent_api.AgentRunOptions
-_AgentRunOptionFields = _agent_api.AgentRunOptionFields
-_SubprocessResult = _agent_api.SubprocessResult
-_resolve_agent_run_options = _agent_api.resolve_agent_run_options
-parse_session_id = _agent_api.parse_session_id
-_first_nested_uuid = _agent_api.first_nested_uuid
-_walk_mapping_for_uuid = _agent_api.walk_mapping_for_uuid
-_walk_for_uuid = _agent_api.walk_for_uuid
-_UUID_RE = _agent_api.uuid_re
-_PRIORITY_KEYS = _agent_api.priority_keys
+AgentResult = _agent_models.AgentResult
+CodexResult = _agent_models.CodexResult
+AgentRunOptions = _agent_models.AgentRunOptions
+_AgentRunOptionFields = _agent_models.AgentRunOptionFields
+_SubprocessResult = _agent_models.SubprocessResult
+_resolve_agent_run_options = _agent_models.resolve_agent_run_options
 
-_filter_agent_env = _agent_api.filter_agent_env
-_is_secret_shaped = _agent_api.is_secret_shaped
-_agent_env_key_allowed = _agent_api.agent_env_key_allowed
-_agent_env = _agent_api.agent_env
-_FORBIDDEN_AGENT_ENV = _agent_api.forbidden_agent_env
-_AGENT_WRITE_CREDENTIAL_LOCATORS = _agent_api.write_credential_locators
-_AGENT_SECRET_SUFFIXES = _agent_api.secret_suffixes
-_AGENT_SECRET_BARE_NAMES = _agent_api.secret_bare_names
-_AGENT_PROVIDER_AUTH_ALLOWLIST = _agent_api.provider_auth_allowlist
+_filter_agent_env = _agent_environment.filter_agent_env
+_is_secret_shaped = _agent_environment.is_secret_shaped
+_agent_env_key_allowed = _agent_environment._env_key_allowed
+_agent_env = _agent_environment.agent_env
+_FORBIDDEN_AGENT_ENV = _agent_environment._FORBIDDEN_AGENT_ENV
+_AGENT_WRITE_CREDENTIAL_LOCATORS = _agent_environment._AGENT_WRITE_CREDENTIAL_LOCATORS
+_AGENT_SECRET_SUFFIXES = _agent_environment._AGENT_SECRET_SUFFIXES
+_AGENT_SECRET_BARE_NAMES = _agent_environment._AGENT_SECRET_BARE_NAMES
+_AGENT_PROVIDER_AUTH_ALLOWLIST = _agent_environment._AGENT_PROVIDER_AUTH_ALLOWLIST
 
-_codex_last_message_file = _agent_api.codex_last_message_file
-_read_last_message = _agent_api.read_last_message
-_build_agent_result = _agent_api.build_agent_result
-_codex_command = _agent_api.codex_command
-_log_agent_spawn = _agent_api.log_agent_spawn
-_run_codex = _agent_api.run_codex
-_decode_claude_event = _agent_api.decode_claude_event
-_iter_claude_events = _agent_api.iter_claude_events
-_collect_claude_text_blocks = _agent_api.collect_claude_text_blocks
-_claude_result_text = _agent_api.claude_result_text
-_claude_assistant_text = _agent_api.claude_assistant_text
-_collect_claude_message_candidates = _agent_api.collect_claude_message_candidates
-_claude_last_message = _agent_api.claude_last_message
-_claude_command = _agent_api.claude_command
-_claude_process_last_message = _agent_api.claude_process_last_message
-_run_claude = _agent_api.run_claude
+# Facade re-export -> `_agent_api` attribute. Resolved lazily (see
+# `__getattr__`) so importing a retained leaf -- which reaches its owners
+# through this package -- never re-enters `_agent_api` mid-initialization.
+# An immutable tuple avoids a mutable module-level constant.
+_LAZY_API_EXPORTS = (
+    ("parse_session_id", "parse_session_id"),
+    ("_first_nested_uuid", "first_nested_uuid"),
+    ("_walk_mapping_for_uuid", "walk_mapping_for_uuid"),
+    ("_walk_for_uuid", "walk_for_uuid"),
+    ("_UUID_RE", "uuid_re"),
+    ("_PRIORITY_KEYS", "priority_keys"),
+    ("_codex_last_message_file", "codex_last_message_file"),
+    ("_read_last_message", "read_last_message"),
+    ("_build_agent_result", "build_agent_result"),
+    ("_codex_command", "codex_command"),
+    ("_log_agent_spawn", "log_agent_spawn"),
+    ("_run_codex", "run_codex"),
+    ("_decode_claude_event", "decode_claude_event"),
+    ("_iter_claude_events", "iter_claude_events"),
+    ("_collect_claude_text_blocks", "collect_claude_text_blocks"),
+    ("_claude_result_text", "claude_result_text"),
+    ("_claude_assistant_text", "claude_assistant_text"),
+    ("_collect_claude_message_candidates", "collect_claude_message_candidates"),
+    ("_claude_last_message", "claude_last_message"),
+    ("_claude_command", "claude_command"),
+    ("_claude_process_last_message", "claude_process_last_message"),
+    ("_run_claude", "run_claude"),
+)
 
 _INTERRUPTED_RETURNCODES = frozenset((-signal.SIGTERM, -signal.SIGKILL))
+
+
+def __getattr__(name: str) -> object:
+    """Resolve an `_agent_api`-owned re-export lazily on attribute access."""
+    for export_name, api_attr in _LAZY_API_EXPORTS:
+        if export_name == name:
+            from orchestrator import _agent_api
+
+            return getattr(_agent_api, api_attr)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def _communicate_bounded(
@@ -174,10 +199,15 @@ def run_agent(
 ) -> AgentResult:
     """Dispatch to Codex or Claude with normalized optional controls."""
     run_options = _resolve_agent_run_options(options, option_fields)
+    # Reach the backend runner through the facade module so a test that
+    # patches `agents._run_codex` / `agents._run_claude` intercepts dispatch;
+    # a plain attribute read honors an installed override before falling back
+    # to the lazy `__getattr__` resolution.
+    from orchestrator import agents
     if backend == "codex":
-        backend_runner = _run_codex
+        backend_runner = agents._run_codex
     elif backend == "claude":
-        backend_runner = _run_claude
+        backend_runner = agents._run_claude
     else:
         raise ValueError(
             f"unknown agent backend {backend!r}; expected 'codex' or 'claude'",
