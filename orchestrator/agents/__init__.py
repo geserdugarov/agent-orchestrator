@@ -1,40 +1,33 @@
 # Copyright 2026 Geser Dugarov
 # SPDX-License-Identifier: Apache-2.0
-"""Stable agent API and hardened subprocess-group lifecycle.
+"""Stable agent API over the agent-package owners.
 
 Result and option models live in the ``models`` owner, credential filtering /
-injected git identity in the ``environment`` owner, and session-id / Claude
-final-message parsing in the ``sessions`` owner; backend commands and shared
-runner helpers remain in focused private leaves. Process creation remains here
-so the historical ``orchestrator.agents.subprocess.Popen`` patch point and
-shared shutdown registry retain their exact behavior.
+injected git identity in the ``environment`` owner, session-id / Claude
+final-message parsing in the ``sessions`` owner, and the shared process
+registry / subprocess-group lifecycle in the ``processes`` owner; backend
+commands and shared runner helpers remain in focused private leaves. This
+facade re-exports only ``terminate_all_running`` from the process owner -- the
+shutdown hook the runtime core calls -- while runners and the verify runner
+reach the process owner directly.
 
-The retained leaves import the ``models`` / ``environment`` / ``sessions``
-owners directly at module load; to keep those imports free of a
+The retained leaves import the ``models`` / ``environment`` / ``sessions`` /
+``processes`` owners directly at module load; to keep those imports free of a
 package-initialization cycle, the backend / runner re-exports this facade owes
 ``_agent_api`` are resolved lazily by ``__getattr__`` rather than bound at
 import time.
 """
 from __future__ import annotations
 
-import os
-import signal
-import subprocess
-import time
-from contextlib import suppress
 from pathlib import Path
 from typing import Optional, Unpack
 
 from orchestrator.agents import environment as _agent_environment
 from orchestrator.agents import models as _agent_models
+from orchestrator.agents import processes as _agent_processes
 from orchestrator.agents import sessions as _agent_sessions
-from orchestrator import _agent_process_registry
 
-_running_procs = _agent_process_registry._running_procs
-_running_procs_lock = _agent_process_registry._running_procs_lock
-_register_proc = _agent_process_registry.register_proc
-_unregister_proc = _agent_process_registry.unregister_proc
-_registered = _agent_process_registry.registered
+terminate_all_running = _agent_processes.terminate_all_running
 
 AgentResult = _agent_models.AgentResult
 CodexResult = _agent_models.CodexResult
@@ -83,8 +76,6 @@ _LAZY_API_EXPORTS = (
     ("_run_claude", "run_claude"),
 )
 
-_INTERRUPTED_RETURNCODES = frozenset((-signal.SIGTERM, -signal.SIGKILL))
-
 
 def __getattr__(name: str) -> object:
     """Resolve an `_agent_api`-owned re-export lazily on attribute access."""
@@ -94,102 +85,6 @@ def __getattr__(name: str) -> object:
 
             return getattr(_agent_api, api_attr)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-
-
-def _communicate_bounded(
-    proc: subprocess.Popen,
-    timeout: float,
-) -> Optional[tuple[str, str]]:
-    """Communicate within a wall-clock cap, returning ``None`` on timeout."""
-    try:
-        stdout, stderr = proc.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        return None
-    return stdout or "", stderr or ""
-
-
-def _process_group_alive(process_group_id: int) -> bool:
-    """Probe whether a process group still contains a live member."""
-    try:
-        os.killpg(process_group_id, 0)
-    except ProcessLookupError:
-        return False
-    return True
-
-
-def _sigkill_unless_group_gone(
-    proc: subprocess.Popen,
-    timeout: float,
-) -> None:
-    """Wait for the leader, then SIGKILL any surviving process group."""
-    leader_exited = True
-    try:
-        proc.wait(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        leader_exited = False
-    if leader_exited and not _process_group_alive(proc.pid):
-        return
-    with suppress(ProcessLookupError):
-        os.killpg(proc.pid, signal.SIGKILL)
-
-
-def terminate_all_running(grace: float = 5.0) -> int:
-    """SIGTERM every registered group, then SIGKILL deadline stragglers."""
-    with _running_procs_lock:
-        running_procs = list(_running_procs)
-    if not running_procs:
-        return 0
-    for proc in running_procs:
-        with suppress(ProcessLookupError):
-            os.killpg(proc.pid, signal.SIGTERM)
-    deadline = time.monotonic() + grace
-    for proc in running_procs:
-        remaining = max(0, deadline - time.monotonic())
-        _sigkill_unless_group_gone(proc, remaining)
-    return len(running_procs)
-
-
-def _run_subprocess(
-    command: list[str],
-    cwd: Path,
-    environ: dict[str, str],
-    timeout: int,
-) -> _SubprocessResult:
-    """Run one agent in a registered, independently killable process group."""
-    proc = subprocess.Popen(
-        command,
-        cwd=str(cwd),
-        env=environ,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        start_new_session=True,
-    )
-    with _registered(proc):
-        drained = _communicate_bounded(proc, timeout)
-        if drained is None:
-            _terminate_process_group(proc)
-            drained = _communicate_bounded(proc, 10)
-            stdout, stderr = ("", "") if drained is None else drained
-            return _SubprocessResult(stdout, stderr, -1, True, False)
-        stdout, stderr = drained
-        interrupted = proc.returncode in _INTERRUPTED_RETURNCODES
-        return _SubprocessResult(
-            stdout,
-            stderr,
-            proc.returncode,
-            False,
-            interrupted,
-        )
-
-
-def _terminate_process_group(proc: subprocess.Popen) -> None:
-    """SIGTERM one process group, then SIGKILL it if anything survives."""
-    try:
-        os.killpg(proc.pid, signal.SIGTERM)
-    except ProcessLookupError:
-        return
-    _sigkill_unless_group_gone(proc, timeout=5)
 
 
 def run_agent(

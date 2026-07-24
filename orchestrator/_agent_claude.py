@@ -9,6 +9,7 @@ from typing import Optional, Unpack
 from orchestrator import _agent_runner_common, config
 from orchestrator.agents import environment as _agent_environment
 from orchestrator.agents import models as _agent_models
+from orchestrator.agents import processes as _agent_processes
 from orchestrator.agents import sessions as _agent_sessions
 
 
@@ -55,12 +56,10 @@ def run_claude(
     options: Optional[_agent_models.AgentRunOptions] = None,
     **option_fields: Unpack[_agent_models.AgentRunOptionFields],
 ) -> _agent_models.AgentResult:
-    """Run Claude through the stable agent-process façade."""
-    from orchestrator import agents
-
+    """Run Claude through the shared process owner."""
     run_options = _agent_models.resolve_agent_run_options(options, option_fields)
     _agent_runner_common.log_agent_spawn("claude", cwd, run_options)
-    process_result = agents._run_subprocess(
+    process_result = _agent_processes.run_subprocess(
         claude_command(prompt, run_options),
         cwd,
         _agent_environment.agent_env(run_options.extra_env),

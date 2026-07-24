@@ -9,7 +9,7 @@ from pathlib import Path
 
 _CWD = Path("/tmp/agent-orchestrator-test-cwd-doesnt-matter")
 _REAL_CWD = Path(tempfile.gettempdir())
-_POPEN_TARGET = "orchestrator.agents.subprocess.Popen"
+_POPEN_TARGET = "orchestrator.agents.processes.subprocess.Popen"
 _OS_ENVIRON_TARGET = "os.environ"
 _CODEX = "codex"
 _CLAUDE = "claude"
@@ -47,3 +47,8 @@ _PARTIAL_CLAUDE_OUTPUT = json.dumps(
         },
     }
 )
+_RESULT_BEFORE_KILL = "done before kill"
+_CLAUDE_PARTIAL_THEN_RESULT = "\n".join((
+    _PARTIAL_CLAUDE_OUTPUT,
+    json.dumps({_TYPE_FIELD: _RESULT_FIELD, _RESULT_FIELD: _RESULT_BEFORE_KILL}),
+))

@@ -7,7 +7,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from orchestrator import agents
+from orchestrator.agents import processes
 
 from tests.fakes import FakeGitHubClient, make_issue
 from tests.workflow_helpers import (
@@ -33,8 +33,8 @@ class RegisteredCommunicate:
         self.seen = seen
 
     def __call__(self, *_args, **_kwargs):
-        with agents._running_procs_lock:
-            self.seen["during"] = self.process in agents._running_procs
+        with processes._running_procs_lock:
+            self.seen["during"] = self.process in processes._running_procs
         return "", ""
 
 

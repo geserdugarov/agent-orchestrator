@@ -17,6 +17,7 @@ _MODULES = (
     "orchestrator.agents.models",
     "orchestrator.agents.environment",
     "orchestrator.agents.sessions",
+    "orchestrator.agents.processes",
     "orchestrator._agent_api",
     "orchestrator._agent_runner_common",
     "orchestrator._agent_codex",

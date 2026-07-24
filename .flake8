@@ -8,25 +8,26 @@
 #   resolution into the same namespace the helpers read -- the reload / patch
 #   contract this package exists to preserve -- and publishes its narrow
 #   public surface through an explicit __all__ (WPS410) in that initializer.
-# * orchestrator/agents/__init__.py is the stable agent facade: it defines the
-#   subprocess-group lifecycle and binds the runner / model / environment /
-#   session compatibility aliases so `orchestrator.agents` stays the historical
-#   import and patch site. It declares no __all__, so WPS412 is waived. It also
-#   owns a PEP 562 module `__getattr__` (WPS413) that resolves the backend /
-#   runner re-exports lazily -- the retained leaves import the `models` /
-#   `environment` / `sessions` owners directly, so binding those re-exports
-#   eagerly would re-enter `_agent_api` mid-initialization. That hook is the 8th
-#   module member (WPS202), and both it and `run_agent` defer their package
-#   import to call time so dispatch stays patch-aware without an import-time
-#   cycle, which puts the module one import past the ceiling (WPS201); all are
-#   waived here.
+# * orchestrator/agents/__init__.py is the stable agent facade: it binds the
+#   runner / model / environment / session compatibility aliases and re-exports
+#   the process owner's `terminate_all_running` so `orchestrator.agents` stays
+#   the historical import and patch site. It declares no __all__, so WPS412 is
+#   waived. It also owns a PEP 562 module `__getattr__` (WPS413) that resolves
+#   the backend / runner re-exports lazily -- the retained leaves import the
+#   `models` / `environment` / `sessions` / `processes` owners directly, so
+#   binding those re-exports eagerly would re-enter `_agent_api`
+#   mid-initialization.
 #
 # orchestrator/agents/sessions.py is one owner for both JSONL parsing surfaces
 # -- session-id extraction and Claude final-message extraction -- and each
 # surface decomposes into small single-purpose helpers, so the module carries
-# 11 members past the WPS202 ceiling of 7. The single-owner grouping is
-# deliberate, so WPS202 is waived for that file.
+# 11 members past the WPS202 ceiling of 7. orchestrator/agents/processes.py is
+# one owner for the shared process registry and the subprocess-group lifecycle
+# -- registration, bounded draining, timeout classification, and SIGTERM/SIGKILL
+# escalation -- so it carries 9 members past the same ceiling. Both single-owner
+# groupings are deliberate, so WPS202 is waived for those files.
 per-file-ignores =
     orchestrator/config/__init__.py:WPS412,WPS410
-    orchestrator/agents/__init__.py:WPS412,WPS413,WPS202,WPS201
+    orchestrator/agents/__init__.py:WPS412,WPS413
     orchestrator/agents/sessions.py:WPS202
+    orchestrator/agents/processes.py:WPS202

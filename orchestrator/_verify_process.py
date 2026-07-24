@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from orchestrator import verify as _owner
+from orchestrator.agents import processes as _processes
 
 VerifyResult = _owner.VerifyResult
 Optional = _owner.Optional
@@ -53,10 +54,10 @@ def _drain_verify_output(proc: subprocess.Popen) -> tuple[str, str]:
     the pipe fd open -- `proc.kill()` reaps the leader and a second bounded
     drain runs. Returns `("", "")` if both drains time out.
     """
-    drained = _owner._communicate_bounded(proc, 5)
+    drained = _processes.communicate_bounded(proc, 5)
     if drained is None:
         proc.kill()
-        drained = _owner._communicate_bounded(proc, 5)
+        drained = _processes.communicate_bounded(proc, 5)
     return ("", "") if drained is None else drained
 
 
