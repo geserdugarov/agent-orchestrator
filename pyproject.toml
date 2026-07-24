@@ -9,6 +9,19 @@ license = "Apache-2.0"
 license-files = ["LICENSE"]
 dependencies = ["PyGithub>=2.1", "psycopg[binary]>=3.3.4"]
 
+[project.scripts]
+agent-orchestrator = "orchestrator.cli:main"
+
+# A console script is only installed for a built project, so the flat-layout
+# `orchestrator` package is declared explicitly here; auto-discovery would
+# otherwise trip over the sibling `tests`/`docs` directories.
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["orchestrator"]
+
 [dependency-groups]
 dev = ["pytest>=9.1.1", "ruff>=0.15.19", "wemake-python-styleguide>=1.6.2"]
 # Streamlit, Plotly, and Streamlit's transitive pandas are only needed
