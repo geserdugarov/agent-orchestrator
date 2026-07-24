@@ -126,7 +126,7 @@ typed requests, SQL boundaries, row mapping, ingestion, and connection lifecycle
 **Settings ownership.** `ANALYTICS_LOG_PATH`, `ANALYTICS_RETENTION_DAYS`, and `ANALYTICS_DB_URL` (and the sibling
 trajectory-sink knobs `TRAJECTORY_LOG_PATH` / `TRAJECTORY_RETENTION_DAYS`) are parsed at import by
 `orchestrator/analytics/_recording.py` and bound as attributes of the `orchestrator/analytics` package — *not* in
-`orchestrator/config.py`. They are exposed as package attributes (`analytics.ANALYTICS_LOG_PATH`, etc.) that tests patch
+`orchestrator/config/`. They are exposed as package attributes (`analytics.ANALYTICS_LOG_PATH`, etc.) that tests patch
 directly via `patch.object(analytics, "ANALYTICS_LOG_PATH", ...)`; the recorders in `_recording` / `_trajectories` and
 the prune wrappers in `_retention` read them back off the package facade at call time, so a patch or a package reload
 takes effect. The audit event log (`config.EVENT_LOG_PATH`) stays in `config` because `GitHubClient.emit_event` is a

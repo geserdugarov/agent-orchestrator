@@ -48,11 +48,13 @@ orchestrator/
   main.py               stable entry-point and test-patch facade
   _main_*.py            CLI/setup, tick fan-out, loop/drain, logging,
                         self-update probes, and shutdown/watchdog leaves
-  config.py             stable configuration surface and import-time assembly
-  _dotenv_config.py     non-secret `.env` parsing
+  config/
+    __init__.py         stable configuration surface; import-time assembly
+                        and validation of every knob (reload / patch target)
+    environment.py      non-secret `.env` parsing
+    credentials.py      process/token-file GitHub credential resolution
   _agent_config.py      agent-spec parsing
   _runtime_config.py    runtime toggles, commands, and numeric controls
-  _token_config.py      process/token-file GitHub credential resolution
   _repo_config*.py      `RepoSpec`, REPOS entry parsing, validation, and
                         default-spec construction
   state_machine.py      stable typed-label and transition-guard surface

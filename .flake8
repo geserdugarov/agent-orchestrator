@@ -1,0 +1,8 @@
+[flake8]
+# WPS412 forbids logic in an __init__.py. The config package deliberately
+# assembles and validates every setting in its __init__ so that reloading or
+# patching `orchestrator.config` re-runs the resolution and reaches the same
+# module namespace the helpers read -- the reload / patch contract this
+# package exists to preserve. Scope the exemption to that one file.
+per-file-ignores =
+    orchestrator/config/__init__.py:WPS412
