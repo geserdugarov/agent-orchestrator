@@ -23,7 +23,7 @@ build-backend = "hatchling.build"
 packages = ["orchestrator"]
 
 [dependency-groups]
-dev = ["pytest>=9.1.1", "ruff>=0.15.19", "wemake-python-styleguide>=1.6.2"]
+dev = ["pytest>=9.1.1", "ruff>=0.15.20", "wemake-python-styleguide>=1.6.2"]
 # Streamlit, Plotly, and Streamlit's transitive pandas are only needed
 # by the analytics dashboard (`orchestrator/apps/analytics_dashboard.py`,
 # the chart builders in `orchestrator/dashboard_charts.py`, and the
