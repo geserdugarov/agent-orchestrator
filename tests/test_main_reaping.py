@@ -5,7 +5,6 @@
 import tempfile
 import unittest
 
-from orchestrator import workflow as _workflow
 from tests import main_dispatch_execution as _execution
 from tests import main_helpers as _helpers
 
@@ -48,5 +47,5 @@ class SchedulerReapingTest(unittest.TestCase):
                 [_helpers._ALPHA_REPO, _helpers._BETA_REPO],
             ) as dispatch,
         ):
-            reap = dispatch.run_real_and_capture_reap(_workflow)
+            reap = dispatch.run_real_and_capture_reap()
             self.assertEqual(reap.call_count, 1)

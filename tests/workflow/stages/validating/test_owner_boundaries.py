@@ -4,8 +4,9 @@
 
 This stage runs a developer between review rounds but owns no dev machinery of
 its own: the resume, the session read, and the question / dirty-tree parks
-belong to `workflow/stages/implementing/`, and the squash belongs to
-`git/publication/`. Each is imported from that owner rather than read off the
+belong to `workflow/stages/implementing/`, and the squash, the checkout the
+reviewer reads, and the fetch / ahead-behind pair behind the stranded-fix probe
+belong to `git/`. Each is imported from that owner rather than read off the
 `orchestrator.workflow` facade, so a patch that has to intercept one lands on
 the owner. Every case patches BOTH -- the owner mock has to answer and the
 facade guard has to stay untouched -- which is what fails if a call site drifts
@@ -14,14 +15,16 @@ back to `_wf`.
 from __future__ import annotations
 
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
-from orchestrator import config, workflow
+from orchestrator import config
 from orchestrator.git.publication import squash as _squash
 from orchestrator.workflow.engine import usage as _usage
-from orchestrator.workflow.stages.implementing import parks as _dev_parks
-from orchestrator.workflow.stages.implementing import resume as _dev_resume
-from orchestrator.workflow.stages.implementing import session_read as _dev_session_read
+from orchestrator.workflow.stages.implementing import (
+    parks as _dev_parks,
+    resume as _dev_resume,
+    session_read as _dev_session_read,
+)
 from orchestrator.workflow.stages.validating import (
     approval as _approval,
     awaiting as _awaiting,
@@ -35,11 +38,11 @@ from tests.workflow.stages.validating.validating_boundary_test_support import (
     BOUNDARY_BRANCH,
     BOUNDARY_PR,
     HUMAN_REPLY_ID,
-    _OwnerBoundaryMixin,
     _dev_run,
     _seeded,
 )
 from tests.workflow_helpers import _FAKE_WT, _TEST_SPEC, _agent
+from tests.workflow_owner_boundaries import OwnerBoundaryMixin
 
 SQUASHED_SHA = "squashedBB"
 DEV_BACKEND = "codex"
@@ -53,15 +56,18 @@ RESUME_ON_HUMAN_REPLY = "_resume_developer_on_human_reply"
 RESUME_WITH_TEXT = "_resume_dev_with_text"
 READ_DEV_SESSION = "_read_dev_session"
 SQUASH_AND_FORCE_PUSH = "_squash_and_force_push"
+STRAY_FILE = "stray.txt"
+FETCH_OK = 0
+AHEAD_ONLY = (1, 0)
 
 
-class ImplementingParkBoundaryTest(unittest.TestCase, _OwnerBoundaryMixin):
+class ImplementingParkBoundaryTest(unittest.TestCase, OwnerBoundaryMixin):
     """Both no-commit parks land on the implementing parks owner."""
 
     def test_dev_fix_question_park_lands_on_owner(self) -> None:
         scenario = _seeded()
         with (
-            self._facade_out_of_the_path(ON_QUESTION),
+            self.facade_out_of_the_path(ON_QUESTION),
             patch.object(_dev_fix, "_dev_fix_is_publishable", return_value=False),
             patch.object(_dev_parks, ON_QUESTION) as on_question,
         ):
@@ -76,7 +82,7 @@ class ImplementingParkBoundaryTest(unittest.TestCase, _OwnerBoundaryMixin):
         # binding, so it earns its own boundary case.
         scenario = _seeded()
         with (
-            self._facade_out_of_the_path(ON_QUESTION),
+            self.facade_out_of_the_path(ON_QUESTION),
             patch.object(_dev_fix, "_dev_fix_is_publishable", return_value=False),
             patch.object(_dev_parks, ON_QUESTION) as on_question,
         ):
@@ -89,9 +95,9 @@ class ImplementingParkBoundaryTest(unittest.TestCase, _OwnerBoundaryMixin):
     def test_dirty_worktree_park_lands_on_owner(self) -> None:
         scenario = _seeded()
         with (
-            self._facade_out_of_the_path(ON_DIRTY_WORKTREE),
-            patch.object(
-                workflow, "_worktree_dirty_files", return_value=["stray.txt"],
+            self.facade_out_of_the_path(ON_DIRTY_WORKTREE),
+            self.git_seams_on_owners(
+                _worktree_dirty_files=MagicMock(return_value=[STRAY_FILE]),
             ),
             patch.object(_dev_parks, ON_DIRTY_WORKTREE) as on_dirty,
         ):
@@ -102,7 +108,7 @@ class ImplementingParkBoundaryTest(unittest.TestCase, _OwnerBoundaryMixin):
         self.assertFalse(published)
 
 
-class ImplementingResumeBoundaryTest(unittest.TestCase, _OwnerBoundaryMixin):
+class ImplementingResumeBoundaryTest(unittest.TestCase, OwnerBoundaryMixin):
     """Both awaiting-human resumes land on the implementing resume owner."""
 
     def test_human_reply_resume_lands_on_owner(self) -> None:
@@ -111,7 +117,7 @@ class ImplementingResumeBoundaryTest(unittest.TestCase, _OwnerBoundaryMixin):
             scenario.gh, _TEST_SPEC, scenario.issue, scenario.state,
         )
         with (
-            self._facade_out_of_the_path(RESUME_ON_HUMAN_REPLY),
+            self.facade_out_of_the_path(RESUME_ON_HUMAN_REPLY),
             patch.object(
                 _dev_resume, RESUME_ON_HUMAN_REPLY, return_value=None,
             ) as resume,
@@ -127,9 +133,8 @@ class ImplementingResumeBoundaryTest(unittest.TestCase, _OwnerBoundaryMixin):
             scenario.gh, _TEST_SPEC, scenario.issue, scenario.state,
         )
         with (
-            self._facade_out_of_the_path(
-                RESUME_WITH_TEXT,
-                returns={RESUME_WITH_TEXT: (_FAKE_WT, _agent(), False)},
+            self.facade_out_of_the_path(
+                RESUME_WITH_TEXT, returns=(_FAKE_WT, _agent(), False),
             ),
             patch.object(
                 _dev_resume,
@@ -147,21 +152,18 @@ class ImplementingResumeBoundaryTest(unittest.TestCase, _OwnerBoundaryMixin):
         )
 
 
-class ImplementingSessionBoundaryTest(unittest.TestCase, _OwnerBoundaryMixin):
+class ImplementingSessionBoundaryTest(unittest.TestCase, OwnerBoundaryMixin):
     """The reviewer prompt reads the dev session off the implementing owner."""
 
     def test_reviewer_reads_session_off_owner(self) -> None:
         scenario = _seeded(dev_agent=DEV_BACKEND)
         with (
-            self._facade_out_of_the_path(
-                READ_DEV_SESSION,
-                returns={READ_DEV_SESSION: (None, DEV_BACKEND, None, None)},
+            self.facade_out_of_the_path(
+                READ_DEV_SESSION, returns=(None, DEV_BACKEND, None, None),
             ),
-            patch.object(
-                workflow, "_ensure_worktree", lambda spec, number, **_: _FAKE_WT,
-            ),
-            patch.object(
-                workflow, "_resolve_branch_name", lambda *args: BOUNDARY_BRANCH,
+            self.git_seams_on_owners(
+                _ensure_worktree=MagicMock(return_value=_FAKE_WT),
+                _resolve_branch_name=MagicMock(return_value=BOUNDARY_BRANCH),
             ),
             patch.object(
                 _dev_session_read,
@@ -177,7 +179,28 @@ class ImplementingSessionBoundaryTest(unittest.TestCase, _OwnerBoundaryMixin):
         self.assertIsNotNone(reviewer_run)
 
 
-class PublicationSquashBoundaryTest(unittest.TestCase, _OwnerBoundaryMixin):
+class StrandedFixProbeBoundaryTest(unittest.TestCase, OwnerBoundaryMixin):
+    """The stranded-commit probe reads all four of its git seams on owners."""
+
+    def test_probe_reads_every_seam_off_its_owner(self) -> None:
+        # This gate is what keeps a commit an earlier parked run left behind
+        # from ping-ponging forever, and it is only safe because each read is
+        # the real one: a seam answered off the facade would let a stale mock
+        # vouch for a branch nobody reconciled.
+        scenario = _seeded()
+        with self.git_seams_on_owners(
+            _worktree_dirty_files=MagicMock(return_value=[]),
+            _resolve_branch_name=MagicMock(return_value=BOUNDARY_BRANCH),
+            _authed_fetch=MagicMock(return_value=MagicMock(returncode=FETCH_OK)),
+            _branch_ahead_behind=MagicMock(return_value=AHEAD_ONLY),
+        ):
+            stranded = _dev_fix._stranded_fix_unpushed(
+                _TEST_SPEC, _FAKE_WT, scenario.state, scenario.issue,
+            )
+        self.assertTrue(stranded)
+
+
+class PublicationSquashBoundaryTest(unittest.TestCase, OwnerBoundaryMixin):
     """The squash on approval lands on the publication owner."""
 
     def test_squash_lands_on_owner(self) -> None:
@@ -185,13 +208,12 @@ class PublicationSquashBoundaryTest(unittest.TestCase, _OwnerBoundaryMixin):
         reviewer_run = _models._ReviewerRun(_FAKE_WT, 0, BOUNDARY_PR, _agent())
         squash_result = (True, SQUASHED_SHA, SQUASHED_COUNT, None)
         with (
-            self._facade_out_of_the_path(
-                SQUASH_AND_FORCE_PUSH,
-                returns={SQUASH_AND_FORCE_PUSH: squash_result},
+            self.facade_out_of_the_path(
+                SQUASH_AND_FORCE_PUSH, returns=squash_result,
             ),
             patch.object(config, "SQUASH_ON_APPROVAL", True),
-            patch.object(
-                workflow, "_resolve_branch_name", lambda *args: BOUNDARY_BRANCH,
+            self.git_seams_on_owners(
+                _resolve_branch_name=MagicMock(return_value=BOUNDARY_BRANCH),
             ),
             patch.object(
                 _squash, SQUASH_AND_FORCE_PUSH, return_value=squash_result,

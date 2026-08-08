@@ -6,6 +6,9 @@ from __future__ import annotations
 from unittest.mock import patch
 
 from orchestrator import workflow
+from orchestrator.workflow.stages.validating import (
+    watermarks as validating_watermarks,
+)
 
 from tests import fakes as _fakes
 from tests import workflow_helpers as _helpers
@@ -84,7 +87,7 @@ def _seeded_verdict(last_message: str):
 
 def _run_verdict(case, github, issue, pull_request, last_message: str) -> None:
     with patch.object(
-        workflow,
+        validating_watermarks,
         LATEST_PR_COMMENT_IDS,
         return_value=(None, None),
     ):

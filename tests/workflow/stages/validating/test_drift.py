@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from orchestrator import config, workflow
+from orchestrator.git.worktrees import paths as _worktree_paths
 
 from tests.fakes import (
     FakeComment,
@@ -69,7 +70,7 @@ class _TransientParkFixtureMixin(_PatchedWorkflowMixin):
 
     def _run_parked_validating(self, github, issue, **kwargs):
         with patch.object(
-            workflow,
+            _worktree_paths,
             WORKTREE_PATH,
             return_value=Path(WORKTREE_ROOT),
         ):
@@ -154,7 +155,7 @@ class ValidatingTransientParkRecoveryTest(
 
         # Path that will not exist on the test host.
         gone = Path("/tmp/orchestrator-test-recovery-no-such-worktree-xyz")
-        with patch.object(workflow, WORKTREE_PATH, return_value=gone):
+        with patch.object(_worktree_paths, WORKTREE_PATH, return_value=gone):
             mocks = self._run_validating(
                 gh,
                 issue,

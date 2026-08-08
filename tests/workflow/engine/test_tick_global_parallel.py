@@ -9,8 +9,9 @@ import threading
 from functools import partial
 from unittest.mock import MagicMock, patch
 
-from orchestrator import workflow
 from orchestrator.workflow.engine import dispatch, tick
+
+from tests.workflow_git_owners import seam_patch
 
 from tests.workflow.engine import tick_parallel_test_support as support
 from tests.workflow.engine import tick_probe_test_support as probes
@@ -23,7 +24,7 @@ class TickGlobalSchedulingTest(unittest.TestCase):
         # An empty pollable list must not spin up worker threads or raise.
         gh = support.FakeGitHubClient()
         process = MagicMock()
-        with patch.object(workflow, support.REFRESH_BASE), \
+        with seam_patch(support.REFRESH_BASE), \
              patch.object(dispatch, support.PROCESS_ISSUE, process):
             tick.tick(gh, support._spec(parallel_limit=4))
         process.assert_not_called()
@@ -41,7 +42,7 @@ class TickGlobalSchedulingTest(unittest.TestCase):
         with support._running_thread(
             partial(probe.release_after, 2),
             probe.cleanup,
-        ), patch.object(workflow, support.REFRESH_BASE), patch.object(
+        ), seam_patch(support.REFRESH_BASE), patch.object(
             dispatch,
             support.PROCESS_ISSUE,
             side_effect=probe,
@@ -67,7 +68,7 @@ class TickGlobalSchedulingTest(unittest.TestCase):
         support._seed_issues(gh, (1, 2, 3))
         probe = probes._ConcurrencyProbe(delay=support._SERIAL_PROBE_DELAY_SECONDS)
 
-        with patch.object(workflow, support.REFRESH_BASE), \
+        with seam_patch(support.REFRESH_BASE), \
              patch.object(dispatch, support.PROCESS_ISSUE, side_effect=probe):
             tick.tick(
                 gh,
@@ -95,7 +96,7 @@ class TickGlobalSchedulingTest(unittest.TestCase):
                 "_for_worker_thread",
                 side_effect=scenario.clone_client,
             ),
-            patch.object(workflow, support.REFRESH_BASE),
+            seam_patch(support.REFRESH_BASE),
             patch.object(
                 dispatch,
                 support.PROCESS_ISSUE,
@@ -118,7 +119,7 @@ class TickGlobalSchedulingTest(unittest.TestCase):
             "_for_worker_thread must not be called on the sequential path",
         ))
         with patch.object(gh, "_for_worker_thread", clone), \
-             patch.object(workflow, support.REFRESH_BASE), \
+             seam_patch(support.REFRESH_BASE), \
              patch.object(dispatch, support.PROCESS_ISSUE):
             tick.tick(gh, support._spec(parallel_limit=1))
         clone.assert_not_called()
@@ -140,7 +141,7 @@ class TickGlobalSchedulingTest(unittest.TestCase):
                 "list_pollable_issues",
                 partial(support._poll_then_raise, gh),
             ),
-            patch.object(workflow, support.REFRESH_BASE),
+            seam_patch(support.REFRESH_BASE),
             patch.object(dispatch, support.PROCESS_ISSUE, side_effect=recorder),
         ):
             # The enumeration failure is not caught inside `tick` (it lives

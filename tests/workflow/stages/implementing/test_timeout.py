@@ -16,6 +16,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from orchestrator import config, workflow
+from orchestrator.git.worktrees import paths as _worktree_paths
 
 from tests.fakes import (
     FakeComment,
@@ -186,7 +187,7 @@ class HandleImplementingTimeoutRecoveryTest(unittest.TestCase, _PatchedWorkflowM
         # the reviewer path and never diverts to `in_review`.
         gh, issue = _seed_timeout_park(review_round=4, retry_count=2)
         with patch.object(
-            workflow,
+            _worktree_paths,
             WORKTREE_PATH,
             return_value=TEMP_WORKTREE_ROOT,
         ):
@@ -233,7 +234,7 @@ class HandleImplementingTimeoutRecoveryTest(unittest.TestCase, _PatchedWorkflowM
                 user_content_hash=workflow._compute_user_content_hash(issue, set()),
             )
             with patch.object(
-                workflow,
+                _worktree_paths,
                 WORKTREE_PATH,
                 return_value=TEMP_WORKTREE_ROOT,
             ):
@@ -262,7 +263,7 @@ class HandleImplementingTimeoutRecoveryTest(unittest.TestCase, _PatchedWorkflowM
         scenario = IssueScenario(*_seed_timeout_park())
         before_writes = scenario.github.write_state_calls
         before_comments = len(scenario.github.posted_comments)
-        with patch.object(workflow, WORKTREE_PATH, return_value=TEMP_WORKTREE_ROOT):
+        with patch.object(_worktree_paths, WORKTREE_PATH, return_value=TEMP_WORKTREE_ROOT):
             mocks = self._run_implementing(
                 scenario.github,
                 scenario.issue,
@@ -285,7 +286,7 @@ class HandleImplementingTimeoutRecoveryTest(unittest.TestCase, _PatchedWorkflowM
         # HEAD advanced but a descendant left uncommitted edits -- publishing
         # would ship an incomplete branch, so stay parked for inspection.
         gh, issue = _seed_timeout_park()
-        with patch.object(workflow, WORKTREE_PATH, return_value=TEMP_WORKTREE_ROOT):
+        with patch.object(_worktree_paths, WORKTREE_PATH, return_value=TEMP_WORKTREE_ROOT):
             mocks = self._run_implementing(
                 gh,
                 issue,
@@ -326,7 +327,7 @@ class HandleImplementingTimeoutRecoveryTest(unittest.TestCase, _PatchedWorkflowM
             branch=RECOVERY_BRANCH,
             user_content_hash=workflow._compute_user_content_hash(issue, set()),
         )
-        with patch.object(workflow, WORKTREE_PATH, return_value=TEMP_WORKTREE_ROOT):
+        with patch.object(_worktree_paths, WORKTREE_PATH, return_value=TEMP_WORKTREE_ROOT):
             mocks = self._run_implementing(
                 gh,
                 issue,
@@ -382,7 +383,7 @@ class HandleImplementingTimeoutRecoveryTest(unittest.TestCase, _PatchedWorkflowM
                 user_content_hash=workflow._compute_user_content_hash(issue, set()),
             )
             with patch.object(
-                workflow,
+                _worktree_paths,
                 WORKTREE_PATH,
                 return_value=TEMP_WORKTREE_ROOT,
             ):

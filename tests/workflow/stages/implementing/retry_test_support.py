@@ -7,6 +7,8 @@ from __future__ import annotations
 from unittest import mock
 
 from orchestrator import config, workflow
+from orchestrator.agents import runner as _agent_runner
+from orchestrator.git.worktrees import creation as _worktree_creation
 from tests import fakes, implementing_fixing_test_cases, workflow_helpers
 
 MagicMock = mock.MagicMock
@@ -41,6 +43,11 @@ KEY_SILENT_PARK_COUNT = "silent_park_count"
 
 ENSURE_WORKTREE = "_ensure_worktree"
 RUN_AGENT = "run_agent"
+
+# The owners the checkout and the spawn answer on, so a sibling module patches
+# the module the stage calls rather than the `workflow` facade beside it.
+agent_runner = _agent_runner
+worktree_creation = _worktree_creation
 RESUME_SESSION_ID = "resume_session_id"
 
 POISONED_SESSION = "poisoned-sess"
@@ -157,8 +164,10 @@ class _ProactiveSessionFixtureMixin(_PatchedWorkflowMixin):
         state = gh.read_pinned_state(issue)
         with (
             patch.object(config, "DEV_SESSION_MAX_RESUMES", threshold),
-            patch.object(workflow, ENSURE_WORKTREE, return_value=_FAKE_WT),
-            patch.object(workflow, RUN_AGENT, fake_run),
+            patch.object(
+                _worktree_creation, ENSURE_WORKTREE, return_value=_FAKE_WT,
+            ),
+            patch.object(_agent_runner, RUN_AGENT, fake_run),
         ):
             _, agent_result, _ = workflow._resume_dev_with_text(
                 gh,

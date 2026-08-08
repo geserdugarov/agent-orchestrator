@@ -35,6 +35,8 @@ from typing import Optional
 from github.Issue import Issue
 
 from orchestrator import config
+from orchestrator.git.worktrees import creation as _worktree_creation
+from orchestrator.git.worktrees import paths as _worktree_paths
 from orchestrator.github.client import GitHubClient
 from orchestrator.github.pinned_state import PinnedState
 from orchestrator.workflow.engine import comments as _comments
@@ -56,16 +58,14 @@ def _run_reviewer_round(
     state: PinnedState,
     pr_number,
 ) -> Optional[_models._ReviewerRun]:
-    from orchestrator import workflow as _wf
-
     round_n = int(state.get(_state._REVIEW_ROUND) or 0)
     if round_n >= config.MAX_REVIEW_ROUNDS:
         _requested_changes._park_review_cap(gh, issue, state, round_n)
         return None
 
-    wt = _wf._ensure_worktree(
+    wt = _worktree_creation._ensure_worktree(
         spec, issue.number,
-        branch=_wf._resolve_branch_name(state, spec, issue.number),
+        branch=_worktree_paths._resolve_branch_name(state, spec, issue.number),
     )
     _, dev_backend_for_prompt, _, _ = _dev_session_read._read_dev_session(state)
     review_prompt = _prompts._build_review_prompt(

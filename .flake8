@@ -80,12 +80,12 @@
 # agent run is accounted by -- the audit pair and analytics record the spawn is
 # bookended with, and the per-issue counters the usage that record parses is
 # then folded into -- so it carries 10 members past the same ceiling and names
-# 15 imports past the WPS201 ceiling of 12. The fold consumes the `UsageMetrics`
+# 14 imports past the WPS201 ceiling of 12. The fold consumes the `UsageMetrics`
 # the record produced, so splitting the halves apart would put one run's
 # accounting across two modules, and the import list is just the union of what
-# each half is typed by: the analytics sink and the agent result on one side,
-# the issue, the pinned state, and the comment poster on the other. WPS201 and
-# WPS202 are waived.
+# each half is typed by: the analytics sink, the runner owner the spawn
+# dispatches on, and the agent result on one side, the issue, the pinned state,
+# and the comment poster on the other. WPS201 and WPS202 are waived.
 #
 # orchestrator/workflow/engine/dispatch.py is one owner for everything between
 # a repo's pollable issues and a running stage handler -- the hard-skip filter,
@@ -109,9 +109,10 @@
 # unreadable from any one of them; the sweep in particular has no per-issue home
 # because the PRs it labels carry no pinned state. The import list is the union
 # of what one pass needs -- the executor and semaphore the fanout is bounded by,
-# the client and spec every pass is typed by, the label the sweep writes, the
-# catalog owner the skill emission calls, and the scheduler the handoff submits
-# to. WPS201 and WPS202 are waived.
+# the client and spec every pass is typed by, the base-sync owner the opening
+# refresh runs on, the label the sweep writes, the catalog owner the skill
+# emission calls, and the scheduler the handoff submits to. WPS201 and WPS202
+# are waived.
 #
 # orchestrator/workflow/engine/drift.py is one owner for what a user-content
 # change is and what it costs -- the hash, the six filters that keep it from
@@ -146,25 +147,39 @@
 # it hands a `single` verdict off to. WPS201 and WPS202 are waived for those
 # files.
 #
-# Five validating stage owners name more than the same WPS201 ceiling of 12 for
-# the same reason -- `approval.py`, `dev_fix.py`, `drift.py`,
+# Six validating stage owners name more than the same WPS201 ceiling of 12 for
+# the same reason -- `approval.py`, `awaiting.py`, `dev_fix.py`, `drift.py`,
 # `requested_changes.py`, and `reviewer.py`. Each of them spans one agent run
 # end to end, so it is typed by the issue, client, and pinned state it reads and
 # writes, the engine surfaces it comments, guards, prompts, and meters through,
 # the sibling owners it disposes the run to, the implementing and publication
 # owners it borrows the dev resume, the session read, the parks, and the squash
-# from, and the worktree / git helpers it
-# reaches on the `workflow` facade at call time -- that last import is counted
-# per call site, so a stage owner with four publish paths pays four. Splitting
-# any of them by import would put one run's decisions across two modules.
-# WPS201 is waived for those files.
+# from, and one entry per git owner it calls: the branch and worktree names, the
+# checkout creation, the HEAD and dirty probes, the authenticated fetch and
+# push, and the ahead/behind measurement are each a separate owner, so a route
+# that resolves a branch, reads HEAD, and pushes names three. Splitting any of
+# them by import would put one run's decisions across two modules. WPS201 is
+# waived for those files.
 #
-# orchestrator/workflow/stages/in_review/drift.py names 15 for the same reason
+# orchestrator/workflow/stages/in_review/drift.py names 16 for the same reason
 # and one more: the body-edit route owns neither half of the run it drives, so
 # on top of the engine's comment, drift, guard, and usage surfaces it borrows
 # the dev resume from the implementing owners and the reply disposition from
-# the validating ones, and reaches the worktree helpers on the `workflow`
-# facade from two separate call sites. WPS201 is waived for that file.
+# the validating ones, and names the three git owners behind the checkout it
+# resolves, recreates, and watermarks. WPS201 is waived for that file.
+#
+# Three implementing stage owners and one question stage owner sit one past the
+# same ceiling at 13 -- `implementing/continue_command.py`,
+# `implementing/publication.py`, `implementing/spawn.py`, and
+# `question/outcomes.py`. Each names the git owner behind every helper it runs,
+# and those helpers are split across owners on purpose: the branch and worktree
+# names, the checkout creation and its commit probe, the HEAD and dirty probes,
+# the authenticated push, the commit-subject probe, the PR title builders, and
+# the auto-rebase park vocabulary are seven owners between them, so a module
+# that resolves a branch, recreates a checkout, and reads HEAD pays three
+# imports for one paragraph of code. Reaching them through a single re-export
+# site instead would put a module that defines nothing between the caller and
+# the helper it runs, so WPS201 is waived for those files.
 #
 # Two fixing stage owners name more than the same WPS201 ceiling of 12.
 # `resume.py` names 22: it spans one dev run end to end, so it is typed by the
@@ -273,8 +288,13 @@ per-file-ignores =
     orchestrator/workflow/stages/decomposition/validation.py:WPS202
     orchestrator/workflow/stages/fixing/handler.py:WPS201
     orchestrator/workflow/stages/fixing/resume.py:WPS201
+    orchestrator/workflow/stages/implementing/continue_command.py:WPS201
+    orchestrator/workflow/stages/implementing/publication.py:WPS201
+    orchestrator/workflow/stages/implementing/spawn.py:WPS201
     orchestrator/workflow/stages/in_review/drift.py:WPS201
+    orchestrator/workflow/stages/question/outcomes.py:WPS201
     orchestrator/workflow/stages/validating/approval.py:WPS201
+    orchestrator/workflow/stages/validating/awaiting.py:WPS201
     orchestrator/workflow/stages/validating/dev_fix.py:WPS201
     orchestrator/workflow/stages/validating/drift.py:WPS201
     orchestrator/workflow/stages/validating/requested_changes.py:WPS201

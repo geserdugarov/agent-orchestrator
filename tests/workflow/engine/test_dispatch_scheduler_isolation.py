@@ -14,6 +14,7 @@ from tests.fakes import FakeGitHubClient, make_issue
 from tests.git.base_sync.sync_test_support import _patch_base_sync
 
 from tests.workflow.engine.dispatch_scheduler_workers import (
+    patch_base_refresh,
     _record_current_thread,
 )
 
@@ -60,10 +61,7 @@ class TickExecutionIsolationTest(_SchedulerWorkflowTest):
         )
         with (
             patch.object(gh, "_for_worker_thread", clone),
-            patch.object(
-                workflow,
-                REFRESH_BASE,
-            ),
+            patch_base_refresh(),
             _patch_process_issue(
                 side_effect=lambda *args: _record_current_thread(worker_threads, *args),
             ),
@@ -129,10 +127,7 @@ class TickExecutionIsolationTest(_SchedulerWorkflowTest):
 
         with (
             patch.object(gh, "_for_worker_thread", client_factory),
-            patch.object(
-                workflow,
-                REFRESH_BASE,
-            ),
+            patch_base_refresh(),
             _patch_process_issue(process),
         ):
             workflow.tick(gh, self._spec(), scheduler=sched)

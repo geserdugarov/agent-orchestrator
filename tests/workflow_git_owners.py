@@ -4,19 +4,22 @@
 
 Which module a mock has to land on is a property of the caller, not of the
 name: a stage that imports its git owner can only be intercepted on that owner,
-while a stage that reads the same name off the `orchestrator.workflow` facade
-can only be intercepted on the facade. Recording the defining module once here
-keeps every test that holds the same probe pointed at the same owner, and gives
-the both-surfaces rule in `workflow_patch_runner` one table to resolve against.
+and a mock left on the `orchestrator.workflow` facade beside it would let the
+real command run. Recording the defining module once here keeps every test that
+holds the same probe pointed at the same owner, and gives `workflow_patch_runner`
+one table to resolve its hermetic mocks against.
 """
 from __future__ import annotations
 
 from types import MappingProxyType
-from unittest.mock import patch
+from unittest.mock import DEFAULT, patch
 
 from orchestrator.git import authentication as _authentication
 from orchestrator.git import commands as _commands
-from orchestrator.git.base_sync import pre_pr as _base_sync_pre_pr
+from orchestrator.git.base_sync import (
+    pre_pr as _base_sync_pre_pr,
+    refresh as _base_sync_refresh,
+)
 from orchestrator.git.publication import (
     probes as _publication_probes,
     squash as _squash,
@@ -54,6 +57,7 @@ GIT_SEAM_OWNERS = MappingProxyType({
     "_push_branch": _authentication,
     "_rebase_base_into_worktree": _base_sync_pre_pr,
     "_rebase_in_progress": _base_sync_pre_pr,
+    "_refresh_base_and_worktrees": _base_sync_refresh,
     "_resolve_branch_name": _worktree_paths,
     "_run_verify_commands": _verify_runner,
     "_squash_and_force_push": _squash,
@@ -62,6 +66,10 @@ GIT_SEAM_OWNERS = MappingProxyType({
 })
 
 
-def seam_patch(seam: str, replacement):
-    """Patch one git name on the owner that defines it."""
+def seam_patch(seam: str, replacement=DEFAULT):
+    """Patch one git name on the owner that defines it.
+
+    Omitting `replacement` neutralizes the seam with a fresh mock, which is
+    what a caller that only has to keep the real command from running wants.
+    """
     return patch.object(GIT_SEAM_OWNERS[seam], seam, replacement)

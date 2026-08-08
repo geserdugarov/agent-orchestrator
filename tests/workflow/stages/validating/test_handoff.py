@@ -7,7 +7,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
-from orchestrator import config, workflow
+from orchestrator import config
+from orchestrator.git.worktrees import paths as _worktree_paths
 
 from tests.fakes import (
     FakeComment,
@@ -249,7 +250,7 @@ class ValidatingRecoveryStaysOnValidatingTest(
             review_round=1,
         )
 
-        with patch.object(workflow, "_worktree_path", return_value=Path("/tmp")):
+        with patch.object(_worktree_paths, "_worktree_path", return_value=Path("/tmp")):
             self._run_validating(
                 recovery_gh,
                 issue,
@@ -277,7 +278,7 @@ class ValidatingRecoveryStaysOnValidatingTest(
             review_round=1,
         )
 
-        with patch.object(workflow, "_worktree_path", return_value=Path("/tmp")):
+        with patch.object(_worktree_paths, "_worktree_path", return_value=Path("/tmp")):
             self._run_validating(
                 recovery_gh,
                 issue,
@@ -306,7 +307,7 @@ class ValidatingRecoveryStaysOnValidatingTest(
             review_round=1,
         )
 
-        with patch.object(workflow, "_worktree_path", return_value=Path("/tmp")):
+        with patch.object(_worktree_paths, "_worktree_path", return_value=Path("/tmp")):
             self._run_validating(
                 recovery_gh,
                 issue,

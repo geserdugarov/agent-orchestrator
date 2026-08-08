@@ -19,6 +19,7 @@ from tests.skills.skills_test_support import (
 
 
 _TEST_REPO_SLUG = "geserdugarov/agent-orchestrator"
+_REFRESH_BASE = "_refresh_base_and_worktrees"
 _TEST_BASE_BRANCH = "main"
 _TEST_REMOTE_NAME = "origin"
 _DEVELOP_SKILL = "develop"
@@ -317,6 +318,7 @@ class TickEmitsRepoSkillCatalogTest(unittest.TestCase):
         # the pass -- and what proves the spec it is handed is the one being
         # polled, which is all the catalog needs to read the right base ref.
         from orchestrator import workflow
+        from tests.workflow_git_owners import seam_patch
         from orchestrator.workflow.engine import dispatch
         from tests.fakes import FakeGitHubClient, make_issue
         from tests.workflow_helpers import _TEST_SPEC
@@ -324,7 +326,7 @@ class TickEmitsRepoSkillCatalogTest(unittest.TestCase):
         gh = FakeGitHubClient()
         gh.add_issue(make_issue(1, label="implementing"))
         emit = MagicMock()
-        with patch.object(workflow, "_refresh_base_and_worktrees"), \
+        with seam_patch(_REFRESH_BASE), \
                 patch.object(dispatch, "_process_issue"), \
                 patch.object(catalog, "_emit_repo_skill_catalog", emit):
             workflow.tick(gh, _TEST_SPEC)

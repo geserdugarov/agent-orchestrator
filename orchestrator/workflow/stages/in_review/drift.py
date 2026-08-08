@@ -28,6 +28,9 @@ from __future__ import annotations
 
 from github.Issue import Issue
 
+from orchestrator.git.verification import probes as _verification_probes
+from orchestrator.git.worktrees import creation as _worktree_creation
+from orchestrator.git.worktrees import paths as _worktree_paths
 from orchestrator.github.comments import filter_trusted
 from orchestrator.workflow.engine import comments as _comments
 from orchestrator.workflow.engine import drift as _engine_drift
@@ -83,13 +86,13 @@ def _drift_worktree(ctx: _models._InReviewContext):
     """Resolve the PR worktree for the drift resume, recreating it on the
     resolved branch if the path is gone.
     """
-    from orchestrator import workflow as _wf
-
-    wt = _wf._worktree_path(ctx.spec, ctx.issue.number)
+    wt = _worktree_paths._worktree_path(ctx.spec, ctx.issue.number)
     if not wt.exists():
-        wt = _wf._ensure_worktree(
+        wt = _worktree_creation._ensure_worktree(
             ctx.spec, ctx.issue.number,
-            branch=_wf._resolve_branch_name(ctx.state, ctx.spec, ctx.issue.number),
+            branch=_worktree_paths._resolve_branch_name(
+                ctx.state, ctx.spec, ctx.issue.number,
+            ),
         )
     return wt
 
@@ -109,15 +112,13 @@ def _resume_dev_for_drift(
     quoted PR-conversation block; the watermark bump still consumes the raw
     `unread_pr_conv` so an outsider comment is not re-scanned next tick.
     """
-    from orchestrator import workflow as _wf
-
     _comments._post_pr_comment(
         ctx.gh, int(ctx.pr_number), ctx.state,
         ":pencil2: issue body changed; resuming dev session.",
     )
     _engine_drift._mark_drift_comments_consumed(ctx.gh, ctx.issue, ctx.state)
     wt = _drift_worktree(ctx)
-    before_sha = _wf._head_sha(wt)
+    before_sha = _verification_probes._head_sha(wt)
     wt, dev_result, paused = _dev_resume._resume_dev_with_text(
         ctx.gh, ctx.spec, ctx.issue, ctx.state,
         _build_drift_resume_prompt(ctx.issue, filter_trusted(unread_pr_conv)),

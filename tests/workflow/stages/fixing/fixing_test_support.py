@@ -11,6 +11,7 @@ from unittest import mock
 
 from orchestrator import config as _config
 from orchestrator import workflow as _workflow
+from orchestrator.git.worktrees import paths as _git_worktree_paths
 from orchestrator.workflow.stages.fixing import bookmarks as _bookmarks
 from orchestrator.workflow.stages.fixing import (
     continue_command as _continue_command,
@@ -28,6 +29,7 @@ Path = pathlib.Path
 MagicMock = mock.MagicMock
 patch = mock.patch
 workflow = _workflow
+worktree_paths = _git_worktree_paths
 
 FakeComment = fakes.FakeComment
 FakeGitHubClient = fakes.FakeGitHubClient

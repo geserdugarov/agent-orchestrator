@@ -23,6 +23,11 @@ from typing import Optional
 from github.Issue import Issue
 
 from orchestrator import config
+from orchestrator.git.verification import probes as _verification_probes
+from orchestrator.git.worktrees import (
+    creation as _worktree_creation,
+    paths as _worktree_paths,
+)
 from orchestrator.github.client import GitHubClient
 from orchestrator.github.comments import filter_trusted
 from orchestrator.github.pinned_state import PinnedState
@@ -43,10 +48,8 @@ from orchestrator.workflow.stages.implementing import (
 def _handle_pre_session_drift(
     gh: GitHubClient, spec: config.RepoSpec, issue: Issue, state: PinnedState,
 ) -> bool:
-    from orchestrator import workflow as _wf
-
-    worktree = _wf._worktree_path(spec, issue.number)
-    if _wf._has_new_commits(spec, worktree):
+    worktree = _worktree_paths._worktree_path(spec, issue.number)
+    if _worktree_creation._has_new_commits(spec, worktree):
         _guards._park_awaiting_human(
             gh, issue, state,
             f"{config.HITL_MENTIONS} issue body changed but the "
@@ -92,12 +95,10 @@ def _recover_quiet_implementer_timeout(
 def _prepare_awaiting_dev_run(
     gh: GitHubClient, spec: config.RepoSpec, issue: Issue, state: PinnedState,
 ) -> Optional[_models._PreparedDevRun]:
-    from orchestrator import workflow as _wf
-
     if _recover_quiet_implementer_timeout(gh, spec, issue, state):
         return None
     worktree = _worktree._ensure_resume_worktree(spec, issue, state)
-    before_sha = _wf._head_sha(worktree)
+    before_sha = _verification_probes._head_sha(worktree)
     resumed = _resume._resume_developer_on_human_reply(
         gh, spec, issue, state, pause_guard=True,
     )

@@ -24,6 +24,8 @@ from __future__ import annotations
 from pathlib import Path
 
 from orchestrator.agents import AgentResult
+from orchestrator.git.worktrees import creation as _worktree_creation
+from orchestrator.git.worktrees import paths as _worktree_paths
 from orchestrator.workflow.engine import guards as _guards
 from orchestrator.workflow.engine import usage as _usage
 from orchestrator.workflow.stages.question import models as _models
@@ -64,19 +66,17 @@ def _resume_question_on_human_reply(
     Returns the AgentResult, or None if no new comments arrived since
     the last park (caller should return without writing state).
     """
-    from orchestrator import workflow as _wf
-
     new_comments = _session._consume_new_human_replies(
         run.gh, run.issue, run.state,
     )
     if new_comments is None:
         return None
-    worktree = _wf._worktree_path(run.spec, run.issue.number)
+    worktree = _worktree_paths._worktree_path(run.spec, run.issue.number)
     if not worktree.exists():
-        worktree = _wf._ensure_worktree(
+        worktree = _worktree_creation._ensure_worktree(
             run.spec,
             run.issue.number,
-            branch=_wf._resolve_branch_name(
+            branch=_worktree_paths._resolve_branch_name(
                 run.state, run.spec, run.issue.number,
             ),
         )
@@ -99,12 +99,10 @@ def _resume_question_on_human_reply(
 
 def _spawn_fresh_question(run: _models._QuestionRun) -> AgentResult:
     """Create a clean worktree and execute the initial question prompt."""
-    from orchestrator import workflow as _wf
-
-    worktree = _wf._ensure_worktree(
+    worktree = _worktree_creation._ensure_worktree(
         run.spec,
         run.issue.number,
-        branch=_wf._resolve_branch_name(
+        branch=_worktree_paths._resolve_branch_name(
             run.state, run.spec, run.issue.number,
         ),
     )

@@ -90,7 +90,8 @@ _GIT_PREFIX = "orchestrator.git."
 # they park by, the plain and hardened runners, the subject probes and title
 # helpers behind a PR title, the squash entry point, the HEAD and dirty reads,
 # and the worktree creation, naming, recovery, decomposition, and teardown
-# helpers the stage side reaches through the facade.
+# helpers. Every one is published for callers outside the tree: the stage side
+# names the owner, so what this pins is the forward, not a live read.
 _GIT_PUBLISHED = MappingProxyType({
     "orchestrator.git.authentication": (
         "_authed_fetch",

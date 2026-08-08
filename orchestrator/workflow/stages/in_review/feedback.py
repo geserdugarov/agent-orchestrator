@@ -25,6 +25,7 @@ from __future__ import annotations
 
 from typing import Optional
 
+from orchestrator.git.base_sync import state as _base_sync_state
 from orchestrator.github.comments import filter_trusted
 from orchestrator.github.pinned_state import PinnedState
 from orchestrator.workflow.engine import comments as _comments
@@ -131,13 +132,12 @@ def _stay_parked(state: PinnedState, new_comments: list) -> bool:
       refresh in control of the comment; routing here would consume it as
       feedback and silently drop the retry intent.
     """
-    from orchestrator import workflow as _wf
-
     if not state.get("awaiting_human"):
         return False
     return (
         not new_comments
-        or state.get("park_reason") in _wf._AUTO_REBASE_PARK_REASONS
+        or state.get("park_reason")
+        in _base_sync_state._AUTO_REBASE_PARK_REASONS
     )
 
 

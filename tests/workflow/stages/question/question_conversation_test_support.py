@@ -7,6 +7,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from orchestrator import workflow
+from orchestrator.git.worktrees import paths as _worktree_paths
+from orchestrator.git.worktrees import recovery as _worktree_recovery
 
 from tests.fakes import FakeComment, FakeGitHubClient, make_issue
 from tests.workflow_helpers import (
@@ -267,7 +269,7 @@ class _ImplementingStageCall:
 
     def __call__(self) -> None:
         worktree_patch = patch.object(
-            workflow,
+            _worktree_paths,
             WORKTREE_PATH,
             return_value=self._worktree_path,
         )
@@ -275,7 +277,7 @@ class _ImplementingStageCall:
             with (
                 worktree_patch,
                 patch.object(
-                    workflow,
+                    _worktree_recovery,
                     BRANCH_HAS_UNPUSHED_COMMITS,
                     return_value=self._unpushed_branch,
                 ),

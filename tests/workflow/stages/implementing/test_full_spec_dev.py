@@ -46,6 +46,8 @@ _issue_branch = support._issue_branch
 make_issue = support.make_issue
 patch = support.patch
 workflow = support.workflow
+_agent_runner = support.agent_runner
+_worktree_creation = support.worktree_creation
 
 
 class FullSpecDevPersistenceTest(unittest.TestCase, _FullSpecFixtureMixin):
@@ -236,8 +238,8 @@ class FullSpecDevPersistenceTest(unittest.TestCase, _FullSpecFixtureMixin):
         run_agent = MagicMock(return_value=_agent(session_id="fresh-67005", last_message=OK_MESSAGE))
 
         with (
-            patch.object(workflow, "_ensure_worktree", lambda spec, issue_number, **_: _FAKE_WT),
-            patch.object(workflow, RUN_AGENT, run_agent),
+            patch.object(_worktree_creation, "_ensure_worktree", lambda spec, issue_number, **_: _FAKE_WT),
+            patch.object(_agent_runner, RUN_AGENT, run_agent),
         ):
             workflow._resume_dev_with_text(gh, _TEST_SPEC, issue, state, "go")
 
@@ -281,8 +283,8 @@ class FullSpecDevPersistenceTest(unittest.TestCase, _FullSpecFixtureMixin):
         )
 
         with (
-            patch.object(workflow, "_ensure_worktree", lambda spec, issue_number, **_: _FAKE_WT),
-            patch.object(workflow, RUN_AGENT, run_agent),
+            patch.object(_worktree_creation, "_ensure_worktree", lambda spec, issue_number, **_: _FAKE_WT),
+            patch.object(_agent_runner, RUN_AGENT, run_agent),
         ):
             workflow._resume_dev_with_text(gh, _TEST_SPEC, issue, state, "go")
 

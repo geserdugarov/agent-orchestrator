@@ -13,6 +13,8 @@ import unittest
 from unittest.mock import patch
 
 from orchestrator import config, workflow
+from orchestrator.agents import runner as _agent_runner
+from orchestrator.git.worktrees import creation as _worktree_creation
 from orchestrator.github import PinnedState
 from orchestrator.observability.usage.metrics import UsageMetrics
 from orchestrator.workflow.engine import usage as engine_usage
@@ -290,9 +292,9 @@ class ResumeRunUsageAccumulationTest(unittest.TestCase):
         state = gh.read_pinned_state(issue)
 
         with patch.object(
-            workflow, "_ensure_worktree", _fake_worktree,
+            _worktree_creation, "_ensure_worktree", _fake_worktree,
         ), patch.object(
-            workflow, "run_agent",
+            _agent_runner, "run_agent",
             lambda *agent_args, **agent_kwargs: _agent(
                 session_id="live-sess",
                 last_message="ok",
@@ -315,8 +317,8 @@ class ResumeRunUsageAccumulationTest(unittest.TestCase):
         run_recorder = _PoisonedThenFreshRun()
 
         with patch.object(
-            workflow, "_ensure_worktree", _fake_worktree,
-        ), patch.object(workflow, "run_agent", run_recorder):
+            _worktree_creation, "_ensure_worktree", _fake_worktree,
+        ), patch.object(_agent_runner, "run_agent", run_recorder):
             workflow._resume_dev_with_text(gh, _TEST_SPEC, issue, state, "go")
 
         self.assertEqual(run_recorder.calls, ["poisoned-sess", None])

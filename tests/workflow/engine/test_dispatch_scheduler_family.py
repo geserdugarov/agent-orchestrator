@@ -5,7 +5,6 @@ from __future__ import annotations
 import logging
 import time
 from pathlib import Path
-from unittest.mock import patch
 
 from orchestrator import workflow
 
@@ -17,6 +16,7 @@ from tests.workflow_helpers import (
 )
 
 from tests.workflow.engine.dispatch_scheduler_workers import (
+    patch_base_refresh,
     _GatedWorker,
     _wait_for_first_started,
     _wait_for_log,
@@ -213,7 +213,7 @@ class FamilyBucketRoutingTest(_SchedulerWorkflowTest):
                 "orchestrator.workflow",
                 level=logging.INFO,
             ) as logs,
-            patch.object(workflow, REFRESH_BASE),
+            patch_base_refresh(),
             _patch_process_issue(side_effect=process),
         ):
             workflow.tick(gh, self._spec(), scheduler=sched)

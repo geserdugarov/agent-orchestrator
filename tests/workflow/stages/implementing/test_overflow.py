@@ -31,6 +31,8 @@ _TEST_SPEC = support._TEST_SPEC
 _agent = support._agent
 patch = support.patch
 workflow = support.workflow
+_agent_runner = support.agent_runner
+_worktree_creation = support.worktree_creation
 
 
 class ContextOverflowClassifierTest(
@@ -126,8 +128,8 @@ class ContextOverflowImmediateRetryTest(
         )
 
         with (
-            patch.object(workflow, ENSURE_WORKTREE, return_value=_FAKE_WT),
-            patch.object(workflow, RUN_AGENT, run_agent),
+            patch.object(_worktree_creation, ENSURE_WORKTREE, return_value=_FAKE_WT),
+            patch.object(_agent_runner, RUN_AGENT, run_agent),
         ):
             workflow._resume_dev_with_text(scenario.github, _TEST_SPEC, scenario.issue, state, RESUME_TEXT)
 
@@ -159,8 +161,8 @@ class ContextOverflowImmediateRetryTest(
         )
 
         with (
-            patch.object(workflow, ENSURE_WORKTREE, return_value=_FAKE_WT),
-            patch.object(workflow, RUN_AGENT, run_agent),
+            patch.object(_worktree_creation, ENSURE_WORKTREE, return_value=_FAKE_WT),
+            patch.object(_agent_runner, RUN_AGENT, run_agent),
         ):
             workflow._resume_dev_with_text(gh, _TEST_SPEC, issue, state, RESUME_TEXT)
 
@@ -178,8 +180,8 @@ class ContextOverflowImmediateRetryTest(
         run_agent = MagicMock(side_effect=[overflow_result, overflow_result])
 
         with (
-            patch.object(workflow, ENSURE_WORKTREE, return_value=_FAKE_WT),
-            patch.object(workflow, RUN_AGENT, run_agent),
+            patch.object(_worktree_creation, ENSURE_WORKTREE, return_value=_FAKE_WT),
+            patch.object(_agent_runner, RUN_AGENT, run_agent),
         ):
             _, agent_result, _ = workflow._resume_dev_with_text(
                 scenario.github,
@@ -206,8 +208,8 @@ class ContextOverflowImmediateRetryTest(
         run_agent = MagicMock(return_value=_agent(session_id="", last_message=PROMPT_TOO_LONG_MESSAGE))
 
         with (
-            patch.object(workflow, ENSURE_WORKTREE, return_value=_FAKE_WT),
-            patch.object(workflow, RUN_AGENT, run_agent),
+            patch.object(_worktree_creation, ENSURE_WORKTREE, return_value=_FAKE_WT),
+            patch.object(_agent_runner, RUN_AGENT, run_agent),
         ):
             workflow._resume_dev_with_text(gh, _TEST_SPEC, issue, state, RESUME_TEXT)
 

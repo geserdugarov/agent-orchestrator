@@ -6,7 +6,7 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
-from orchestrator import analytics, workflow
+from orchestrator import analytics
 from orchestrator.agents import AgentResult
 from orchestrator.workflow.engine import usage as engine_usage
 
@@ -34,6 +34,7 @@ _INPUT_TOKENS_KEY = support._INPUT_TOKENS_KEY
 _OUTPUT_TOKENS_KEY = support._OUTPUT_TOKENS_KEY
 _PatchedWorkflowMixin = support._PatchedWorkflowMixin
 _RUN_AGENT_ATTR = support._RUN_AGENT_ATTR
+_agent_runner = support.agent_runner
 _TRAJECTORY_PATH_ATTR = support._TRAJECTORY_PATH_ATTR
 _analytics_path = support._analytics_path
 _analytics_records = support._analytics_records
@@ -82,7 +83,7 @@ class AgentAnalyticsModelFallbackTest(
             _TRAJECTORY_PATH_ATTR,
             None,
         ), patch.object(
-            workflow,
+            _agent_runner,
             _RUN_AGENT_ATTR,
         ) as run_mock:
             run_mock.return_value = AgentResult(
@@ -124,7 +125,7 @@ class AgentAnalyticsModelFallbackTest(
             _TRAJECTORY_PATH_ATTR,
             None,
         ), patch.object(
-            workflow,
+            _agent_runner,
             _RUN_AGENT_ATTR,
         ) as run_mock:
             run_mock.return_value = AgentResult(

@@ -33,6 +33,7 @@ from github.Issue import Issue
 
 from orchestrator import config
 from orchestrator._workflow_state import log
+from orchestrator.git.verification import probes as _verification_probes
 from orchestrator.github.client import GitHubClient
 from orchestrator.github.pinned_state import PinnedState
 from orchestrator.workflow.engine import comments as _comments
@@ -118,9 +119,7 @@ def _post_reviewer_feedback(context: _models._RequestedChanges) -> None:
 
 
 def _run_requested_fix(context: _models._RequestedChanges) -> _models._AwaitingDevAttempt:
-    from orchestrator import workflow as _wf
-
-    before_sha = _wf._head_sha(context.decision.run.wt)
+    before_sha = _verification_probes._head_sha(context.decision.run.wt)
     # The caller flipped the label validating -> fixing on the SAME `issue`
     # object; PyGithub does not refresh its cached `labels` after
     # `set_labels`, so pass `fixing` explicitly rather than let the resume

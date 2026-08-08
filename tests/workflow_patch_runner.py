@@ -5,45 +5,33 @@ from __future__ import annotations
 
 import contextlib
 from functools import partial
+from types import MappingProxyType
 from unittest.mock import patch
 
 from orchestrator import analytics, workflow
+from orchestrator.agents import runner as _agent_runner
 
 from tests.workflow_git_owners import GIT_SEAM_OWNERS
 from tests.workflow_patch_builders import _build_workflow_mocks
 from tests.workflow_patch_models import _WorkflowRunContext
 from tests.workflow_repo_values import _TEST_SPEC
 
-# The mocked names at least one stage resolves on the workflow facade. A mock
-# for one of these is installed on the facade as well as on its owner, because
-# a single handler run crosses stages that read the same name off different
-# modules and both have to see the mock. Every other name here is intercepted
-# on the module its callers name, and nowhere else.
-_FACADE_STILL_READS = frozenset((
-    "_authed_fetch",
-    "_branch_ahead_behind",
-    "_branch_has_unpushed_commits",
-    "_ensure_worktree",
-    "_first_commit_subject",
-    "_has_new_commits",
-    "_head_sha",
-    "_infer_subject_prefix",
-    "_push_branch",
-    "_worktree_dirty_files",
-))
+_RUN_AGENT = "run_agent"
+
+# Every mocked name a stage resolves off an owner rather than off the workflow
+# facade: the git seams, plus the spawn, whose owner is the one non-git module
+# in the set. A name absent here is one no stage names directly, so the facade
+# is where its mock decides the read.
+_SEAM_OWNERS = MappingProxyType({
+    **GIT_SEAM_OWNERS,
+    _RUN_AGENT: _agent_runner,
+})
 
 
 def _enter_mock(stack, attribute: str, attribute_mock) -> None:
-    """Install one mock on every module a caller resolves it off."""
-    owner = GIT_SEAM_OWNERS.get(attribute)
-    if owner is None:
-        targets = (workflow,)
-    elif attribute in _FACADE_STILL_READS:
-        targets = (owner, workflow)
-    else:
-        targets = (owner,)
-    for target in targets:
-        stack.enter_context(patch.object(target, attribute, attribute_mock))
+    """Install one mock on the module its callers resolve it off."""
+    target = _SEAM_OWNERS.get(attribute, workflow)
+    stack.enter_context(patch.object(target, attribute, attribute_mock))
 
 
 def _patch_and_run(callable_, context: _WorkflowRunContext):

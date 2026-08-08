@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import threading
 import time
+from functools import partial
 from pathlib import Path
+
+from tests.workflow_git_owners import seam_patch
 
 
 REPO_SLUG = "acme/widget"
@@ -18,6 +21,10 @@ WORKER_TIMEOUT_SECONDS = 5.0
 DEFERRED_ISSUE_NUMBERS = (10, 11, 12)
 FAMILY_ISSUE_NUMBER = 42
 RELABELLED_FANOUT_ISSUE_NUMBER = 50
+
+# Neutralize the tick's opening pass on the owner that defines it, which is all
+# a scheduling test wants from a base refresh it never asserts on.
+patch_base_refresh = partial(seam_patch, REFRESH_BASE)
 
 
 def _wait_for_first_started(

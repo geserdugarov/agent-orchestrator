@@ -90,7 +90,9 @@ class ParkAwaitingHumanEventEmissionTest(unittest.TestCase, support._PatchedWork
         )
         gh.add_pr(pr)
         with patch.object(
-            workflow, support.LATEST_PR_COMMENT_IDS, return_value=(None, None)
+            support.validating_watermarks,
+            support.LATEST_PR_COMMENT_IDS,
+            return_value=(None, None),
         ):
             self._run(
                 lambda: workflow._handle_validating(gh, support._TEST_SPEC, issue),
@@ -162,7 +164,9 @@ class ParkAwaitingHumanEventEmissionTest(unittest.TestCase, support._PatchedWork
         gh.add_pr(pr)
         gh.seed_state(9, pr_number=support._APPROVAL_PR_NUMBER, review_round=0)
         with patch.object(
-            workflow, support.LATEST_PR_COMMENT_IDS, return_value=(None, None)
+            support.validating_watermarks,
+            support.LATEST_PR_COMMENT_IDS,
+            return_value=(None, None),
         ):
             self._run(
                 lambda: workflow._handle_validating(gh, support._TEST_SPEC, issue),

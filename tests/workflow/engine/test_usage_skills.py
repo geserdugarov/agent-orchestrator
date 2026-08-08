@@ -7,7 +7,7 @@ import json
 import unittest
 from unittest.mock import patch
 
-from orchestrator import analytics, workflow
+from orchestrator import analytics
 from orchestrator.agents import AgentResult
 from orchestrator.workflow.engine import usage as engine_usage
 
@@ -31,6 +31,7 @@ _FAKE_WT = support._FAKE_WT
 _IGNORED_PROMPT = support._IGNORED_PROMPT
 _REVIEW_SKILL = support._REVIEW_SKILL
 _RUN_AGENT_ATTR = support._RUN_AGENT_ATTR
+_agent_runner = support.agent_runner
 _RaisingOnSkillGitHubClient = support._RaisingOnSkillGitHubClient
 _SKILL_AGENT_ISSUE_NUMBER = support._SKILL_AGENT_ISSUE_NUMBER
 _SKILL_KEY = support._SKILL_KEY
@@ -53,7 +54,7 @@ def _run_skill_agent(
     with patch.object(analytics, _ANALYTICS_PATH_ATTR, None), \
             patch.object(analytics, _TRAJECTORY_PATH_ATTR, None), \
             patch.object(analytics, _TRACK_SKILLS_ATTR, track), \
-            patch.object(workflow, _RUN_AGENT_ATTR) as run_mock:
+            patch.object(_agent_runner, _RUN_AGENT_ATTR) as run_mock:
         run_mock.return_value = AgentResult(
             session_id="sess-skill",
             last_message="",
@@ -165,7 +166,7 @@ class SkillTriggeredEventTest(unittest.TestCase):
                 "record_agent_exit",
                 return_value=["alpha", "beta"],
             ),
-            patch.object(workflow, _RUN_AGENT_ATTR) as run_mock,
+            patch.object(_agent_runner, _RUN_AGENT_ATTR) as run_mock,
         ):
             run_mock.return_value = AgentResult(
                 session_id="s", last_message="", exit_code=0,

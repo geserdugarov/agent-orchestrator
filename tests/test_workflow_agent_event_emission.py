@@ -7,6 +7,9 @@ import unittest
 from unittest.mock import patch
 
 from orchestrator import config, workflow
+from orchestrator.workflow.stages.validating import (
+    watermarks as _validating_watermarks,
+)
 
 from tests import workflow_event_emission_test_support as support
 
@@ -95,9 +98,12 @@ class AgentLifecycleEventEmissionTest(unittest.TestCase, support._PatchedWorkflo
             review_round=1,
             retry_count=2,
         )
-        # Patch _latest_pr_comment_ids so it doesn't touch real GitHub.
+        # The seed walk is answered on its owner, so the handoff reads a
+        # fixed pair instead of walking the fake client's PR conversation.
         with patch.object(
-            workflow, "_latest_pr_comment_ids", return_value=(None, None)
+            _validating_watermarks,
+            "_latest_pr_comment_ids",
+            return_value=(None, None),
         ):
             self._run(
                 lambda: workflow._handle_validating(gh, support._TEST_SPEC, issue),

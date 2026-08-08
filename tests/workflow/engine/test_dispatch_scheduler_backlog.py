@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import patch
 
 from orchestrator import workflow
 from orchestrator.github.labels import BACKLOG_LABEL, PAUSED_LABEL
+
+from tests.workflow.engine.dispatch_scheduler_workers import patch_base_refresh
 
 from tests.fakes import FakeGitHubClient, make_issue
 from tests.workflow_helpers import (
@@ -53,7 +54,7 @@ class BacklogDispatchFilterTest(_BacklogDispatchFixture):
 
         process = self._processor(1, 2)
         with (
-            patch.object(workflow, REFRESH_BASE),
+            patch_base_refresh(),
             _patch_process_issue(
                 side_effect=process,
             ),

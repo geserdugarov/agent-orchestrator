@@ -25,6 +25,7 @@ from __future__ import annotations
 from github.Issue import Issue
 
 from orchestrator import config
+from orchestrator.git.base_sync import state as _base_sync_state
 from orchestrator.github.client import GitHubClient
 from orchestrator.github.pinned_state import PinnedState
 from orchestrator.workflow.engine import messages as _messages
@@ -85,8 +86,6 @@ def _handle_validating_awaiting_human(
     reset, reviewer timeout / silent crash) and the caller should fall through
     to the round-cap check and reviewer spawn.
     """
-    from orchestrator import workflow as _wf
-
     context = _models._AwaitingValidation.build(gh, spec, issue, state)
 
     # Transient-park recovery: when the original park reason is something
@@ -106,7 +105,7 @@ def _handle_validating_awaiting_human(
     # respawning the reviewer here would consume the comment as
     # input it has no context for and silently drop the retry
     # intent.
-    if context.park_reason in _wf._AUTO_REBASE_PARK_REASONS:
+    if context.park_reason in _base_sync_state._AUTO_REBASE_PARK_REASONS:
         return _state._OUTCOME_RETURN
     # `/orchestrator add-review-rounds N` operator command. Only honored
     # on a `review_cap` park: the cap has consumed every review round and

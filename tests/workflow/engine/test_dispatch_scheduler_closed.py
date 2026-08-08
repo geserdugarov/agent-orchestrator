@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import unittest
 from pathlib import Path
-from unittest.mock import patch
 
 from orchestrator import workflow
 from orchestrator.workflow.engine import dispatch
+
+from tests.workflow.engine.dispatch_scheduler_workers import patch_base_refresh
 
 from tests.fakes import FakeGitHubClient, make_issue
 from tests.workflow_helpers import (
@@ -62,7 +63,7 @@ class ClosedFanoutCapExemptionTest(_SchedulerWorkflowTest):
 
         process = self._processor(1, 2)
         with (
-            patch.object(workflow, REFRESH_BASE),
+            patch_base_refresh(),
             _patch_process_issue(
                 side_effect=process,
             ),
@@ -91,7 +92,7 @@ class ClosedFanoutCapExemptionTest(_SchedulerWorkflowTest):
 
         process = self._processor(1)
         with (
-            patch.object(workflow, REFRESH_BASE),
+            patch_base_refresh(),
             _patch_process_issue(
                 side_effect=process,
             ),
@@ -114,7 +115,7 @@ class ClosedFanoutCapExemptionTest(_SchedulerWorkflowTest):
 
         process = self._processor(1, 2)
         with (
-            patch.object(workflow, REFRESH_BASE),
+            patch_base_refresh(),
             _patch_process_issue(
                 side_effect=process,
             ),

@@ -19,6 +19,7 @@ from tests.workflow_helpers import (
 )
 
 from tests.workflow.engine.dispatch_scheduler_workers import (
+    patch_base_refresh,
     _IssueProcessor,
     _SequentialIssueProcessor,
 )
@@ -110,7 +111,7 @@ class _SchedulerWorkflowTest(unittest.TestCase):
     @contextlib.contextmanager
     def _route_through(self, processor):
         with (
-            patch.object(workflow, REFRESH_BASE),
+            patch_base_refresh(),
             _patch_process_issue(side_effect=processor),
         ):
             yield

@@ -6,7 +6,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from orchestrator import config, workflow
+from orchestrator import config
+from orchestrator.workflow.stages.implementing import session as _dev_session
 
 from tests.workflow_helpers import (
     KEY_AWAITING_HUMAN,
@@ -211,7 +212,7 @@ class HandleQuestionFreshRunTest(unittest.TestCase, _QuestionWorkflowMixin):
         # since the agent does no codegen and a wedged conversation does
         # not threaten an issue's daily spawn allowance.
         gh, issue = _seed_question(1, body=QUESTION_TEXT)
-        with patch.object(workflow, "_check_and_increment_retry_budget") as cb:
+        with patch.object(_dev_session, "_check_and_increment_retry_budget") as cb:
             self._run_question(
                 gh,
                 issue,

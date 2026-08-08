@@ -11,9 +11,10 @@ the audit pair around it, the analytics record its exit earns, and the
 because they share one `request`, so a field added for the audit event is
 already the field the record carries and the skill event repeats.
 
-The spawn itself is reached as ``_wf.run_agent`` rather than off
-`orchestrator.agents`: `run_agent` is the seam the stage tests replace to
-drive a handler without a CLI, and the facade attribute is what they patch.
+The spawn itself is named on `orchestrator/agents/runner.py`, the owner that
+defines it. That call is the seam the stage tests replace to drive a handler
+without a CLI, so a mock has to land on the runner owner; one left on the
+`orchestrator.workflow` facade beside it would let a real CLI run.
 
 Everything after the spawn is fail-open. The record and the trajectory write
 behind it ride guards inside `recording.record_agent_exit`, and the skill
@@ -46,9 +47,8 @@ from typing import Any, Optional
 
 from github.Issue import Issue
 
-from orchestrator import workflow as _wf
 from orchestrator._workflow_state import log
-from orchestrator.agents import AgentResult
+from orchestrator.agents import AgentResult, runner as _agent_runner
 from orchestrator.github.client import GitHubClient
 from orchestrator.github.pinned_state import PinnedState
 from orchestrator.observability.analytics import recording
@@ -236,7 +236,7 @@ def _run_agent_tracked(
     # Forward only the kwargs the original call sites set so the
     # wrapper's run_agent invocation matches the pre-tracking signature
     # call-for-call (test fakes assert on `call.kwargs`).
-    agent_result = _wf.run_agent(
+    agent_result = _agent_runner.run_agent(
         run_request.backend,
         run_request.prompt,
         run_request.cwd,

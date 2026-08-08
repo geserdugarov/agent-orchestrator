@@ -31,6 +31,12 @@ from typing import Optional
 from github.Issue import Issue
 
 from orchestrator import config
+from orchestrator.git.base_sync import state as _base_sync_state
+from orchestrator.git.verification import probes as _verification_probes
+from orchestrator.git.worktrees import (
+    creation as _worktree_creation,
+    paths as _worktree_paths,
+)
 from orchestrator.github.client import GitHubClient
 from orchestrator.github.comments import filter_trusted
 from orchestrator.github.pinned_state import PinnedState
@@ -70,25 +76,26 @@ def _retry_parked_dev_session(
     shifts it, and masking it here would swallow a real body edit that landed
     in the same window before the dev could see it.
     """
-    from orchestrator import workflow as _wf
-
     state.set(
         _state._LAST_ACTION_COMMENT_ID,
         max(comment.id for comment in new_comments),
     )
-    wt = _wf._worktree_path(spec, issue.number)
+    wt = _worktree_paths._worktree_path(spec, issue.number)
     if not wt.exists():
-        wt = _wf._ensure_worktree(
+        wt = _worktree_creation._ensure_worktree(
             spec, issue.number,
-            branch=_wf._resolve_branch_name(state, spec, issue.number),
+            branch=_worktree_paths._resolve_branch_name(state, spec, issue.number),
         )
-    before_sha = _wf._head_sha(wt)
+    before_sha = _verification_probes._head_sha(wt)
     followup = f"{_prompts._CONTINUE_RETRY_PROMPT}\n\n{_prompts._FOREGROUND_ONLY_NOTE}"
     wt, agent_result, paused = _resume._resume_dev_with_text(
         gh, spec, issue, state, followup, pause_guard=True,
     )
     state.set("last_agent_action_at", _usage._now_iso())
-    state.set(_state._BRANCH, _wf._resolve_branch_name(state, spec, issue.number))
+    state.set(
+        _state._BRANCH,
+        _worktree_paths._resolve_branch_name(state, spec, issue.number),
+    )
     # A shutdown-killed or live-paused resume leaves durable state untouched so
     # the next process re-detects and re-runs the retry (mirrors the drift and
     # fresh-spawn dispositions).
@@ -145,13 +152,11 @@ class _ParkedContinueDecision:
 def _parked_continue_decision(
     gh: GitHubClient, issue: Issue, state: PinnedState,
 ) -> Optional[_ParkedContinueDecision]:
-    from orchestrator import workflow as _wf
-
     if not state.get(_state._AWAITING_HUMAN):
         return None
     park_reason = state.get(_state._PARK_REASON)
     # Refresh-time auto-rebase parks own their operator retry comment.
-    if park_reason in _wf._AUTO_REBASE_PARK_REASONS:
+    if park_reason in _base_sync_state._AUTO_REBASE_PARK_REASONS:
         return None
     comments = filter_trusted(
         gh.comments_after(issue, state.get(_state._LAST_ACTION_COMMENT_ID))

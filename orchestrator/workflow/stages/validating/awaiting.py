@@ -35,6 +35,9 @@ from typing import Optional
 
 from orchestrator import config
 from orchestrator.agents import AgentResult
+from orchestrator.git.verification import probes as _verification_probes
+from orchestrator.git.worktrees import creation as _worktree_creation
+from orchestrator.git.worktrees import paths as _worktree_paths
 from orchestrator.workflow.engine import comments as _comments
 from orchestrator.workflow.engine import prompts as _prompts
 from orchestrator.workflow.stages.implementing import resume as _dev_resume
@@ -161,18 +164,16 @@ def _resume_awaiting_dev_agent(
 def _run_awaiting_dev(
     context: _models._AwaitingValidation, continue_action: str,
 ) -> Optional[_models._AwaitingDevAttempt]:
-    from orchestrator import workflow as _wf
-
-    worktree = _wf._worktree_path(context.spec, context.issue.number)
+    worktree = _worktree_paths._worktree_path(context.spec, context.issue.number)
     if not worktree.exists():
-        worktree = _wf._ensure_worktree(
+        worktree = _worktree_creation._ensure_worktree(
             context.spec,
             context.issue.number,
-            branch=_wf._resolve_branch_name(
+            branch=_worktree_paths._resolve_branch_name(
                 context.state, context.spec, context.issue.number,
             ),
         )
-    before_sha = _wf._head_sha(worktree)
+    before_sha = _verification_probes._head_sha(worktree)
     resumed = _resume_awaiting_dev_agent(context, continue_action)
     if resumed is None:
         return None

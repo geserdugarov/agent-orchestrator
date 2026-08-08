@@ -13,21 +13,19 @@ nothing and an import pulls in only what the chosen owner itself needs --
 depend on nothing else in the package.
 
 No facade of this domain's own sits beside the package. The ``workflow``
-hub publishes a slice of these names for the callers that read them off
-it: five -- the two authenticated fetches and the push off
-``authentication``, and the plain and hardened runners off ``commands``,
-each inventoried against the owner that defines it. Every other name,
-the no-prompt environment and the whole lock surface among them, answers
-on its owner alone. The hub resolves the owner's own object and caches
-it, so the sites share identity but not a later patch: a test
-intercepting one of these helpers targets the module its caller reads it
-off, and the two sides split by caller. This package is what the
-``git/worktrees/``, ``git/publication/``, and ``git/base_sync/`` owners
-name, what the conflicts and documenting stages name for the fetches and
-the push, and what the conflicts, documenting, and fixing stages name for
-the two runners. The hub is what the implementing and validating stages
-read the push off, and validating the branch fetch.
-``authentication`` names its logger
+hub publishes a slice of these names for callers outside the tree: five
+-- the two authenticated fetches and the push off ``authentication``,
+and the plain and hardened runners off ``commands``, each inventoried
+against the owner that defines it. Every other name, the no-prompt
+environment and the whole lock surface among them, answers on its owner
+alone. The hub resolves the owner's own object and caches it, so the
+sites share identity but not a later patch, and a test intercepting one
+of these helpers targets this package, because that is what every caller
+in the tree names: the ``git/worktrees/``, ``git/publication/``, and
+``git/base_sync/`` owners; the conflicts, documenting, implementing, and
+validating stages for the fetches and the push; and the conflicts,
+documenting, and fixing stages for the two runners. ``authentication``
+names its logger
 ``orchestrator.git_plumbing`` rather than after this package, because that
 is the name operator log filters select on.
 """

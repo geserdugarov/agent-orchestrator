@@ -32,6 +32,7 @@ from orchestrator import config
 from orchestrator._workflow_state import log
 from orchestrator.git.publication import squash as _squash
 from orchestrator.git.verification import runner as _verify_runner
+from orchestrator.git.worktrees import paths as _worktree_paths
 from orchestrator.github.client import GitHubClient
 from orchestrator.github.pinned_state import PinnedState
 from orchestrator.workflow.engine import comments as _comments
@@ -189,14 +190,12 @@ def _squash_approved_work(
     state: PinnedState,
     reviewer_run: _models._ReviewerRun,
 ) -> Optional[int]:
-    from orchestrator import workflow as _wf
-
     if not config.SQUASH_ON_APPROVAL:
         return 0
     squash_result = _squash._squash_and_force_push(
         spec,
         reviewer_run.wt,
-        _wf._resolve_branch_name(state, spec, issue.number),
+        _worktree_paths._resolve_branch_name(state, spec, issue.number),
         issue,
     )
     if squash_result[0]:

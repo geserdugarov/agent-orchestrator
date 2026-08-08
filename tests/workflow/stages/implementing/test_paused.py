@@ -14,6 +14,8 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from orchestrator import workflow
+from orchestrator.agents import runner as _agent_runner
+from orchestrator.git.worktrees import creation as _worktree_creation
 from orchestrator.github.labels import PAUSED_LABEL
 
 from tests.fakes import (
@@ -272,8 +274,10 @@ class ImplementingLivePauseRetryWindowTest(unittest.TestCase, _PatchedWorkflowMi
         get_issue_mock = MagicMock(side_effect=[unpaused, _paused_view(RETRY_ISSUE)])
         with (
             patch.object(gh, GET_ISSUE, get_issue_mock),
-            patch.object(workflow, "_ensure_worktree", return_value=_FAKE_WT),
-            patch.object(workflow, "run_agent", self._run_agent),
+            patch.object(
+                _worktree_creation, "_ensure_worktree", return_value=_FAKE_WT,
+            ),
+            patch.object(_agent_runner, "run_agent", self._run_agent),
         ):
             _, _, paused = workflow._resume_dev_with_text(
                 gh,

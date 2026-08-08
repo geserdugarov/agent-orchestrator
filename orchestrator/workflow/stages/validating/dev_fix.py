@@ -30,6 +30,10 @@ from pathlib import Path
 from github.Issue import Issue
 
 from orchestrator import config
+from orchestrator.git import authentication as _authentication
+from orchestrator.git.publication import probes as _publication_probes
+from orchestrator.git.verification import probes as _verification_probes
+from orchestrator.git.worktrees import paths as _worktree_paths
 from orchestrator.github.client import GitHubClient
 from orchestrator.github.pinned_state import PinnedState
 from orchestrator.workflow.engine import guards as _guards
@@ -55,19 +59,17 @@ def _stranded_fix_unpushed(
     not reconciled) all report False so the caller falls back to the
     question park instead of pushing blind.
     """
-    from orchestrator import workflow as _wf
-
-    if _wf._worktree_dirty_files(wt):
+    if _verification_probes._worktree_dirty_files(wt):
         return False
-    branch = _wf._resolve_branch_name(state, spec, issue.number)
-    fetch = _wf._authed_fetch(
+    branch = _worktree_paths._resolve_branch_name(state, spec, issue.number)
+    fetch = _authentication._authed_fetch(
         spec,
         f"+refs/heads/{branch}:refs/remotes/{spec.remote_name}/{branch}",
         cwd=wt,
     )
     if fetch.returncode != 0:
         return False
-    ahead, behind = _wf._branch_ahead_behind(spec, wt, branch)
+    ahead, behind = _publication_probes._branch_ahead_behind(spec, wt, branch)
     return ahead > 0 and behind == 0
 
 
@@ -87,11 +89,9 @@ def _park_dev_fix_timeout(
 def _dev_fix_is_publishable(
     spec: config.RepoSpec, issue: Issue, state: PinnedState, run: _models._DevFixRun,
 ) -> bool:
-    from orchestrator import workflow as _wf
-
     after_sha = run.after_sha
     if after_sha is None:
-        after_sha = _wf._head_sha(run.worktree)
+        after_sha = _verification_probes._head_sha(run.worktree)
     if after_sha and after_sha != run.before_sha:
         return True
     return bool(after_sha) and _stranded_fix_unpushed(
@@ -106,15 +106,13 @@ def _publish_dev_fix(
     state: PinnedState,
     run: _models._DevFixRun,
 ) -> bool:
-    from orchestrator import workflow as _wf
-
     state.set("silent_park_count", 0)
-    dirty = _wf._worktree_dirty_files(run.worktree)
+    dirty = _verification_probes._worktree_dirty_files(run.worktree)
     if dirty:
         _dev_parks._on_dirty_worktree(gh, issue, state, run.agent_result, dirty)
         return False
-    branch = _wf._resolve_branch_name(state, spec, issue.number)
-    if _wf._push_branch(spec, run.worktree, branch):
+    branch = _worktree_paths._resolve_branch_name(state, spec, issue.number)
+    if _authentication._push_branch(spec, run.worktree, branch):
         return True
     _guards._park_awaiting_human(
         gh, issue, state,

@@ -13,6 +13,7 @@ from orchestrator.workflow.engine import dispatch, tick
 
 from tests.fakes import FakeGitHubClient
 from tests.reexport_test_support import lazy_targets
+from tests.workflow_git_owners import seam_patch
 from tests.workflow_repo_values import _TEST_SPEC
 
 
@@ -36,6 +37,8 @@ _FACADE_FORWARDS = (
 )
 
 _EXPECTED_PASSES = ("refresh", "sweep", "catalog", "dispatch")
+
+_REFRESH_BASE = "_refresh_base_and_worktrees"
 
 
 class _PassRecorder:
@@ -71,10 +74,7 @@ class TickPassOrderTest(unittest.TestCase):
     def _passes_driven_by(self, scheduler) -> list[str]:
         recorder = _PassRecorder()
         with (
-            patch.object(
-                workflow, "_refresh_base_and_worktrees",
-                recorder.pass_named("refresh"),
-            ),
+            seam_patch(_REFRESH_BASE, recorder.pass_named("refresh")),
             patch.object(
                 tick, "_sweep_community_contribution_prs",
                 recorder.pass_named("sweep"),

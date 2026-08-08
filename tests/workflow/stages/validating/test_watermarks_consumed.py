@@ -7,6 +7,8 @@ from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 from orchestrator import config, workflow
+from orchestrator.agents import runner as _agent_runner
+from orchestrator.git.worktrees import creation as _worktree_creation
 
 from tests.fakes import (
     FakeComment,
@@ -191,11 +193,13 @@ class HandoffSkipsConsumedRepliesTest(unittest.TestCase, _PatchedWorkflowMixin):
 
         with (
             patch.object(
-                workflow,
+                _worktree_creation,
                 "_ensure_worktree",
                 lambda spec, issue_number, **_: _FAKE_WT,
             ),
-            patch.object(workflow, RUN_AGENT, lambda *args, **kwargs: _agent()),
+            patch.object(
+                _agent_runner, RUN_AGENT, lambda *args, **kwargs: _agent(),
+            ),
         ):
             resume_result = workflow._resume_developer_on_human_reply(gh, _TEST_SPEC, issue, state)
 

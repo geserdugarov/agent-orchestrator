@@ -30,6 +30,11 @@ from github.Issue import Issue
 
 from orchestrator import config
 from orchestrator.agents import AgentResult
+from orchestrator.git.verification import probes as _verification_probes
+from orchestrator.git.worktrees import (
+    creation as _worktree_creation,
+    paths as _worktree_paths,
+)
 from orchestrator.github.client import GitHubClient
 from orchestrator.github.pinned_state import PinnedState
 from orchestrator.workflow.engine import guards as _guards
@@ -57,9 +62,7 @@ def _publish_committed_work(
     and user-content-drift dispositions so each handles a committed worktree
     identically.
     """
-    from orchestrator import workflow as _wf
-
-    dirty = _wf._worktree_dirty_files(work.worktree)
+    dirty = _verification_probes._worktree_dirty_files(work.worktree)
     if dirty:
         _parks._on_dirty_worktree(gh, issue, state, work.agent_result, dirty)
     else:
@@ -113,13 +116,11 @@ def _try_recover_implementing_timeout_park(
     normal ":sparkles: PR opened" comment via `_on_commits` -- publishing the
     branch is the entire point of the recovery. It must not spawn the agent.
     """
-    from orchestrator import workflow as _wf
-
-    wt = _wf._worktree_path(spec, issue.number)
+    wt = _worktree_paths._worktree_path(spec, issue.number)
     if not wt.exists():
         # Worktree reaped: the local commit is gone, nothing to publish.
         return _state._REASON_STUCK
-    if _wf._worktree_dirty_files(wt):
+    if _verification_probes._worktree_dirty_files(wt):
         # A descendant left uncommitted edits; pushing would publish an
         # incomplete branch. Stay parked for human inspection.
         return _state._REASON_STUCK
@@ -129,7 +130,7 @@ def _try_recover_implementing_timeout_park(
         # is foreign state we cannot reason about, so stay parked rather than
         # risk publishing a branch we cannot vouch for.
         return _state._REASON_STUCK
-    now_sha = _wf._head_sha(wt)
+    now_sha = _verification_probes._head_sha(wt)
     if not now_sha or now_sha == pre_sha:
         # The timeout produced no new commit; stay parked for a human reply.
         return _state._REASON_STUCK
@@ -170,15 +171,13 @@ def _dispose_agent_result(
     to `origin/<base>`) is what distinguishes a commit produced by THIS run
     from carried-over commits already on the branch.
     """
-    from orchestrator import workflow as _wf
-
     if prepared.agent_result.timed_out:
         # The implementer can commit clean work and then get killed by the
         # timeout (or a descendant finishes the commit during cleanup). Don't
         # strand that commit behind `awaiting_human`: publish it if HEAD
         # advanced and the tree is clean, park a dirty tree for inspection, or
         # park as a timeout when it did not advance.
-        after_sha = _wf._head_sha(prepared.worktree)
+        after_sha = _verification_probes._head_sha(prepared.worktree)
         if after_sha and after_sha != prepared.before_sha:
             _publish_committed_work(
                 gh,
@@ -192,7 +191,7 @@ def _dispose_agent_result(
         gh.write_pinned_state(issue, state)
         return
 
-    if _wf._has_new_commits(spec, prepared.worktree):
+    if _worktree_creation._has_new_commits(spec, prepared.worktree):
         _publish_committed_work(
             gh,
             spec,

@@ -7,11 +7,12 @@ import unittest
 from functools import partial
 from unittest.mock import MagicMock, patch
 
-from orchestrator import config, workflow
+from orchestrator import config
 from orchestrator.github.labels import COMMUNITY_CONTRIBUTION_LABEL
 from orchestrator.workflow.engine import tick
 
 from tests.fakes import FakeGitHubClient
+from tests.workflow_git_owners import seam_patch
 from tests.workflow.engine.tick_community_test_support import (
     ALLOWED_LOGIN,
     ALLOWLIST_CONFIG,
@@ -118,6 +119,8 @@ class SweepCommunityContributionFailuresTest(unittest.TestCase):
             tick._sweep_community_contribution_prs(gh, _TEST_SPEC)
         self.assertEqual(gh.posted_pr_comments, [])
 
+_REFRESH_BASE = "_refresh_base_and_worktrees"
+
 
 class TickInvokesSweepTest(unittest.TestCase):
     """`tick` must drive the community-contribution sweep on every tick so a
@@ -129,7 +132,7 @@ class TickInvokesSweepTest(unittest.TestCase):
         gh = FakeGitHubClient()
         refresh = MagicMock()
         sweep = MagicMock()
-        with patch.object(workflow, "_refresh_base_and_worktrees", refresh), \
+        with seam_patch(_REFRESH_BASE, refresh), \
              patch.object(tick, "_sweep_community_contribution_prs", sweep):
             tick.tick(gh, _TEST_SPEC)
         sweep.assert_called_once_with(gh, _TEST_SPEC)

@@ -9,6 +9,9 @@ from unittest.mock import patch
 
 from orchestrator import config, workflow
 from orchestrator.agents import AgentResult
+from orchestrator.workflow.stages.validating import (
+    watermarks as _validating_watermarks,
+)
 
 from tests.fakes import FakeGitHubClient, FakeIssue, FakePR, make_issue
 
@@ -227,7 +230,7 @@ class AgentAnalyticsTest(unittest.TestCase, _PatchedWorkflowMixin):
             retry_count=3,
         )
         with patch.object(
-            workflow,
+            _validating_watermarks,
             "_latest_pr_comment_ids",
             return_value=(None, None),
         ):

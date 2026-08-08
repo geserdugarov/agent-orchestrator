@@ -33,11 +33,12 @@ slot and leaves the other `limit - 1` free for fanout. Per-family-issue futures
 behind a shared lock would instead let a waiting family future hold a second
 slot and starve fanout under a small `limit`.
 
-One collaborator is reached as a ``_wf`` attribute rather than off its own
-owner: `_refresh_base_and_worktrees` is the seam the tick tests replace to drive
-a pass without a git remote or a clone, and the facade attribute is what they
-patch. The skill-catalog emission is named on its owner instead, so a test
-intercepting that pass patches `orchestrator.skills.catalog`.
+Every collaborator is named on the owner that defines it, including the two
+passes a test has to replace to drive a tick without a git remote or a clone:
+`_refresh_base_and_worktrees` on `git/base_sync/refresh.py` and the catalog
+emission on `orchestrator/skills/catalog.py`. A mock aimed at either lands on
+that owner; one left on the `orchestrator.workflow` facade would let the real
+fetch run.
 """
 from __future__ import annotations
 
@@ -48,8 +49,8 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 from orchestrator import config
-from orchestrator import workflow as _wf
 from orchestrator._workflow_state import _PROCESSING_FAILED_LOG, log
+from orchestrator.git.base_sync import refresh as _base_refresh
 from orchestrator.github.client import GitHubClient
 from orchestrator.github.labels import COMMUNITY_CONTRIBUTION_LABEL
 from orchestrator.scheduler import IssueScheduler
@@ -351,7 +352,7 @@ def tick(
         # refresh helper consults `scheduler.is_active` per worktree
         # so an in-flight issue's worktree and pinned state are left
         # alone until the worker exits.
-        _wf._refresh_base_and_worktrees(gh, spec, scheduler=scheduler)
+        _base_refresh._refresh_base_and_worktrees(gh, spec, scheduler=scheduler)
     except Exception:
         log.exception(
             "repo=%s pre-tick base refresh failed; continuing", spec.slug,

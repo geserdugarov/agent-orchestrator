@@ -41,8 +41,10 @@ Every source file (`*.py`, `*.sh`, `pyproject.toml`) starts with:
 Before committing, run each of these and fix what they report:
 
 - `.venv/bin/python -m ruff check orchestrator tests` — recurring CI breakers:
-  - **F401** (unused import): if the name is meant to be a re-export from the `workflow` facade, alias it with
-    `... as <name>` so ruff treats it as an explicit re-export instead of dead code.
+  - **F401** (unused import): if the name is meant to be a re-export from a package facade that binds its
+    surface with imports (`orchestrator/agents/`, `github/`, `scheduler/`, `observability/usage/`), alias it with
+    `... as <name>` so ruff treats it as an explicit re-export instead of dead code. The `workflow` facade needs
+    none of this: it resolves its whole inventory lazily off `_workflow_export_manifest` and binds nothing.
   - **F541** (f-string without placeholders): use a plain string.
   - **F841** (unused local).
   - **E402** (module-level import not at top of file).
@@ -56,17 +58,22 @@ Before committing, run each of these and fix what they report:
 
 ## Refactoring the `workflow` facade and the stage modules
 
-The facade pattern in `orchestrator/workflow/__init__.py` is load-bearing for tests. Get the boundary
-right:
+`orchestrator/workflow/__init__.py` is a compatibility surface for callers outside the tree, not a
+call path inside it. Get the boundary right:
 
-- The facade re-exports stage handlers and cross-module helpers under their original names so
-  `patch.object(workflow, "_foo", ...)` in tests keeps intercepting calls. **Every re-export must be
-  aliased with `as <name>`** — bare `from .stages.implementing.handler import _handle_implementing` will
-  be stripped by ruff F401;
-  `from .stages.implementing.handler import _handle_implementing as _handle_implementing` survives.
-- Stage modules call back into the facade via `from orchestrator import workflow as _wf` **at call
-  time**, not at module import. Top-level `from orchestrator.workflow import _foo` defeats
-  `patch.object(workflow, "_foo", ...)` because the stage module captures the original reference.
+- The facade resolves stage handlers and cross-module helpers under their original names off the
+  owner that defines each one, so a historical `patch.object(workflow, "_foo", ...)` still resolves.
+  It intercepts nothing in-tree, though: every in-repo caller names its owner, so a mock left on the
+  facade lets the real helper run.
+- Stage modules import the owner they borrow from at module scope —
+  `from orchestrator.git.worktrees import paths as _worktree_paths`,
+  `from orchestrator.workflow.engine import guards as _guards` — and call through that alias. Never
+  reintroduce the `from orchestrator import workflow as _wf` call-time hop.
+- Tests patch the owner. `tests/workflow_git_owners.py` records which git module defines each seam
+  (`GIT_SEAM_OWNERS`, `seam_patch`), `tests/workflow_patch_runner.py` resolves every hermetic mock
+  through that table plus the agent runner, and `tests/workflow_owner_boundaries.py` carries the
+  `OwnerBoundaryMixin` a `test_owner_boundaries.py` module pins a borrowed owner with — the owner mock
+  has to answer and the facade guard has to stay untouched.
 - Stage-private helpers (only used inside one stage module — e.g. `_bump_in_review_watermarks`,
   `_seed_legacy_in_review_watermarks`, `_emit_conflict_round_incremented`) stay private to that stage
   module. Do **not** re-export them from the facade. Re-exports are an intentional surface, not a
@@ -77,9 +84,9 @@ right:
 
 ## Tests
 
-- When you move a helper to a new module, either update the test's patch target to the new module
-  boundary, or keep the compatibility alias on `orchestrator.workflow` and patch through the facade. Pick one
-  approach per PR and be consistent.
+- When you move a helper to a new module, move the test's patch target to that owner with it. Patching
+  through `orchestrator.workflow` is not an alternative: the facade resolves the name for callers outside the
+  tree, so a mock left there intercepts nothing an in-repo caller runs.
 - Tests mirror the runtime layout: a module under `orchestrator/<package>/` is covered by `tests/<package>/`, and
   stage-handler tests live beside their owners under `tests/workflow/stages/<stage>/`. Put a new test in the module
   that already covers the behavior's owner; add a new module only when none does, and name it after the behavior it

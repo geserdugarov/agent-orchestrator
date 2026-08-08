@@ -24,6 +24,7 @@ import contextlib
 from github.Issue import Issue
 
 from orchestrator import config
+from orchestrator.git.worktrees import paths as _worktree_paths
 from orchestrator.git.worktrees import terminal as _worktree_terminal
 from orchestrator.github.client import GitHubClient
 from orchestrator.workflow.engine import usage as _usage
@@ -39,12 +40,10 @@ def _teardown_question_worktree(run: _models._QuestionRun) -> None:
     The branch name is resolved rather than derived so a worktree created under
     the legacy naming scheme is still the one torn down.
     """
-    from orchestrator import workflow as _wf
-
     _worktree_terminal._cleanup_question_worktree(
         run.spec,
         run.issue.number,
-        branch=_wf._resolve_branch_name(
+        branch=_worktree_paths._resolve_branch_name(
             run.state, run.spec, run.issue.number,
         ),
     )

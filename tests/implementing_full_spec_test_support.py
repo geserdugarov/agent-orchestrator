@@ -8,11 +8,18 @@ from unittest import mock
 
 from orchestrator import config as config
 from orchestrator import workflow as _workflow
+from orchestrator.agents import runner as _agent_runner
+from orchestrator.git.worktrees import creation as _worktree_creation
 from tests import fakes, implementing_fixing_test_cases, workflow_helpers
 
 MagicMock = mock.MagicMock
 patch = mock.patch
 workflow = _workflow
+
+# The owners the checkout and the spawn answer on, so a test patches the module
+# the stage calls rather than the `workflow` facade beside it.
+agent_runner = _agent_runner
+worktree_creation = _worktree_creation
 
 FakeComment = fakes.FakeComment
 FakeGitHubClient = fakes.FakeGitHubClient

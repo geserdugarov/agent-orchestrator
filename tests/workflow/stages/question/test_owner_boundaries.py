@@ -4,20 +4,19 @@
 
 The stage owns its own session, but nothing else it runs: the tracked spawn, the
 park, the prompt builders, the trusted conversation text, and the stderr
-diagnostics all belong to `workflow/engine/`, and the worktree teardown that
-keeps the stage read-only belongs to `git/worktrees/terminal.py`. Each is
-imported from that owner rather than read off the `orchestrator.workflow`
-facade, so a patch that has to intercept one lands on the owner. Every case
-patches BOTH -- the owner mock has to answer and the facade guard has to stay
-untouched -- which is what fails if a call site drifts back to `_wf`.
+diagnostics all belong to `workflow/engine/`, and the scratch checkout it works
+in -- from the branch name through the commit and dirty probes that enforce the
+read-only contract to the teardown -- belongs to `git/`. Each is imported from
+that owner rather than read off the `orchestrator.workflow` facade, so a patch
+that has to intercept one lands on the owner. Every case patches BOTH -- the
+owner mock has to answer and the facade guard has to stay untouched -- which is
+what fails if a call site drifts back to `_wf`.
 """
 from __future__ import annotations
 
-import contextlib
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
-from orchestrator import workflow
 from orchestrator.git.worktrees import terminal as _worktree_terminal
 from orchestrator.workflow.engine import (
     comments as _comments,
@@ -37,6 +36,7 @@ from orchestrator.workflow.stages.question import (
 
 from tests.fakes import FakeGitHubClient, make_issue
 from tests.workflow_helpers import _FAKE_WT, _TEST_SPEC, _agent
+from tests.workflow_owner_boundaries import OwnerBoundaryMixin
 
 BOUNDARY_ISSUE = 910
 BOUNDARY_BRANCH = "orchestrator/geserdugarov__agent-orchestrator/issue-910"
@@ -53,8 +53,7 @@ RUN_AGENT_TRACKED = "_run_agent_tracked"
 BUILD_QUESTION_PROMPT = "_build_question_prompt"
 RECENT_COMMENTS_TEXT = "_recent_comments_text"
 FORMAT_STDERR_DIAGNOSTICS = "_format_stderr_diagnostics"
-RESOLVE_BRANCH_NAME = "_resolve_branch_name"
-ENSURE_WORKTREE = "_ensure_worktree"
+BOUNDARY_DIRTY_FILE = "notes.md"
 
 
 def _question_run(*, closed: bool = False) -> _models._QuestionRun:
@@ -66,37 +65,17 @@ def _question_run(*, closed: bool = False) -> _models._QuestionRun:
     return _models._QuestionRun.start(gh, _TEST_SPEC, issue)
 
 
-class _OwnerBoundaryMixin:
-    """Assert a block reached no borrowed helper through the facade."""
+class _QuestionBoundaryMixin(OwnerBoundaryMixin):
+    """Hold the checkout seams the question stage does not own."""
 
-    @contextlib.contextmanager
-    def _facade_out_of_the_path(self, export_name, returns=None):
-        # The guard returns the shape its caller consumes, so a regression
-        # fails on the assertion below rather than on a bare mock downstream.
-        with contextlib.ExitStack() as stack:
-            guard = stack.enter_context(
-                patch.object(workflow, export_name, return_value=returns),
-            )
-            yield
-        self.assertFalse(
-            guard.called, f"{export_name} was read off the workflow facade",
+    def _worktree_on_its_owners(self):
+        return self.git_seams_on_owners(
+            _resolve_branch_name=MagicMock(return_value=BOUNDARY_BRANCH),
+            _ensure_worktree=MagicMock(return_value=_FAKE_WT),
         )
 
-    @contextlib.contextmanager
-    def _worktree_on_the_facade(self):
-        """Hold the worktree seams the stage does not own to fixed answers."""
-        with (
-            patch.object(
-                workflow, RESOLVE_BRANCH_NAME, lambda *args: BOUNDARY_BRANCH,
-            ),
-            patch.object(
-                workflow, ENSURE_WORKTREE, lambda spec, number, **_: _FAKE_WT,
-            ),
-        ):
-            yield
 
-
-class WorktreeTeardownBoundaryTest(unittest.TestCase, _OwnerBoundaryMixin):
+class WorktreeTeardownBoundaryTest(unittest.TestCase, _QuestionBoundaryMixin):
     """Both teardowns land on the worktree terminal owner.
 
     `_cleanup_question_worktree` resolves on `workflow` too, so a mock left on
@@ -106,8 +85,8 @@ class WorktreeTeardownBoundaryTest(unittest.TestCase, _OwnerBoundaryMixin):
     def test_safe_exit_tears_down_on_owner(self) -> None:
         run = _question_run()
         with (
-            self._facade_out_of_the_path(CLEANUP_QUESTION_WORKTREE),
-            self._worktree_on_the_facade(),
+            self.facade_out_of_the_path(CLEANUP_QUESTION_WORKTREE),
+            self._worktree_on_its_owners(),
             patch.object(
                 _worktree_terminal, CLEANUP_QUESTION_WORKTREE,
             ) as cleanup,
@@ -118,8 +97,8 @@ class WorktreeTeardownBoundaryTest(unittest.TestCase, _OwnerBoundaryMixin):
     def test_closed_finalize_tears_down_on_owner(self) -> None:
         run = _question_run(closed=True)
         with (
-            self._facade_out_of_the_path(CLEANUP_QUESTION_WORKTREE),
-            self._worktree_on_the_facade(),
+            self.facade_out_of_the_path(CLEANUP_QUESTION_WORKTREE),
+            self._worktree_on_its_owners(),
             patch.object(
                 _worktree_terminal, CLEANUP_QUESTION_WORKTREE,
             ) as cleanup,
@@ -129,7 +108,7 @@ class WorktreeTeardownBoundaryTest(unittest.TestCase, _OwnerBoundaryMixin):
         self.assertIn((BOUNDARY_ISSUE, LABEL_DONE), run.gh.label_history)
 
 
-class EngineRunBoundaryTest(unittest.TestCase, _OwnerBoundaryMixin):
+class EngineRunBoundaryTest(unittest.TestCase, _QuestionBoundaryMixin):
     """The tracked spawn and the park land on their engine owners."""
 
     def test_prompt_execution_lands_on_usage_owner(self) -> None:
@@ -141,7 +120,7 @@ class EngineRunBoundaryTest(unittest.TestCase, _OwnerBoundaryMixin):
             session_id=None,
         )
         with (
-            self._facade_out_of_the_path(RUN_AGENT_TRACKED, returns=_agent()),
+            self.facade_out_of_the_path(RUN_AGENT_TRACKED, returns=_agent()),
             patch.object(
                 _usage,
                 RUN_AGENT_TRACKED,
@@ -161,7 +140,7 @@ class EngineRunBoundaryTest(unittest.TestCase, _OwnerBoundaryMixin):
     def test_park_funnel_lands_on_guard_owner(self) -> None:
         run = _question_run()
         with (
-            self._facade_out_of_the_path(PARK_AWAITING_HUMAN),
+            self.facade_out_of_the_path(PARK_AWAITING_HUMAN),
             patch.object(_guards, PARK_AWAITING_HUMAN) as park,
         ):
             _run._park_question(
@@ -173,19 +152,19 @@ class EngineRunBoundaryTest(unittest.TestCase, _OwnerBoundaryMixin):
         self.assertEqual(run.state.get("park_reason"), _state._QUESTION_ANSWER)
 
 
-class EnginePromptBoundaryTest(unittest.TestCase, _OwnerBoundaryMixin):
+class EnginePromptBoundaryTest(unittest.TestCase, _QuestionBoundaryMixin):
     """The question prompt and the thread it quotes land on their owners."""
 
     def test_fresh_spawn_builds_on_owners(self) -> None:
         run = _question_run()
         with (
-            self._facade_out_of_the_path(
+            self.facade_out_of_the_path(
                 BUILD_QUESTION_PROMPT, returns=BOUNDARY_PROMPT,
             ),
-            self._facade_out_of_the_path(
+            self.facade_out_of_the_path(
                 RECENT_COMMENTS_TEXT, returns=BOUNDARY_THREAD,
             ),
-            self._worktree_on_the_facade(),
+            self._worktree_on_its_owners(),
             patch.object(
                 _comments, RECENT_COMMENTS_TEXT, return_value=BOUNDARY_THREAD,
             ) as thread,
@@ -205,7 +184,7 @@ class EnginePromptBoundaryTest(unittest.TestCase, _OwnerBoundaryMixin):
 
     def test_sessionless_resume_uses_first_round(self) -> None:
         with (
-            self._facade_out_of_the_path(
+            self.facade_out_of_the_path(
                 BUILD_QUESTION_PROMPT, returns=BOUNDARY_PROMPT,
             ),
             patch.object(_comments, RECENT_COMMENTS_TEXT, return_value=""),
@@ -220,13 +199,33 @@ class EnginePromptBoundaryTest(unittest.TestCase, _OwnerBoundaryMixin):
         self.assertEqual(prompt, BOUNDARY_PROMPT)
 
 
-class EngineDiagnosticsBoundaryTest(unittest.TestCase, _OwnerBoundaryMixin):
+class ReadOnlyAssessmentBoundaryTest(unittest.TestCase, _QuestionBoundaryMixin):
+    """The read-only verdict is read off the git probes, not the facade."""
+
+    def test_dirty_tree_parks_off_probe_owners(self) -> None:
+        # The whole contract this stage exists to enforce is decided by these
+        # three reads, so a mock left on the facade would let a real worktree
+        # scan answer for a run that never touched one.
+        run = _question_run()
+        with self.git_seams_on_owners(
+            _worktree_path=MagicMock(return_value=_FAKE_WT),
+            _has_new_commits=MagicMock(return_value=False),
+            _worktree_dirty_files=MagicMock(return_value=[BOUNDARY_DIRTY_FILE]),
+        ):
+            outcome = _outcomes._assess_question_worktree(run, _agent())
+        self.assertEqual(outcome.park_reason, _state._QUESTION_DIRTY)
+        self.assertEqual(outcome.dirty_files, (BOUNDARY_DIRTY_FILE,))
+        # A violation keeps the tree on disk for the operator to inspect.
+        self.assertTrue(outcome.keep_worktree)
+
+
+class EngineDiagnosticsBoundaryTest(unittest.TestCase, _QuestionBoundaryMixin):
     """The silent park's stderr block lands on the engine message owner."""
 
     def test_silent_park_reads_diagnostics_off_owner(self) -> None:
         run = _question_run()
         with (
-            self._facade_out_of_the_path(
+            self.facade_out_of_the_path(
                 FORMAT_STDERR_DIAGNOSTICS, returns=BOUNDARY_DIAGNOSTICS,
             ),
             patch.object(

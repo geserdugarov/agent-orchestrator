@@ -22,19 +22,21 @@ from pathlib import Path
 from github.Issue import Issue
 
 from orchestrator import config
+from orchestrator.git.worktrees import (
+    creation as _worktree_creation,
+    paths as _worktree_paths,
+)
 from orchestrator.github.pinned_state import PinnedState
 
 
 def _ensure_resume_worktree(
     spec: config.RepoSpec, issue: Issue, state: PinnedState,
 ) -> Path:
-    from orchestrator import workflow as _wf
-
-    worktree = _wf._worktree_path(spec, issue.number)
+    worktree = _worktree_paths._worktree_path(spec, issue.number)
     if worktree.exists():
         return worktree
-    return _wf._ensure_worktree(
+    return _worktree_creation._ensure_worktree(
         spec,
         issue.number,
-        branch=_wf._resolve_branch_name(state, spec, issue.number),
+        branch=_worktree_paths._resolve_branch_name(state, spec, issue.number),
     )

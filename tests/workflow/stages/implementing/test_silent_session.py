@@ -32,6 +32,8 @@ _agent = support._agent
 make_issue = support.make_issue
 patch = support.patch
 workflow = support.workflow
+_agent_runner = support.agent_runner
+_worktree_creation = support.worktree_creation
 
 
 class SilentSessionResumeFallbackTest(
@@ -55,8 +57,8 @@ class SilentSessionResumeFallbackTest(
         run_agent = MagicMock(return_value=_agent(session_id="ignored", last_message=OK_MESSAGE))
 
         with (
-            patch.object(workflow, ENSURE_WORKTREE, return_value=_FAKE_WT),
-            patch.object(workflow, RUN_AGENT, run_agent),
+            patch.object(_worktree_creation, ENSURE_WORKTREE, return_value=_FAKE_WT),
+            patch.object(_agent_runner, RUN_AGENT, run_agent),
         ):
             workflow._resume_dev_with_text(gh, _TEST_SPEC, issue, state, RESUME_TEXT)
 
@@ -82,8 +84,8 @@ class SilentSessionResumeFallbackTest(
         run_agent = MagicMock(return_value=_agent(session_id=FRESH_SESSION, last_message=OK_MESSAGE))
 
         with (
-            patch.object(workflow, ENSURE_WORKTREE, return_value=_FAKE_WT),
-            patch.object(workflow, RUN_AGENT, run_agent),
+            patch.object(_worktree_creation, ENSURE_WORKTREE, return_value=_FAKE_WT),
+            patch.object(_agent_runner, RUN_AGENT, run_agent),
         ):
             workflow._resume_dev_with_text(gh, _TEST_SPEC, issue, state, RESUME_TEXT)
 
@@ -110,9 +112,9 @@ class SilentSessionResumeFallbackTest(
         state = gh.read_pinned_state(issue)
 
         with (
-            patch.object(workflow, ENSURE_WORKTREE, return_value=_FAKE_WT),
+            patch.object(_worktree_creation, ENSURE_WORKTREE, return_value=_FAKE_WT),
             patch.object(
-                workflow,
+                _agent_runner,
                 RUN_AGENT,
                 lambda *args, **kwargs: _agent(session_id="", last_message=""),
             ),
@@ -145,8 +147,8 @@ class SilentSessionResumeFallbackTest(
         run_agent = MagicMock(return_value=_agent(session_id="fresh-legacy", last_message=OK_MESSAGE))
 
         with (
-            patch.object(workflow, ENSURE_WORKTREE, return_value=_FAKE_WT),
-            patch.object(workflow, RUN_AGENT, run_agent),
+            patch.object(_worktree_creation, ENSURE_WORKTREE, return_value=_FAKE_WT),
+            patch.object(_agent_runner, RUN_AGENT, run_agent),
         ):
             workflow._resume_dev_with_text(gh, _TEST_SPEC, issue, state, RESUME_TEXT)
 

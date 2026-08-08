@@ -14,18 +14,17 @@ callers import the owner they need directly, so this initializer binds
 nothing and importing one owner never drags the others in.
 
 No facade of this domain's own sits beside the package. The ``workflow``
-hub publishes a slice of these names for the callers that read them off
-it: fourteen -- the two sanitizers, the branch and worktree-path
+hub publishes a slice of these names for callers outside the tree:
+fourteen -- the two sanitizers, the branch and worktree-path
 derivations and the pinned / legacy resolver, the unpushed-commit probe,
 the two creators and the new-commit probe, the decomposer's path,
 creation, and removal, and the two teardowns -- each inventoried against
 the owner that defines it. Every other name, the slug pattern and the
 worktrees root among them, answers on its owner alone. The hub resolves
 the owner's own object and caches it, so the sites
-share identity but not a later patch: a test intercepting one of these
-helpers targets the module its caller reads it off -- ``workflow`` for the
-stage handlers, and the owner for the ``git/base_sync/`` and
-``workflow/engine/`` callers that import it directly. ``cleanup``,
+share identity but not a later patch, and a test intercepting one of these
+helpers targets the owner: the stage handlers name it just as the
+``git/base_sync/`` and ``workflow/engine/`` callers do. ``cleanup``,
 ``creation``, ``decomposition``, and ``terminal`` name their logger
 ``orchestrator.worktree_lifecycle`` rather than after this package, because
 that is the name operator log filters select on.

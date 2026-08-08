@@ -30,6 +30,11 @@ from typing import Optional
 from github.Issue import Issue
 
 from orchestrator import config
+from orchestrator.git.verification import probes as _verification_probes
+from orchestrator.git.worktrees import (
+    paths as _worktree_paths,
+    recovery as _worktree_recovery,
+)
 from orchestrator.github.client import GitHubClient
 from orchestrator.github.pinned_state import PinnedState
 from orchestrator.workflow.engine import guards as _guards
@@ -103,14 +108,16 @@ class _QuestionRelabelHazard:
 def _question_relabel_hazard(
     spec: config.RepoSpec, issue: Issue, state: PinnedState,
 ) -> Optional[_QuestionRelabelHazard]:
-    from orchestrator import workflow as _wf
-
-    worktree = _wf._worktree_path(spec, issue.number)
-    dirty = worktree.exists() and bool(_wf._worktree_dirty_files(worktree))
-    unpushed = _wf._branch_has_unpushed_commits(spec, issue.number)
+    worktree = _worktree_paths._worktree_path(spec, issue.number)
+    dirty = worktree.exists() and bool(
+        _verification_probes._worktree_dirty_files(worktree),
+    )
+    unpushed = _worktree_recovery._branch_has_unpushed_commits(spec, issue.number)
     if not dirty and not unpushed:
         return None
-    branch = unpushed or _wf._resolve_branch_name(state, spec, issue.number)
+    branch = unpushed or _worktree_paths._resolve_branch_name(
+        state, spec, issue.number,
+    )
     return _QuestionRelabelHazard(
         branch=branch,
         trigger=_question_relabel_trigger(dirty, bool(unpushed), branch),

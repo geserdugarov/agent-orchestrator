@@ -34,12 +34,14 @@ designed around that assumption.
 
 The workflow, analytics-read, and dashboard subsystems expose stable lazy facades backed by immutable export
 manifests. Their implementations live in responsibility-named private leaves, while facade lookups preserve every
-historical import and object identity. Leaves call through the owning facade at runtime where patch interception is
-part of the compatibility contract, so `patch.object(workflow, "<helper>", ...)` still intercepts calls made from
-other workflow and stage leaves. Once a responsibility has been lifted into an owner module, though, its in-repo
-callers bind that owner directly and a patch has to target it instead — the facade keeps resolving the name for
-outside callers but is no longer on the call path. Each of those boundaries is named where its owner is described
-below.
+historical import and object identity. What a name resolves on is a separate question from what the tree calls: a
+responsibility that sits on an owner module is named by its in-repo callers directly, so a patch has to target the
+owner, while the facade keeps resolving the same object for callers outside the tree. No workflow or stage leaf
+reads a helper off `orchestrator.workflow`, so `patch.object(workflow, "<helper>", ...)` pins the compatibility
+forward rather than a live call path. Where a leaf does resolve through its own package at call time it is to read
+a knob rather than to borrow a helper — the analytics settings, which `patch.object(analytics,
+"ANALYTICS_LOG_PATH", ...)` decides for whichever package the name resolves to. Each of those boundaries is named
+where its owner is described below.
 
 ```
 orchestrator/
@@ -1271,9 +1273,10 @@ the seven -- the conventional-commit pattern and the recent-base-subject read, t
 from, the whole rewrite half, and the parsing and subject-vocabulary helpers the probes are built on -- answers on
 its owner alone. The facade
 resolves the owner's own object and caches it, so the two share identity but not a later patch: a test intercepting one
-targets the module its caller reads it off -- `workflow` for the validating and implementing stage helpers that
-still reach them there, `git.publication.probes` for base sync's divergence check and for the ahead/behind reads the
-documenting prep and the conflicts routing take, and
+targets the module its caller reads it off, and no in-tree caller reads a publication name off `workflow`.
+That is `git.publication.probes` for base sync's divergence check, for the ahead/behind reads the documenting prep,
+the conflicts routing, and validating's stranded-fix probe take, and for the first-commit subject behind a fresh dev
+PR; `git.publication.titles` for the two title helpers that same PR falls back to; and
 `git.publication.squash` for validating's squash. Inside the package the owners bind their
 collaborators directly -- `probes` calls `git.commands`, `titles` calls `probes`, `planning` calls `git.commands`,
 both siblings, and the verification probes for its HEAD and dirty-file guards, `rewrite` calls `git.commands`,
@@ -1291,9 +1294,9 @@ the dirty-file scan targets the owner module. That gate is the runner's only cal
 `_run_verify_commands`; it answers on `git.verification.runner` alone, as `VerifyResult` and
 `_truncate_verify_output` do on their owners, while `_head_sha` / `_worktree_dirty_files` answer on the facade too
 -- each inventoried against
-`git.verification.probes` -- for the implementing, validating, in_review, and question leaves that still read them
-off `workflow`. The conflicts, documenting, fixing, and decomposition owners name the probe owner instead, so a mock
-for the HEAD or dirty read one of those stages takes lands on `git.verification.probes`. No
+`git.verification.probes` -- for historical callers. No stage reads them there: every stage owner that compares a HEAD
+watermark or refuses a dirty tree names the probe owner, so a mock for either read lands on
+`git.verification.probes`. No
 facade of the verification domain's own sits beside `git/verification/`: a check in
 `tests/git/verification/test_imports.py` asserts nothing resolves at `orchestrator.verify` or at the inventory and
 resolver-hook paths a second import site would be built from, so every verification name is defined on an owner and
@@ -1301,11 +1304,10 @@ resolver-hook paths a second import site would be built from, so every verificat
 the authenticated fetches and the push reach `git.commands` and `git.locks` plus their own token, session, lease, and
 refusal helpers directly -- so a patch that has to intercept the transport probe, the target-root lock, the session,
 or the remote-ref lease read targets `orchestrator.git.authentication`; `_authed_fetch` / `_authed_target_fetch` /
-`_push_branch` themselves stay patchable by name on `workflow`, which names the owner, and that is where the
-implementing and validating pushes and validating's pre-fix fetch read them -- but the
-squash rewrite and the conflicts and documenting stage owners read them off `git.authentication`, so a mock
-that has to intercept that force-push, either conflict fetch, the conflict pushes, the documenting prep or
-drift-unwind fetch, or a docs push targets the owner and not the facade. The
+`_push_branch` themselves stay patchable by name on `workflow`, which names the owner, for historical callers, but no
+stage reads them there. The squash rewrite and every stage fetch and push name `git.authentication`, so a mock that
+has to intercept that force-push, either conflict fetch, validating's pre-fix fetch, the documenting prep or
+drift-unwind fetch, or the implementing, validating, conflict, or docs push targets the owner and not the facade. The
 command names the facade carries are inventoried against those owners too -- the plain and hardened runners
 off `git.commands`, and no lock name at all --
 but no stage reads them there: documenting's drift reset, the divergence and
@@ -1333,12 +1335,13 @@ fetch, the new-commit probe, or the worktree path one of them runs against targe
 `workflow/engine/terminals.py` call `terminal._cleanup_question_worktree` / `terminal._cleanup_terminal_branch`
 directly — the terminal owner reading its branch name off `worktrees.paths` first —
 so a mock for either one lands on the owner even though both names stay forwarded — straight off that owner — on
-`workflow` for compatibility. The conflicts, documenting, fixing, and decomposition owners bind that way too --
-the PR-aware and plain creators, the new-commit probe, the branch and worktree-path derivations, and the whole
-decomposer path/creation/removal trio -- so a mock for the checkout one of those stages restores, names, or tears
-down lands on `git.worktrees.creation` / `.paths` / `.decomposition`. `_ensure_worktree`, `_ensure_pr_worktree`,
-`_has_new_commits`, and
-the decomposer helpers themselves stay patchable by name on `workflow`. That facade
+`workflow` for compatibility. Every other stage owner binds that way too --
+the PR-aware and plain creators, the new-commit probe, the branch and worktree-path derivations, the
+unpushed-commit probe, and the whole decomposer path/creation/removal trio -- so a mock for the checkout a stage
+restores, names, probes, or tears down lands on `git.worktrees.creation` / `.paths` / `.recovery` /
+`.decomposition`. `_ensure_worktree`, `_ensure_pr_worktree`, `_has_new_commits`, and
+the decomposer helpers themselves stay patchable by name on `workflow` for historical callers, but nothing in the
+tree reads them there. That facade
 inventories all fourteen worktree names it carries against those owners: the two sanitizers, the
 branch and worktree-path derivations, and the pinned/legacy resolver off `git.worktrees.paths`, the
 unpushed-commit probe off `recovery`, the two creators and the new-commit probe off `creation`, the decomposer's
@@ -1399,13 +1402,11 @@ base-sync names `workflow` publishes each name the owner that defines
 them -- the park reasons off `state`, the two pre-PR rebases and the in-progress probe off `pre_pr`, the base
 refresh and the per-worktree sync off `refresh`, and the PR-aware coordinator off `pr` -- resolved as
 lazily and with the same object identity as the rest of the inventory, so
-`patch.object(workflow, "_refresh_base_and_worktrees", ...)`, the seam the tick tests drive a pass through,
-still intercepts what the tick reads. Two of those names have no stage reader on the facade at all: the base rebase
-and the in-progress probe are named on `pre_pr` by the conflicts owners that run and settle one, so a mock for
-either lands on the base-sync owner. The park reasons are read on both surfaces -- `state` by the conflicts,
-documenting, and fixing owners that must leave an auto-rebase park alone, and `workflow` by the implementing,
-validating, and in_review owners that read the same vocabulary -- so which module a mock lands on follows the
-caller.
+a historical `patch.object(workflow, "_refresh_base_and_worktrees", ...)` still resolves to the same object. No
+in-tree caller reads any of the seven there, though: the tick names `refresh` for the opening pass, the conflicts
+owners name `pre_pr` for the base rebase and the in-progress probe, and every stage that must leave an auto-rebase
+park alone names `state` for the park reasons -- so a mock lands on the base-sync owner, and one left on the facade
+would let the real fetch, rebase, or vocabulary answer instead.
 The collaborators these owners reach *upward* are call-time imports: `persistence` binds the awaiting-human
 park from `workflow/engine/guards.py` -- not from its own `guards` sibling, which owns the publication
 refusals -- and the PR-comment poster straight off its owning module, and `publication` and `conflicts` bind
@@ -1486,10 +1487,11 @@ per-issue meter closes the same loop: the `UsageMetrics` the record attaches to 
 interrupted run that never persists simply undercounts. Its own helpers call each other in-module, and every stage
 leaf that spawns an agent, stamps a run, or folds its usage imports the owner, so a patch that has to intercept a
 tracked run, its exit record, the emitted skill events, or the per-issue counters targets
-`orchestrator.workflow.engine.usage`; `workflow` still resolves the whole group to the owner's exact object. The one
-name it deliberately reaches back through the facade for is `run_agent`: that is the seam the stage tests replace to
-drive a handler without a CLI, so `patch.object(workflow, "run_agent", ...)` stays the way to intercept the spawn
-itself. Everything after the spawn is fail-open — the record and trajectory guards live inside
+`orchestrator.workflow.engine.usage`; `workflow` still resolves the whole group to the owner's exact object. The
+spawn itself is named on `agents/runner.py`, the owner that defines it, and that call is the seam the stage tests
+replace to drive a handler without a CLI, so `patch.object(agents.runner, "run_agent", ...)` is what intercepts it --
+a mock left on the `workflow` facade would let a real CLI run. Everything after the spawn is fail-open — the record
+and trajectory guards live inside
 `analytics.record_agent_exit`, the skill emission carries its own here — because none of it is worth a run whose
 audit pair already fired; an exception out of the spawn is the deliberate exception and propagates.
 
@@ -1607,12 +1609,12 @@ retries. Either way each issue is wrapped in its own try/except, and the family 
 task so it holds a single worker slot and leaves the other `limit - 1` free for fanout. It reaches `dispatch.py` for
 the partition, the per-worker refetch, and both dispatch routes, so a patch aimed at a sweep helper or an execution
 mode targets `orchestrator.workflow.engine.tick`; `workflow` still resolves all eleven names to the owner's exact
-object, `tick` among them, which keeps `main._run_tick`'s `workflow.tick(...)` call unchanged. The one collaborator
-it deliberately reaches back through the facade for is `_refresh_base_and_worktrees`: that is the seam the tick tests
-replace to drive a pass without a git remote or a clone, so `patch.object(workflow, ...)` stays the way to intercept
-it. The skill-catalog emission is named on its owner instead — the tick imports `orchestrator/skills/catalog.py`, so
-`patch.object(catalog, "_emit_repo_skill_catalog", ...)` is what intercepts that pass.
-`workflow._emit_repo_skill_catalog` still resolves to the same owner object for historical callers.
+object, `tick` among them, which keeps `main._run_tick`'s `workflow.tick(...)` call unchanged. Both passes a test has
+to replace to drive a tick without a git remote or a clone are named on their own owners: the base refresh on
+`git/base_sync/refresh.py` and the catalog emission on `orchestrator/skills/catalog.py`, so
+`patch.object(refresh, "_refresh_base_and_worktrees", ...)` and
+`patch.object(catalog, "_emit_repo_skill_catalog", ...)` are what intercept them. Both names still resolve on
+`workflow` to the same owner objects for historical callers.
 
 Stage-private helpers stay private to the stage that owns them (`_bump_in_review_watermarks`,
 `_seed_legacy_in_review_watermarks`, `_emit_conflict_round_incremented`). A helper more than one stage reaches for is
@@ -3177,9 +3179,13 @@ attempt-and-retry behind it, over `session` for retirement and `worktree` for th
 committed tree to `publication` and everything else to `parks`. `state`, `models`, and `session_read` reach no engine
 owner, no GitHub client, and no worktree helper — `session_read` reads the configured agent spec and nothing else —
 which is why the pinned-state keys, the carriers, and the CLI-marker classifiers can be exercised without a client. So
-a patch that has to intercept a park, a push, a resume, or a session read targets the owner module. The seams that stay
-on the facade are the ones the stage does not own -- the worktree, git, and push helpers are read as `_wf` attributes
-at call time. No flat module sits beside these owners: the `orchestrator.stages` check in
+a patch that has to intercept a park, a push, a resume, or a session read targets the owner module. The helpers the
+stage does not own are named the same way: the branch and worktree names from `git/worktrees/paths.py`, the checkout
+and its commit probe from `git/worktrees/creation.py`, the unpushed-branch probe from `git/worktrees/recovery.py`, the
+HEAD and dirty reads from `git/verification/probes.py`, the push from `git/authentication.py`, the commit subject and
+the PR title builders from `git/publication/`, and the auto-rebase park reasons from `git/base_sync/state.py` — so a
+patch on any of those lands on the owner rather than on the facade, which would not intercept the call. No flat module
+sits beside these owners: the `orchestrator.stages` check in
 `tests/workflow/stages/test_imports.py` covers this stage too, so the dev session, the retry budget, and the park
 reasons are each answered on an owner alone — including for the sibling stages that borrow the resume, the session read,
 and the question / dirty-tree parks from here.
@@ -3221,9 +3227,11 @@ carriers, and the whole seed walk are decidable without one. So a patch that has
 verdict fan-out, or the watermark seed targets the owner module. This stage owns no dev machinery either: like
 documenting it imports the resume, the session read, and the question / dirty-tree parks from
 `workflow/stages/implementing/` directly, and the squash from `git/publication/squash.py`, so a patch on one of those
-lands on the owner rather than on the facade — which would not intercept the call. The seams that stay on the facade
-are the ones the stage does not own — the worktree, fetch, git, and push helpers plus base-sync's
-`_AUTO_REBASE_PARK_REASONS` are read as `_wf` attributes at call time. No flat module sits beside these owners: the
+lands on the owner rather than on the facade — which would not intercept the call. The helpers it does not own are
+named the same way — the branch and worktree names and the checkout from `git/worktrees/`, the HEAD and dirty reads
+from `git/verification/probes.py`, the fetch and push from `git/authentication.py`, the ahead/behind measurement from
+`git/publication/probes.py`, and `_AUTO_REBASE_PARK_REASONS` from `git/base_sync/state.py`, so a patch on any of them
+lands on the owner too. No flat module sits beside these owners: the
 `orchestrator.stages` check in `tests/workflow/stages/test_imports.py` covers this stage too, so the reviewer round, the
 parks, and the watermark seed are each answered on an owner alone. Six names resolve on `workflow` as well —
 `_post_user_content_change_result`, `_handle_dev_fix_result`, `_stranded_fix_unpushed`,
@@ -3245,9 +3253,10 @@ the carriers, the wire key, and both the ratchet and the legacy seed are decidab
 patch that has to intercept the scan, the route, the resume, or the ping targets the owner module.
 This stage owns no dev machinery either: the resume comes from `workflow/stages/implementing/` and the body-edit
 disposition from `workflow/stages/validating/drift_outcomes.py`, so a patch on one of those lands on the owner. The
-seams that stay on the facade are the ones the stage does not own — the worktree and HEAD helpers plus
-base-sync's `_AUTO_REBASE_PARK_REASONS`, which is what tells a park the rebase loop owns from one this stage may
-answer. No flat module sits beside these owners: the `orchestrator.stages` check in
+helpers it does not own are named the same way — the worktree names from `git/worktrees/paths.py`, the checkout from
+`git/worktrees/creation.py`, the HEAD read from `git/verification/probes.py`, and base-sync's
+`_AUTO_REBASE_PARK_REASONS` from `git/base_sync/state.py`, which is what tells a park the rebase loop owns from one
+this stage may answer. No flat module sits beside these owners: the `orchestrator.stages` check in
 `tests/workflow/stages/test_imports.py` covers this stage too, so the feedback scan, the fixing route, the drift resume,
 and the merge ping are each answered on an owner alone. Two names keep resolving on `workflow` as well:
 `_handle_in_review` for the stage-to-stage edge and `_comment_created_at`, whose one cross-package caller — fixing's
@@ -3324,9 +3333,11 @@ intercept the spawn, a park, the assessment, or a teardown targets the owner mod
 worktree machinery: the tracked spawn, the awaiting-human park, the prompt builders, the trusted conversation text, and
 the stderr diagnostics come from `workflow/engine/`, and `_cleanup_question_worktree` from
 `git/worktrees/terminal.py` — the last one matters because that name also resolves on `workflow`, so a
-mock left on the facade would let a real teardown run. The seams that stay on the facade are the ones the stage does not
-own — `_worktree_path`, `_ensure_worktree`, `_resolve_branch_name`, `_has_new_commits`, and `_worktree_dirty_files` are
-read as `_wf` attributes at call time. No flat module sits beside these owners: the `orchestrator.stages` check in
+mock left on the facade would let a real teardown run. The rest of the worktree surface is named the same way:
+`_worktree_path` and `_resolve_branch_name` on `git/worktrees/paths.py`, `_ensure_worktree` and `_has_new_commits` on
+`git/worktrees/creation.py`, and `_worktree_dirty_files` on `git/verification/probes.py` — the last two are what the
+read-only contract is decided by, so a mock for either has to land there. No flat module sits beside these owners: the
+`orchestrator.stages` check in
 `tests/workflow/stages/test_imports.py` covers this stage too, so the session lock, the parks, and the wire keys are
 each answered on an owner alone. `_handle_question` resolves on `workflow` as well, read straight off `handler`.
 

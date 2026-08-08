@@ -35,11 +35,11 @@ DUAL_BRANCH_ISSUE_NUMBER = 705
 
 class BranchHasUnpushedCommitsRealGitTest(unittest.TestCase):
     """Direct coverage for `_branch_has_unpushed_commits`. The stage-
-    handler tests mock this helper at the `workflow` facade so they
-    do not exercise the real `git rev-list` plumbing; this class
-    drives the helper against a real temp-backed clone so a
-    regression in the rev-list args, the lock acquisition, or the
-    branch-existence pre-check surfaces here.
+    handler tests mock this helper on this owner so they do not
+    exercise the real `git rev-list` plumbing; this class drives the
+    helper against a real temp-backed clone so a regression in the
+    rev-list args, the lock acquisition, or the branch-existence
+    pre-check surfaces here.
     """
 
     def test_returns_false_when_branch_does_not_exist(self) -> None:

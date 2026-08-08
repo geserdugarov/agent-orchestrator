@@ -47,6 +47,7 @@ patch = support.patch
 timedelta = support.timedelta
 timezone = support.timezone
 workflow = support.workflow
+_worktree_paths = support.worktree_paths
 
 
 class FixingAwaitingHumanResumeTest(unittest.TestCase, _FixingFixtureMixin):
@@ -216,7 +217,7 @@ class FixingTransientParkRecoveryTest(
         # does not matter because `_push_branch` is mocked.
         with (
             patch.object(config, DEBOUNCE_CONFIG, DEBOUNCE_SECONDS),
-            patch.object(workflow, WORKTREE_PATH, return_value=TEMP_ROOT),
+            patch.object(_worktree_paths, WORKTREE_PATH, return_value=TEMP_ROOT),
         ):
             mocks = self._run_fixing(
                 gh,
@@ -258,7 +259,7 @@ class FixingTransientParkRecoveryTest(
 
         with (
             patch.object(config, DEBOUNCE_CONFIG, DEBOUNCE_SECONDS),
-            patch.object(workflow, WORKTREE_PATH, return_value=TEMP_ROOT),
+            patch.object(_worktree_paths, WORKTREE_PATH, return_value=TEMP_ROOT),
         ):
             mocks = self._run_fixing(
                 gh,
@@ -303,7 +304,7 @@ class FixingTransientParkRecoveryTest(
 
         with (
             patch.object(config, DEBOUNCE_CONFIG, DEBOUNCE_SECONDS),
-            patch.object(workflow, WORKTREE_PATH, return_value=TEMP_ROOT),
+            patch.object(_worktree_paths, WORKTREE_PATH, return_value=TEMP_ROOT),
         ):
             mocks = self._run_fixing(
                 gh,
@@ -345,7 +346,7 @@ class FixingTransientParkRecoveryTest(
 
         with (
             patch.object(config, DEBOUNCE_CONFIG, DEBOUNCE_SECONDS),
-            patch.object(workflow, WORKTREE_PATH, return_value=TEMP_ROOT),
+            patch.object(_worktree_paths, WORKTREE_PATH, return_value=TEMP_ROOT),
         ):
             mocks = self._run_fixing(
                 gh,

@@ -10,6 +10,9 @@ from types import ModuleType
 from unittest import mock
 
 from tests import main_helpers as _helpers
+from tests.workflow_git_owners import seam_patch
+
+_REFRESH_BASE = "_refresh_base_and_worktrees"
 
 
 @dataclass(frozen=True)
@@ -41,11 +44,11 @@ class DispatchContext:
             self.main_module._run_tick(self.clients, self.scheduler)
             return reap
 
-    def run_real_and_capture_reap(self, workflow_module: ModuleType):
+    def run_real_and_capture_reap(self):
         for _repo_spec, github_client in self.clients:
             github_client.list_pollable_issues.return_value = iter([])
         with (
-            mock.patch.object(workflow_module, "_refresh_base_and_worktrees"),
+            seam_patch(_REFRESH_BASE),
             mock.patch.object(
                 self.scheduler,
                 "reap",

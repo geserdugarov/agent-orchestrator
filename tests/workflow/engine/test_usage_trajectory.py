@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Optional
 from unittest.mock import MagicMock, patch
 
-from orchestrator import analytics, workflow
+from orchestrator import analytics
 from orchestrator.agents import AgentResult
 from orchestrator.workflow.engine import usage as engine_usage
 
@@ -38,6 +38,7 @@ _OUTPUT_TOKENS_KEY = support._OUTPUT_TOKENS_KEY
 _PROMPT_FORWARDING_ISSUE_NUMBER = support._PROMPT_FORWARDING_ISSUE_NUMBER
 _RESULT_KEY = support._RESULT_KEY
 _RUN_AGENT_ATTR = support._RUN_AGENT_ATTR
+_agent_runner = support.agent_runner
 _SKILL_KEY = support._SKILL_KEY
 _STAGE_KEY = support._STAGE_KEY
 _TRACK_SKILLS_ATTR = support._TRACK_SKILLS_ATTR
@@ -123,7 +124,7 @@ def _run_trajectory(
     with patch.object(analytics, _ANALYTICS_PATH_ATTR, analytics_path), \
             patch.object(analytics, _TRAJECTORY_PATH_ATTR, trajectory_path), \
             patch.object(analytics, _TRACK_SKILLS_ATTR, False), \
-            patch.object(workflow, _RUN_AGENT_ATTR) as run_mock:
+            patch.object(_agent_runner, _RUN_AGENT_ATTR) as run_mock:
         run_mock.return_value = AgentResult(
             session_id="sess-traj",
             last_message="",
@@ -158,7 +159,7 @@ class TrajectoryRecordingTest(unittest.TestCase):
         record_mock = MagicMock(return_value=None)
         with patch.object(
             engine_usage.recording, "record_agent_exit", record_mock,
-        ), patch.object(workflow, _RUN_AGENT_ATTR) as run_mock:
+        ), patch.object(_agent_runner, _RUN_AGENT_ATTR) as run_mock:
             run_mock.return_value = AgentResult(
                 session_id="s", last_message="", exit_code=0,
                 timed_out=False, stdout="", stderr="",
@@ -235,7 +236,7 @@ class TrajectoryRecordingTest(unittest.TestCase):
                     "parse_agent_trajectory",
                     side_effect=RuntimeError("boom"),
                 ),
-                patch.object(workflow, _RUN_AGENT_ATTR) as run_mock,
+                patch.object(_agent_runner, _RUN_AGENT_ATTR) as run_mock,
                 self.assertLogs(analytics.log, level="ERROR"),
             ):
                 run_mock.return_value = AgentResult(
@@ -270,7 +271,7 @@ def _drive_trajectory_sink(
     analytics_path: Path,
 ) -> None:
     with patch.object(analytics, _ANALYTICS_PATH_ATTR, analytics_path), \
-            patch.object(workflow, _RUN_AGENT_ATTR) as run_mock:
+            patch.object(_agent_runner, _RUN_AGENT_ATTR) as run_mock:
         run_mock.return_value = AgentResult(
             session_id="sess-traj-guard",
             last_message="",

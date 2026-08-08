@@ -26,6 +26,9 @@ from __future__ import annotations
 from github.Issue import Issue
 
 from orchestrator import config
+from orchestrator.git import authentication as _authentication
+from orchestrator.git.verification import probes as _verification_probes
+from orchestrator.git.worktrees import paths as _worktree_paths
 from orchestrator.github.pinned_state import PinnedState
 from orchestrator.workflow.stages.validating import dev_fix as _dev_fix
 from orchestrator.workflow.stages.validating import state as _state
@@ -34,13 +37,11 @@ from orchestrator.workflow.stages.validating import state as _state
 def _recover_failed_push(
     spec: config.RepoSpec, issue: Issue, state: PinnedState,
 ) -> str:
-    from orchestrator import workflow as _wf
-
-    worktree = _wf._worktree_path(spec, issue.number)
+    worktree = _worktree_paths._worktree_path(spec, issue.number)
     if not worktree.exists():
         return _state._OUTCOME_STUCK
-    branch = _wf._resolve_branch_name(state, spec, issue.number)
-    if not _wf._push_branch(spec, worktree, branch):
+    branch = _worktree_paths._resolve_branch_name(state, spec, issue.number)
+    if not _authentication._push_branch(spec, worktree, branch):
         return _state._OUTCOME_STUCK
     _dev_fix._bump_review_round(state)
     return _state._OUTCOME_PUSHED
@@ -49,20 +50,21 @@ def _recover_failed_push(
 def _recover_timed_out_fix(
     spec: config.RepoSpec, issue: Issue, state: PinnedState,
 ) -> str:
-    from orchestrator import workflow as _wf
-
-    worktree = _wf._worktree_path(spec, issue.number)
-    if not worktree.exists() or _wf._worktree_dirty_files(worktree):
+    worktree = _worktree_paths._worktree_path(spec, issue.number)
+    if (
+        not worktree.exists()
+        or _verification_probes._worktree_dirty_files(worktree)
+    ):
         return _state._OUTCOME_STUCK
     before_sha = state.get(_state._PRE_DEV_FIX_SHA)
     if not isinstance(before_sha, str):
         return _state._OUTCOME_STUCK
-    current_sha = _wf._head_sha(worktree)
+    current_sha = _verification_probes._head_sha(worktree)
     if not current_sha or current_sha == before_sha:
         state.set(_state._PRE_DEV_FIX_SHA, None)
         return "cleared"
-    branch = _wf._resolve_branch_name(state, spec, issue.number)
-    if not _wf._push_branch(spec, worktree, branch):
+    branch = _worktree_paths._resolve_branch_name(state, spec, issue.number)
+    if not _authentication._push_branch(spec, worktree, branch):
         return _state._OUTCOME_STUCK
     state.set(_state._PRE_DEV_FIX_SHA, None)
     _dev_fix._bump_review_round(state)

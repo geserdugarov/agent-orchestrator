@@ -29,7 +29,14 @@ from pathlib import Path
 from github.Issue import Issue
 
 from orchestrator import config
+from orchestrator._workflow_state import log
 from orchestrator.agents import AgentResult
+from orchestrator.git import authentication as _authentication
+from orchestrator.git.publication import (
+    probes as _publication_probes,
+    titles as _titles,
+)
+from orchestrator.git.worktrees import paths as _worktree_paths
 from orchestrator.github import client as _client, pinned_state as _pinned_state
 from orchestrator.workflow.engine import comments as _comments, guards as _guards
 from orchestrator.workflow.stages.implementing import (
@@ -77,11 +84,9 @@ def _derive_pr_title(spec: config.RepoSpec, issue: Issue, wt: Path) -> str:
     recognizable `<type>:` prefix, one is inferred from recent base-branch
     history (`_infer_subject_prefix`) and applied to the issue title.
     """
-    from orchestrator import workflow as _wf
-
-    first_subject = _wf._first_commit_subject(spec, wt)
-    fallback_prefix = _wf._infer_subject_prefix(spec, wt, issue)
-    return _wf._pr_title_from_commit_or_issue(
+    first_subject = _publication_probes._first_commit_subject(spec, wt)
+    fallback_prefix = _titles._infer_subject_prefix(spec, wt, issue)
+    return _titles._pr_title_from_commit_or_issue(
         issue, first_subject, fallback_prefix,
     )
 
@@ -120,11 +125,9 @@ def _reuse_or_open_pr(
     Opening a new PR posts the ":sparkles: PR opened" comment and emits the
     `pr_opened` event; reuse only logs.
     """
-    from orchestrator import workflow as _wf
-
     pr = gh.find_open_pr(branch=work.branch, base=spec.base_branch)
     if pr is not None:
-        _wf.log.info(
+        log.info(
             "issue=#%s reusing existing PR #%d for %s",
             issue.number, pr.number, work.branch,
         )
@@ -198,11 +201,9 @@ def _on_commits(
     state: _pinned_state.PinnedState,
     agent_result: AgentResult,
 ) -> None:
-    from orchestrator import workflow as _wf
-
-    wt = _wf._worktree_path(spec, issue.number)
-    branch = _wf._resolve_branch_name(state, spec, issue.number)
-    if not _wf._push_branch(spec, wt, branch):
+    wt = _worktree_paths._worktree_path(spec, issue.number)
+    branch = _worktree_paths._resolve_branch_name(state, spec, issue.number)
+    if not _authentication._push_branch(spec, wt, branch):
         # Park on awaiting_human like the timeout/question paths. Otherwise the
         # worktree's commits keep _has_new_commits() true, so every poll would
         # re-enter _on_commits() and re-comment indefinitely until a human acts.

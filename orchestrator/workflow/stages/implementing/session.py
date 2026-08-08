@@ -29,6 +29,7 @@ from typing import Optional
 from github.Issue import Issue
 
 from orchestrator import config
+from orchestrator._workflow_state import log
 from orchestrator.agents import AgentResult
 from orchestrator.github.client import GitHubClient
 from orchestrator.github.pinned_state import PinnedState
@@ -175,8 +176,6 @@ def _resolve_dev_session_for_resume(
     caller and its returned id persisted -- and is NOT charged against the
     resume budget, whose checks require a non-None session id.
     """
-    from orchestrator import workflow as _wf
-
     session = _models._DevSession(*_session_read._read_dev_session(state))
     silent_count = int(state.get(_state._SILENT_PARK_COUNT) or 0)
     resume_count = int(state.get(_state._DEV_RESUME_COUNT) or 0)
@@ -184,7 +183,7 @@ def _resolve_dev_session_for_resume(
         session.session_id, resume_count, silent_count,
     )
     if retirement_reason is not None:
-        _wf.log.info(
+        log.info(
             "issue=#%d retiring dev session %r (%s); starting fresh",
             issue.number, session.session_id, retirement_reason,
         )

@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Optional
 from unittest.mock import patch
 
-from orchestrator import analytics, workflow
+from orchestrator import analytics
 from orchestrator.agents import AgentResult
 from orchestrator.observability.usage import metrics as _usage_metrics
 from orchestrator.workflow.engine import usage as engine_usage
@@ -39,6 +39,7 @@ _OUTPUT_TOKENS_KEY = support._OUTPUT_TOKENS_KEY
 _REPORTED_COST_USD = support._REPORTED_COST_USD
 _REVIEW_SKILL = support._REVIEW_SKILL
 _RUN_AGENT_ATTR = support._RUN_AGENT_ATTR
+_agent_runner = support.agent_runner
 _SKILL_KEY = support._SKILL_KEY
 _SKILL_OUTPUT_TOKENS = support._SKILL_OUTPUT_TOKENS
 _TRACK_SKILLS_ATTR = support._TRACK_SKILLS_ATTR
@@ -64,7 +65,7 @@ def _run_usage(
     with patch.object(analytics, _ANALYTICS_PATH_ATTR, analytics_path), \
             patch.object(analytics, _TRAJECTORY_PATH_ATTR, None), \
             patch.object(analytics, _TRACK_SKILLS_ATTR, track), \
-            patch.object(workflow, _RUN_AGENT_ATTR) as run_mock:
+            patch.object(_agent_runner, _RUN_AGENT_ATTR) as run_mock:
         run_mock.return_value = AgentResult(
             session_id="sess-usage",
             last_message="",

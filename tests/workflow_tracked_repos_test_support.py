@@ -8,6 +8,8 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from orchestrator import config, workflow
+from orchestrator.agents import runner as _agent_runner
+from orchestrator.git.worktrees import creation as _worktree_creation
 
 from tests import fakes as _fakes
 from tests import workflow_helpers as _helpers
@@ -133,8 +135,8 @@ def _resume_prompt(github, issue, *, threshold: int) -> str:
     with (
         _multi_repo(),
         patch.object(config, "DEV_SESSION_MAX_RESUMES", threshold),
-        patch.object(workflow, "_ensure_worktree", _fake_worktree),
-        patch.object(workflow, _RUN_AGENT_ATTR, run_mock),
+        patch.object(_worktree_creation, "_ensure_worktree", _fake_worktree),
+        patch.object(_agent_runner, _RUN_AGENT_ATTR, run_mock),
     ):
         workflow._resume_dev_with_text(
             github,

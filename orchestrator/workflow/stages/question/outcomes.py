@@ -26,6 +26,9 @@ from __future__ import annotations
 from orchestrator import config
 from orchestrator._workflow_state import log
 from orchestrator.agents import AgentResult
+from orchestrator.git.verification import probes as _verification_probes
+from orchestrator.git.worktrees import creation as _worktree_creation
+from orchestrator.git.worktrees import paths as _worktree_paths
 from orchestrator.workflow.engine import guards as _guards
 from orchestrator.workflow.engine import messages as _messages
 from orchestrator.workflow.engine import usage as _usage
@@ -62,13 +65,13 @@ def _assess_question_worktree(
     interruption so a killed run that changed the tree still leaves an
     inspection target for the operator.
     """
-    from orchestrator import workflow as _wf
-
-    worktree = _wf._worktree_path(run.spec, run.issue.number)
-    if _wf._has_new_commits(run.spec, worktree):
+    worktree = _worktree_paths._worktree_path(run.spec, run.issue.number)
+    if _worktree_creation._has_new_commits(run.spec, worktree):
         return _models._QuestionOutcome(_state._QUESTION_COMMITS, True)
 
-    dirty_files = tuple(_wf._worktree_dirty_files(worktree))
+    dirty_files = tuple(
+        _verification_probes._worktree_dirty_files(worktree),
+    )
     if dirty_files:
         return _models._QuestionOutcome(
             _state._QUESTION_DIRTY, True, dirty_files=dirty_files,

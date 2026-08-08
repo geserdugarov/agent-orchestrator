@@ -12,12 +12,12 @@ of these owners, and callers import the owner they need directly, so this
 initializer binds nothing and importing one owner never drags the others in.
 
 No facade of this domain's own sits beside the package. The ``workflow`` hub
-publishes a slice of these names for the callers that read them off it: the
-HEAD and dirty-file probes, both inventoried against ``probes``. Every other
-name, the result model, the truncation pass, and the command runner among
-them, answers on its owner alone. The hub resolves the
+publishes a slice of these names for callers outside the tree: the HEAD and
+dirty-file probes, both inventoried against ``probes``. Every other name, the
+result model, the truncation pass, and the command runner among them, answers
+on its owner alone. The hub resolves the
 owner's own object and caches it, so the sites share identity but not a later
-patch: a test intercepting one of these helpers targets the module its caller
-reads it off -- ``workflow`` for the stage leaves, and ``runner`` for the
-validating approval gate that spends the verify run.
+patch, and a test intercepting one of these helpers targets the owner --
+``probes`` for the stage leaves that compare a HEAD watermark or refuse a dirty
+tree, ``runner`` for the validating approval gate that spends the verify run.
 """

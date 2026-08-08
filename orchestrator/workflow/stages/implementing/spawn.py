@@ -28,7 +28,13 @@ from typing import Optional
 from github.Issue import Issue
 
 from orchestrator import config
+from orchestrator._workflow_state import log
 from orchestrator.agents import AgentResult
+from orchestrator.git.verification import probes as _verification_probes
+from orchestrator.git.worktrees import (
+    creation as _worktree_creation,
+    paths as _worktree_paths,
+)
 from orchestrator.github.client import GitHubClient
 from orchestrator.github.pinned_state import PinnedState
 from orchestrator.workflow.engine import (
@@ -97,16 +103,14 @@ def _spawn_implementer(
 def _prepare_active_dev_run(
     gh: GitHubClient, spec: config.RepoSpec, issue: Issue, state: PinnedState,
 ) -> Optional[_models._PreparedDevRun]:
-    from orchestrator import workflow as _wf
-
-    worktree = _wf._ensure_worktree(
+    worktree = _worktree_creation._ensure_worktree(
         spec,
         issue.number,
-        branch=_wf._resolve_branch_name(state, spec, issue.number),
+        branch=_worktree_paths._resolve_branch_name(state, spec, issue.number),
     )
-    before_sha = _wf._head_sha(worktree)
-    if _wf._has_new_commits(spec, worktree):
-        _wf.log.info(
+    before_sha = _verification_probes._head_sha(worktree)
+    if _worktree_creation._has_new_commits(spec, worktree):
+        log.info(
             "issue=#%d skipping agent; worktree already has commits",
             issue.number,
         )
@@ -137,14 +141,13 @@ def _prepare_dev_run(
     to tell a commit produced by THIS run from carried-over commits already on
     the branch.
     """
-    from orchestrator import workflow as _wf
-
     if state.get(_state._AWAITING_HUMAN):
         prepared = _drift_preflight._prepare_awaiting_dev_run(gh, spec, issue, state)
     else:
         prepared = _prepare_active_dev_run(gh, spec, issue, state)
     if prepared is not None:
         state.set(
-            _state._BRANCH, _wf._resolve_branch_name(state, spec, issue.number),
+            _state._BRANCH,
+            _worktree_paths._resolve_branch_name(state, spec, issue.number),
         )
     return prepared

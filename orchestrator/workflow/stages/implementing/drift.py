@@ -27,6 +27,8 @@ from typing import Optional, Tuple
 from github.Issue import Issue
 
 from orchestrator import agents as _agents, config
+from orchestrator.git.verification import probes as _verification_probes
+from orchestrator.git.worktrees import paths as _worktree_paths
 from orchestrator.github import client as _client, pinned_state as _pinned_state
 from orchestrator.workflow.engine import (
     comments as _comments,
@@ -92,10 +94,8 @@ class _ImplementingDriftRun:
 def _run_implementing_drift_resume(
     gh: _client.GitHubClient, spec: config.RepoSpec, issue: Issue, state: _pinned_state.PinnedState,
 ) -> _ImplementingDriftRun:
-    from orchestrator import workflow as _wf
-
     worktree = _worktree._ensure_resume_worktree(spec, issue, state)
-    before_sha = _wf._head_sha(worktree)
+    before_sha = _verification_probes._head_sha(worktree)
     followup = _engine_drift._build_user_content_change_prompt(
         issue, _comments._recent_comments_text(issue),
     )
@@ -108,10 +108,8 @@ def _run_implementing_drift_resume(
 def _implementing_drift_run(
     before_sha: Optional[str], resumed: Tuple[Path, _agents.AgentResult, bool],
 ) -> _ImplementingDriftRun:
-    from orchestrator import workflow as _wf
-
     worktree, agent_result, paused = resumed
-    after_sha = _wf._head_sha(worktree)
+    after_sha = _verification_probes._head_sha(worktree)
     return _ImplementingDriftRun(
         worktree=worktree,
         agent_result=agent_result,
@@ -166,8 +164,6 @@ def _dispose_implementing_drift(
 def _resume_dev_on_implementing_drift(
     gh: _client.GitHubClient, spec: config.RepoSpec, issue: Issue, state: _pinned_state.PinnedState,
 ) -> None:
-    from orchestrator import workflow as _wf
-
     _comments._post_issue_comment(
         gh, issue, state,
         ":pencil2: issue body changed; resuming dev session with "
@@ -176,5 +172,8 @@ def _resume_dev_on_implementing_drift(
     _engine_drift._mark_drift_comments_consumed(gh, issue, state)
     drift = _run_implementing_drift_resume(gh, spec, issue, state)
     state.set("last_agent_action_at", _usage._now_iso())
-    state.set(_state._BRANCH, _wf._resolve_branch_name(state, spec, issue.number))
+    state.set(
+        _state._BRANCH,
+        _worktree_paths._resolve_branch_name(state, spec, issue.number),
+    )
     _dispose_implementing_drift(gh, spec, issue, state, drift)
