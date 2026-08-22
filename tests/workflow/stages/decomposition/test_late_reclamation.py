@@ -53,6 +53,18 @@ _UNTYPED_KIND = "unknown-to-this-binary"
 
 _STATE_CLOSED = "closed"
 
+_KIND_SNAPSHOT = "snapshot_ref"
+
+# Three refs that are in the namespace, are shaped exactly like this one's, and
+# belong to somebody else: another issue's, another cycle of this issue's, and
+# another generation of this cycle's. Every one of them names the same commit,
+# because a lineage is cut from one candidate.
+_FOREIGN_REFS = (
+    "refs/orchestrator/late-split/issue-99/cycle-3/gen-1",
+    "refs/orchestrator/late-split/issue-41/cycle-4/gen-1",
+    "refs/orchestrator/late-split/issue-41/cycle-3/gen-2",
+)
+
 
 class _RealShapedChild:
     """A closed consumer in the shape GitHub actually hands one back.
@@ -178,7 +190,13 @@ class UmbrellaReclamationTest(_PatchedWorkflowMixin, unittest.TestCase):
 
 
 class UnprovableObligationTest(_PatchedWorkflowMixin, unittest.TestCase):
-    """Nothing this orchestrator cannot read lets an umbrella close."""
+    """Nothing unreadable closes an umbrella, and nothing foreign is deleted.
+
+    Two halves of the same discipline: an obligation this binary cannot read
+    holds the terminal open, and a target it cannot prove is this issue's own
+    is refused before the remote is touched -- which then holds the terminal
+    open too, because a refusal is still an obligation.
+    """
 
     def test_an_opaque_ledger_holds_the_terminal(self) -> None:
         # The entries it could not type are still obligations, and the typed
@@ -192,6 +210,35 @@ class UnprovableObligationTest(_PatchedWorkflowMixin, unittest.TestCase):
 
         self.assertFalse(seeded.parent.closed)
         self.assertEqual(seeded.github.deleted_remote_branches, [])
+
+    def test_a_foreign_identity_is_never_deleted(self) -> None:
+        # The transport proves the namespace and the commit, and neither is
+        # identity: every generation in a lineage was cut from one candidate
+        # and names the same SHA, so a hand-edited entry pointing at a
+        # sibling's ref would pass both tests and destroy the only copy of
+        # exactly what that sibling was told to reuse.
+        for foreign in _FOREIGN_REFS:
+            with self.subTest(ref=foreign):
+                seeded = _retaining()
+                github = seeded.github
+                _seed_resources(github, [{
+                    "kind": _KIND_SNAPSHOT,
+                    "target": foreign,
+                    "state": STATE_RETAINED,
+                }])
+                deleted = RecordedDelete(
+                    _snapshot_refs.SnapshotOutcome.DELETED,
+                )
+
+                held = patch.object(
+                    _snapshot_refs, "delete_snapshot_ref", deleted,
+                )
+                with self.assertLogs(WORKFLOW_LOG, level="ERROR"), held:
+                    walk_umbrella(self, seeded)
+
+                self.assertEqual(deleted.refs, [])
+                self.assertEqual(resource_states(github)[foreign], STATE_FAILED)
+                self.assertFalse(seeded.parent.closed)
 
     def test_a_damaged_identity_holds_the_terminal(self) -> None:
         # A record whose cycle identity cannot be read still writes what it

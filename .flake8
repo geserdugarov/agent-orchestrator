@@ -484,6 +484,18 @@
 # failed to bring. Splitting them would put that rule in two places to drift
 # apart, so WPS202 is waived.
 #
+# orchestrator/git/worktrees/paths.py owns every name one issue's work is
+# addressed by -- the slug sanitizers the filesystem and a git ref each need,
+# the worktree roots and paths, the branch name a fresh issue is published
+# under, the legacy flat one an in-flight issue is still on, the pair of them a
+# caller about to DELETE a recorded branch has to match exactly, and the
+# resolver that picks between them -- so it carries 2 members past the WPS202
+# ceiling of 7. They are one fact each and they are the same fact: a name this
+# orchestrator gives an issue. Splitting them would put the legacy spelling in
+# two modules, which is precisely the drift that would let a publication write
+# a branch the reclamation then refuses to recognize as its own, so WPS202 is
+# waived.
+#
 # orchestrator/git/verification/probes.py owns every read over what an agent
 # run left in a worktree -- the HEAD snapshot and the question of whether HEAD
 # is the branch a caller is about to publish to, the status form and the path
@@ -829,4 +841,5 @@ per-file-ignores =
     orchestrator/git/authentication.py:WPS202
     orchestrator/git/verification/probes.py:WPS202
     orchestrator/git/worktrees/creation.py:WPS202
+    orchestrator/git/worktrees/paths.py:WPS202
     orchestrator/github/pull_requests.py:WPS214

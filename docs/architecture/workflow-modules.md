@@ -209,12 +209,13 @@ workflow/                   publishes the two label vocabularies, `guard_transit
                             dep-graph walk, so a child that ended while the supersession was parked is left where
                             it is -- and the branch cleanup recorded as owed and attempted after
       late_cleanup.py       what a split still owes a remote once its children are running: the branch obligations
-                            that are not reconciled and the refs still held, the namespace-and-issue check a target
-                            has to pass before anything is deleted by it, the rule that decides whether a ref's
-                            recorded consumers have all ended, the two deletes -- the branch one taking the remote
-                            ref, the checkout, and the local ref, and proving all three gone -- and the one write
-                            that records either answer, what may not be left behind (an opaque ledger and a damaged
-                            identity included), and the question the umbrella's terminal asks before it closes
+                            that are not reconciled and the refs still held, the exact-name check a branch and a
+                            snapshot ref each have to pass before anything is deleted by it, the rule that decides
+                            whether a ref's recorded consumers have all ended, the two deletes -- the branch one
+                            taking the remote ref, the checkout, and the local ref, and proving all three gone --
+                            and the one write that records either answer, what may not be left behind (an opaque
+                            ledger and a damaged identity included), and the question the umbrella's terminal asks
+                            before it closes
       late_settlement.py    what a guarded verdict earns: the announcement a question owes the issue, the exemption
                             naming the measured commit, the plan-PR hold released and the pull request reconciled
                             against that commit in any state -- with a settled pointer dropped rather than handed on

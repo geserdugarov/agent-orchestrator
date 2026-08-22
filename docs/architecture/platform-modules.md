@@ -172,8 +172,8 @@ orchestrator/
       process.py        one command's group spawn / kill / drain and its verdict
       runner.py         the stripped child environment and the fail-fast command sequencing
     worktrees/          the per-issue checkouts an agent runs in
-      paths.py          slug sanitization, git-ref-safe branch segments, and path, branch, and pinned/legacy
-                        resolution
+      paths.py          slug sanitization, git-ref-safe branch segments, path, branch, and pinned/legacy
+                        resolution, and the exact set of names one issue's branch can be published under
       creation.py       issue and PR worktree creation, stale-worktree reuse and the probe it turns on, and the one
                         move that re-anchors a reused checkout onto a PR head or its merged base
       cleanup.py        lock-held worktree removal and local branch deletion, each behind its best-effort boundary,

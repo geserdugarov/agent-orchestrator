@@ -39,14 +39,19 @@ from tests.workflow.stages.decomposition.late_cleanup_support import (
     walk_umbrella,
 )
 
-# Three targets a ledger entry could name and this generation does not own: an
-# unprotected default branch, another issue's branch in the same namespace, and
-# one outside the namespace altogether.
+# Four targets a ledger entry could name and this issue is not published under:
+# an unprotected default branch, another issue's branch in the same namespace,
+# one outside the namespace altogether, and -- the one a prefix-and-tail
+# reading lets through -- another repository's branch for an issue whose number
+# happens to match. Two specs sharing a `target_root` is what slug-namespacing
+# exists for, so that last one is the ordinary shape, not a contrived one.
 _MAIN = "main"
 
 _ANOTHER_ISSUE = "orchestrator/geserdugarov__agent-orchestrator/issue-99"
 
 _NOT_OURS = "feature/issue-41"
+
+_ANOTHER_REPOSITORY = "orchestrator/other-repository/issue-41"
 
 
 class _UmbrellaCleanupCase(_PatchedWorkflowMixin):
@@ -168,7 +173,7 @@ class UmbrellaCleanupRefusalTest(_UmbrellaCleanupCase, unittest.TestCase):
         # destructive call, so a hand-edited entry naming an unprotected
         # branch must delete nothing -- and must not let the umbrella close
         # over an obligation nobody settled.
-        for foreign in (_MAIN, _ANOTHER_ISSUE, _NOT_OURS):
+        for foreign in (_MAIN, _ANOTHER_ISSUE, _NOT_OURS, _ANOTHER_REPOSITORY):
             with self.subTest(branch=foreign):
                 seeded = split_umbrella(
                     LateResourceState.PENDING, branch=foreign,

@@ -496,10 +496,14 @@ refresh treats as a pre-PR tree and goes on merging into. The local half is *ver
 read taken afterwards, and that read fails closed. Taking the checkout down at all is safe here for one reason: the
 snapshot was created and proved before any of this, so the commit it holds is no longer the only copy.
 
-Only a branch this generation owns is ever deleted. The target comes off a ledger a human can edit and is spent on a
-destructive call, so it is checked against the orchestrator namespace and against this issue's own number before the
-remote is touched; anything else is recorded `failed` and left for a human, which is the one answer that neither
-deletes somebody's branch nor quietly forgets the obligation.
+Only a branch this issue is actually published under is ever deleted. The target comes off a ledger a human can edit
+and is spent on a destructive call, so it has to *be* one of the two names this spec gives this issue — the
+slug-namespaced form and the legacy flat one — before the remote is touched. A namespace-and-tail reading is not
+enough: `orchestrator/other-repository/issue-41` is inside `orchestrator/` and ends in this issue's tail while
+belonging to another repository entirely, and two specs sharing one `target_root` is the case slug-namespacing
+exists for. The number is taken from the issue being walked rather than from the record, so a hand-edited identity
+cannot aim the delete either. Anything that does not match is recorded `failed` and left for a human, which is the
+one answer that neither deletes somebody's branch nor quietly forgets the obligation.
 
 What the obligation **does** block is the umbrella's own terminal completion, and the retry lives there rather than
 in the transaction — an issue that has become an umbrella never reaches the transaction again, so nothing else would
@@ -518,6 +522,13 @@ not type. Deletion is idempotent because an absent ref is a success, so the cras
 and the write that would have recorded it costs one request on the retry — and it is named against the commit the
 split preserved rather than against whatever a fresh read observes, so a ref somebody re-pointed is a mismatch left
 for a human instead of the one blind write in the whole namespace, aimed at destruction.
+
+The ref that gets deleted is re-derived, never taken on the ledger's word: it has to equal the name the namespace
+mints for this issue, this cycle, and this generation. The transport's own checks are the namespace and the commit,
+and neither is identity — every generation of every issue in a lineage was cut from the same candidate and so names
+the same SHA, which means a hand-edited entry pointing at a sibling's ref would satisfy both and destroy the only
+copy of exactly what that sibling was told to reuse. A target that is not this generation's own is recorded `failed`
+and holds the terminal open, the same answer a foreign branch gets.
 
 `retained` never blocks the terminal and `failed` always does, and that asymmetry is the safety argument. A ref kept
 because a consumer could not be proved terminal is one a later sweep settles — the closed-owner sweep and the

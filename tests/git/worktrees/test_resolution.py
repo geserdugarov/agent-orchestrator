@@ -1,6 +1,6 @@
 # Copyright 2026 Geser Dugarov
 # SPDX-License-Identifier: Apache-2.0
-"""Pinned and legacy branch resolution for in-flight issues."""
+"""Pinned and legacy branch resolution, and the names an issue can be on."""
 
 from __future__ import annotations
 
@@ -139,6 +139,39 @@ class ResolveBranchNamePrMigrationTest(unittest.TestCase):
         self.assertEqual(
             paths._resolve_branch_name(state, spec, 7),
             NAMESPACED_BRANCH,
+        )
+
+
+class IssueBranchNamesTest(unittest.TestCase):
+    """Every name this orchestrator could have published one issue under.
+
+    Asked by callers that DELETE a recorded branch, so what matters is that
+    the answer is the exact pair and nothing shaped like it: another
+    repository's branch for an issue with the same number is in the same
+    `orchestrator/` namespace and ends in the same `/issue-<n>` tail, and two
+    specs sharing a `target_root` is the case namespacing exists for.
+    """
+
+    def test_it_names_the_current_and_legacy_forms(self) -> None:
+        self.assertEqual(
+            paths._issue_branch_names(_migration_spec(), 7),
+            (NAMESPACED_BRANCH, LEGACY_BRANCH),
+        )
+
+    def test_another_repos_branch_is_not_listed(self) -> None:
+        names = paths._issue_branch_names(_migration_spec(), 7)
+
+        self.assertNotIn("orchestrator/other-repository/issue-7", names)
+
+    def test_the_resolver_uses_a_name_it_lists(self) -> None:
+        # The two are one fact: a branch the resolver would publish this issue
+        # on has to be one the ownership test recognizes, or the reclamation
+        # refuses to delete what the publication just made.
+        spec = _migration_spec()
+
+        self.assertIn(
+            paths._resolve_branch_name(_state(), spec, 7),
+            paths._issue_branch_names(spec, 7),
         )
 
 

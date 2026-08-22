@@ -481,7 +481,11 @@ def _reclaimed_branch(context: _LateContext, branch: str) -> None:
     accretes merges onto a branch nobody will publish.
     """
     context.generation = _late_cleanup._reclaim_branch(
-        context.gh, context.spec, context.generation, branch,
+        context.gh,
+        context.spec,
+        context.issue.number,
+        context.generation,
+        branch,
     )
     deleted = branch not in _late_cleanup._owed_branches(context.generation)
     if not deleted:

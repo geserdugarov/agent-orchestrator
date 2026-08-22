@@ -25,12 +25,19 @@ rather than an exit code: `git worktree remove` and `git branch -D` are
 best-effort by design, and a caller that has to RECORD the teardown asks
 afterwards instead of trusting them.
 
-**Only a branch this generation owns is deleted.** The target comes off a
-ledger a human can edit, and the entry is spent on a destructive call, so it
-is checked against the namespace and the issue it must belong to before the
-remote is touched at all. A target that is not one is recorded `failed` and
-holds the terminal open for a human, which is the one answer that neither
-deletes somebody's branch nor quietly forgets the obligation.
+**Only this issue's own targets are deleted.** Both come off a ledger a human
+can edit and both are spent on destructive calls, so each is matched against
+what this issue's own record would name -- exactly, not by shape. A branch has
+to BE one of the two names this spec publishes this issue under, because
+`orchestrator/<anything>/issue-41` is also another repository's branch for its
+own issue 41 and two specs sharing a `target_root` is the ordinary case; a
+snapshot ref has to BE the one the namespace mints for this issue, cycle, and
+generation, because every generation in a lineage names the same commit and so
+namespace-and-SHA is not identity. The issue number is taken from the issue
+being walked rather than from the record, so a hand-edited identity cannot aim
+either delete. A target that does not match is recorded `failed` and holds the
+terminal open for a human, which is the one answer that neither deletes
+somebody else's work nor quietly forgets the obligation.
 
 **The snapshot is not.** A ref may be deleted only once every recorded direct
 consumer is terminal, and all-children-resolved is exactly when that becomes
@@ -69,6 +76,7 @@ from types import MappingProxyType
 from github.Issue import Issue
 
 from orchestrator import config
+from orchestrator.git.snapshots import namespace as _namespace
 from orchestrator.git.snapshots import refs as _snapshot_refs
 from orchestrator.git.worktrees import cleanup as _worktree_cleanup
 from orchestrator.git.worktrees import paths as _worktree_paths
@@ -113,13 +121,6 @@ _FAILURES = MappingProxyType({
 # snapshot again. `done` covers a nested split too: a child that reached it has
 # published, so its own descendants are past needing the ancestor.
 _TERMINAL_CHILD = frozenset((_state._DONE, "rejected"))
-
-# The namespace every branch this orchestrator publishes is inside, and the
-# tail one belonging to a given issue ends with. Together they are what a
-# recorded target has to satisfy before anything is deleted by it.
-_OWNED_PREFIX = "orchestrator/"
-
-_OWNED_TAIL = "/issue-{issue}"
 
 # What a terminal is blocked by when the ledger itself is the thing that
 # cannot be read. It names no resource because there is no resource to name --
@@ -203,25 +204,33 @@ def _is_terminal(scan: _ChildScan, consumer: int) -> bool:
     return issue_is_closed(scan.issues.get(number))
 
 
-def _ours(generation: LateGeneration, branch: str) -> bool:
-    """Whether a recorded target is a branch THIS generation could own.
+def _ours(
+    spec: config.RepoSpec, issue_number: int, branch: str,
+) -> bool:
+    """Whether a recorded target is one of THIS issue's own branches.
 
     Asked before anything is deleted by it, because the target comes off a
     ledger a human can edit and the call it is spent on is destructive: an
-    entry naming `main` would otherwise delete an unprotected `main`. Two
-    conditions, and both are needed. The namespace is what every branch this
-    orchestrator publishes is inside, so nothing outside it was ever ours; the
-    issue tail is what keeps one generation from reclaiming another issue's
-    branch, which is the same target in the same namespace.
+    entry naming `main` would otherwise delete an unprotected `main`.
+
+    An exact match against the names this spec publishes this issue under,
+    not a namespace test. `orchestrator/` with an `/issue-<n>` tail is also
+    the shape of ANOTHER repository's branch for another issue that shares the
+    number -- `orchestrator/other-repository/issue-41` passes a prefix-and-
+    tail reading -- and two specs sharing one `target_root` is the ordinary
+    case, not a contrived one. The number comes from the issue being walked
+    rather than from the record, so a hand-edited identity cannot point the
+    delete at a branch of somebody else's.
     """
-    if not isinstance(branch, str) or not branch.startswith(_OWNED_PREFIX):
+    if not isinstance(branch, str):
         return False
-    return branch.endswith(_OWNED_TAIL.format(issue=generation.current_issue))
+    return branch in _worktree_paths._issue_branch_names(spec, issue_number)
 
 
 def _reclaim_branch(
     gh: GitHubClient,
     spec: config.RepoSpec,
+    issue_number: int,
     generation: LateGeneration,
     branch: str,
 ) -> LateGeneration:
@@ -241,10 +250,10 @@ def _reclaim_branch(
     obligation, and writing it is what keeps the retry pointed at the same
     branch rather than at whatever the resolver would name later.
     """
-    if not _ours(generation, branch):
+    if not _ours(spec, issue_number, branch):
         log.error(
-            "issue=#%d recorded branch %r is not one this generation owns; "
-            "refusing to delete it", generation.current_issue, branch,
+            "issue=#%d recorded branch %r is not one this issue is published "
+            "under; refusing to delete it", issue_number, branch,
         )
         return _recorded(generation, _BRANCH, branch, deleted=False)
     try:
@@ -256,15 +265,14 @@ def _reclaim_branch(
         generation,
         _BRANCH,
         branch,
-        deleted=deleted and _local_gone(spec, generation, branch),
+        deleted=deleted and _local_gone(spec, issue_number, branch),
     )
 
 
 def _local_gone(
-    spec: config.RepoSpec, generation: LateGeneration, branch: str,
+    spec: config.RepoSpec, issue_number: int, branch: str,
 ) -> bool:
     """Take the local checkout and ref down, and say whether they are gone."""
-    issue_number = generation.current_issue
     _worktree_cleanup._remove_issue_worktree(spec, issue_number)
     _worktree_cleanup._delete_local_issue_branch(spec, issue_number, branch)
     if _worktree_paths._worktree_path(spec, issue_number).exists():
@@ -283,7 +291,10 @@ def _local_gone(
 
 
 def _reclaim_snapshot(
-    spec: config.RepoSpec, generation: LateGeneration, ref: str,
+    spec: config.RepoSpec,
+    issue_number: int,
+    generation: LateGeneration,
+    ref: str,
 ) -> LateGeneration:
     """Delete one snapshot ref and record whether the remote let it go.
 
@@ -291,13 +302,53 @@ def _reclaim_snapshot(
     re-pointed is refused rather than reclaimed. An absent ref is a success,
     which is what makes the retry after a crash between the delete and this
     write cost one request rather than a mismatch.
+
+    Refused outright unless the target IS this generation's ref. The transport
+    proves the namespace and the commit, and neither is identity: every
+    generation of every issue in a lineage cut from the same candidate names
+    the same SHA, so a hand-edited entry naming a sibling's ref would pass
+    both tests and destroy the only copy of what that sibling was told to
+    reuse. The name is re-derived here from the issue being walked and the
+    record's own counters, and nothing else is deleted.
     """
+    if not _our_snapshot(issue_number, generation, ref):
+        log.error(
+            "issue=#%d recorded snapshot %r is not the ref this generation "
+            "preserved; refusing to delete it", issue_number, ref,
+        )
+        return _recorded(generation, _SNAPSHOT, ref, deleted=False)
     outcome = _snapshot_refs.delete_snapshot_ref(
         spec, spec.target_root, ref=ref, sha=generation.candidate_sha,
     )
     return _recorded(
         generation, _SNAPSHOT, ref, deleted=outcome in _RECLAIMED,
     )
+
+
+def _our_snapshot(
+    issue_number: int, generation: LateGeneration, ref: str,
+) -> bool:
+    """Whether the recorded ref is the one this generation's snapshot is at.
+
+    Derived, not parsed: the namespace mints one ref per issue, cycle, and
+    generation, so the question is only whether the ledger still names it. A
+    record whose identity is too damaged to derive a ref from owns no ref
+    either, and answering no leaves the entry owed and the umbrella open --
+    which is where an obligation nobody can correlate belongs.
+    """
+    try:
+        expected = _namespace.snapshot_ref(
+            issue_number=issue_number,
+            cycle_id=generation.cycle_id,
+            generation=generation.generation,
+        )
+    except _namespace.InvalidSnapshotRef:
+        log.exception(
+            "issue=#%d cannot derive the snapshot ref its own record would "
+            "be under", issue_number,
+        )
+        return False
+    return ref == expected
 
 
 def _recorded(
@@ -360,6 +411,7 @@ def _asked_of(
 def _reclaimed(
     gh: GitHubClient,
     spec: config.RepoSpec,
+    issue_number: int,
     generation: LateGeneration,
     scan: _ChildScan,
 ) -> _Reclamation:
@@ -368,9 +420,9 @@ def _reclaimed(
     settled = generation
     for kind, target in asked:
         if kind == _BRANCH:
-            settled = _reclaim_branch(gh, spec, settled, target)
+            settled = _reclaim_branch(gh, spec, issue_number, settled, target)
         else:
-            settled = _reclaim_snapshot(spec, settled, target)
+            settled = _reclaim_snapshot(spec, issue_number, settled, target)
     outstanding = set(_owed_branches(settled)) | set(_held_snapshots(settled))
     return _Reclamation(
         generation=settled,
@@ -424,7 +476,7 @@ def _settled_for_terminal(
     generation = _late_state.read_late_generation(state)
     if not generation.is_present:
         return _owes_nothing_uncorrelated(issue, generation)
-    settled = _reclaimed(gh, spec, generation, scan)
+    settled = _reclaimed(gh, spec, issue.number, generation, scan)
     if settled.attempted:
         _late_state.write_late_generation(state, settled.generation)
         gh.write_pinned_state(issue, state)

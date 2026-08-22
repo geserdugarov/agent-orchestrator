@@ -103,10 +103,13 @@ The late size gate preserves a superseded candidate under
   delete a re-pointed ref as readily as ours, and this is the one operation whose blast radius is somebody else's
   content rather than a refused push. A snapshot ref outside the namespace — anything a hand-edited ledger entry
   could name — is refused before the remote is contacted at all, so this path can neither clobber nor delete a
-  branch, a tag, or a pull-request ref. The **branch** cleanup beside it is held to the same rule from the other
-  direction: its target also comes off a ledger a human can edit, and it is checked against the orchestrator
-  namespace and this issue's own number before any delete, so a hand-edited entry naming an unprotected default
-  branch deletes nothing and holds the umbrella open instead.
+  branch, a tag, or a pull-request ref. Being *in* the namespace is not enough to be deleted, either: the target has
+  to equal the ref this issue's own identity mints, because every generation in a lineage names the same commit and
+  a sibling's ref would otherwise pass both the namespace and the lease. The **branch** cleanup beside it is held to
+  the same rule from the other direction: its target also comes off a ledger a human can edit, and it has to be one
+  of the exact names this repository publishes this issue under — not merely inside `orchestrator/` with a matching
+  `/issue-<n>` tail, which is also another repository's branch — so a hand-edited entry naming an unprotected
+  default branch, or a neighbouring repository's work, deletes nothing and holds the umbrella open instead.
 
 The refs hold objects, so they hold *content*: a snapshot is a copy of a candidate that was never published. This
 host keeps its own copy under `refs/orchestrator/late-split-local/<repository>/…`, qualified so that two configured
