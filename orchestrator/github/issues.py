@@ -18,6 +18,7 @@ from github.Label import Label
 
 from orchestrator import config
 from orchestrator.github import events, labels
+from orchestrator.github.comments import carries_own_marker
 from orchestrator.workflow.state import (
     WorkflowLabel,
     coerce_workflow_label,
@@ -30,6 +31,9 @@ from orchestrator.workflow.state import (
 _STATE_ATTR = "state"
 _ISSUE_STATE_OPEN = "open"
 _ISSUE_STATE_CLOSED = "closed"
+# What the orphan lookup asks for: a child nobody has attributed yet is one a
+# human may have closed, so an open-only search would miss it and duplicate.
+_ISSUE_STATE_ALL = "all"
 _RECORDED_EVENTS_CAP = 500
 
 # The stages whose closed issues still have a terminal arc left to drain: an
@@ -84,6 +88,29 @@ def _closed_sweep_lookups() -> tuple[tuple[str, bool], ...]:
 
 
 CLOSED_SWEEP_LOOKUPS = _closed_sweep_lookups()
+
+
+def issue_is_closed(issue: Any) -> bool:
+    """Whether GitHub reports this issue as closed.
+
+    The wire spelling is `state`, and on a PyGithub issue it is the only one:
+    nothing there is called `closed`. A reader that asks for that attribute
+    alone therefore answers "open" for every closed issue in production while
+    passing every test, because the in-memory double DOES carry the flag --
+    which is exactly the shape of bug this predicate exists to stop being
+    written twice. It lives here because the state vocabulary does.
+
+    Both shapes are honored, as the dispatcher's own check has always done:
+    the flag is asked first and only when it is set, so an issue that merely
+    lacks it falls through to `state` rather than reading as open. Anything
+    that is not an issue at all -- the `None` a scan holds for a consumer it
+    never fetched -- is not closed, leaving a caller that must fail closed on
+    an absence to say so itself, where it knows what the absence means.
+    """
+    if bool(getattr(issue, "closed", False)):
+        return True
+    state = getattr(issue, _STATE_ATTR, _ISSUE_STATE_OPEN)
+    return state == _ISSUE_STATE_CLOSED
 
 
 def iter_new_non_pr_issues(
@@ -238,6 +265,43 @@ class GitHubIssueMixin:
             body=full_body,
             labels=validated_labels,
         )
+
+    def find_issue_carrying(self, marker: str) -> Optional[Issue]:
+        """Return the issue this orchestrator created carrying `marker`.
+
+        The lookup a create that returned and a process that died a statement
+        later needs. Creating an issue is not undoable and nothing outside
+        GitHub knows the number, so the only way back to it is something the
+        creator put IN it: a hidden marker naming the exact adjudication and
+        the exact slice the issue was opened for.
+
+        Searched in EVERY state and under no label, which is the expensive
+        reading and the only correct one. The window this exists for is a
+        child nobody has attributed yet, and in that window a human is free to
+        close it as junk or move its label -- and a lookup scoped to open
+        issues on the label it was born with would miss exactly those and open
+        a second issue beside the one they had just acted on. What the caller
+        does with a candidate it did not expect is the caller's; this answers
+        whether one exists.
+
+        Pull requests are dropped because the issue endpoint returns them too
+        and a pull request is not a child.
+
+        The body is what carries the marker, and the author is checked with
+        it: the whole point is to recognize an issue THIS orchestrator opened,
+        and an issue somebody else wrote the marker into is not one to adopt,
+        reseed, and activate as a child.
+        """
+        for candidate in self.repo.get_issues(
+            **issue_query_options(issue_state=_ISSUE_STATE_ALL, since=None),
+        ):
+            if candidate.pull_request is not None:
+                continue
+            if carries_own_marker(
+                [candidate], marker, bot_login=getattr(self, "_bot_login", None),
+            ):
+                return candidate
+        return None
 
     def _iter_closed_sweep_issues(
         self,

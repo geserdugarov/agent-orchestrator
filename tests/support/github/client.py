@@ -65,8 +65,10 @@ class FakeGitHubClient(_IssueClient, _PullClient):
         *,
         repo_slug: str = "geserdugarov/agent-orchestrator",
         stale_label_cache: bool = False,
+        bot_login: str = "orchestrator",
     ) -> None:
         self._repo_slug = repo_slug
+        self._bot_login = bot_login
         self._stale_label_cache = stale_label_cache
         self._pollable_calls = 0
         self._issues = {issue.number: issue for issue in issues}

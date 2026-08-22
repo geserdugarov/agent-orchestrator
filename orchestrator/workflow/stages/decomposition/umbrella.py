@@ -11,6 +11,20 @@ That missing implementation pass is also why the drift check matters more here
 than anywhere else: no later stage will ever look at this issue's body again,
 so a body edited while children ran would otherwise be closed against the
 manifest it no longer describes.
+
+It is also the last boundary at which anything the issue still owes a remote
+can be settled, and the first at which the snapshot half CAN be. A parent that
+became an umbrella through a late split owes two things -- the branch its
+superseded candidate was committed on, and the immutable ref that candidate was
+preserved under -- and nothing else ever brings a tick back to either, because
+an umbrella polls its children and nothing else. So the all-resolved branch
+reconciles what is owed before it closes anything: the branch unconditionally,
+and the snapshot under the rule that owns it, since every recorded direct
+consumer being terminal is exactly what all-resolved has just made true. The
+child scan is handed over rather than re-taken, so proving that costs no
+request of its own. A remote that refuses holds the parent open, because an
+umbrella closed over an unreclaimed ref is an obligation nobody would ever
+settle, while one still open is a retry every tick.
 """
 from __future__ import annotations
 
@@ -25,6 +39,9 @@ from orchestrator.workflow.engine import comments as _comments
 from orchestrator.workflow.engine import guards as _guards
 from orchestrator.workflow.engine import usage as _usage
 from orchestrator.workflow.stages.decomposition import activation as _activation
+from orchestrator.workflow.stages.decomposition import (
+    late_cleanup as _late_cleanup,
+)
 from orchestrator.workflow.stages.decomposition import parents as _parents
 from orchestrator.workflow.stages.decomposition import state as _state
 from orchestrator.workflow.state import WorkflowLabel
@@ -99,7 +116,12 @@ def _handle_umbrella(gh: GitHubClient, spec: config.RepoSpec, issue: Issue) -> N
     if scan is None:
         return
     if all(label == _state._DONE for label in scan.labels.values()):
-        _complete_umbrella(gh, issue, state)
+        # Every child is resolved, so this is the last tick that could settle
+        # what the issue still owes a remote -- and the only one that will
+        # come back if it cannot. A refusal keeps the label, which is the
+        # retry.
+        if _late_cleanup._settled_for_terminal(gh, spec, issue, state, scan):
+            _complete_umbrella(gh, issue, state)
         return
 
     held = _activation._activate_ready_children(gh, issue, state, scan)

@@ -25,7 +25,6 @@ _BASE = "main"
 _OWNER_LOGIN = "geserdugarov"
 _LABEL_NAME = "workflow:community_contribution"
 _HEAD_SHA = "f00dcafe"
-
 # (merged, PyGithub state) -> the one state every workflow gate reads.
 _PR_STATE_CASES = (
     ((True, _STATE_OPEN), "merged"),

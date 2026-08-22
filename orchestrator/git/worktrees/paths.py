@@ -148,6 +148,38 @@ def _branch_name(spec: config.RepoSpec, issue_number: int) -> str:
     )
 
 
+def _legacy_branch_name(issue_number: int) -> str:
+    """The pre-slug-namespacing branch name for an issue.
+
+    Its own name because two callers need exactly it and nothing near it: the
+    resolver that stays anchored on a legacy in-flight PR, and the ownership
+    test a caller applies before deleting a recorded branch.
+    """
+    return f"orchestrator/issue-{issue_number}"
+
+
+def _issue_branch_names(
+    spec: config.RepoSpec, issue_number: int,
+) -> tuple[str, ...]:
+    """Every branch name this orchestrator could have published this issue on.
+
+    The slug-namespaced form it publishes now, and the legacy flat form an
+    issue already in flight when namespacing landed is still on -- both,
+    because either can be the live one and neither can be told from the other
+    by shape.
+
+    For a caller about to DELETE a recorded target, which is why the answer is
+    the exact names rather than a namespace: `orchestrator/` with an
+    `/issue-<n>` tail also describes ANOTHER spec's branch for another issue
+    that happens to share the number, and two specs sharing a `target_root`
+    is the case slug-namespacing exists for.
+    """
+    return (
+        _branch_name(spec, issue_number),
+        _legacy_branch_name(issue_number),
+    )
+
+
 def _resolve_branch_name(
     state: PinnedState, spec: config.RepoSpec, issue_number: int,
 ) -> str:
@@ -190,7 +222,7 @@ def _resolve_branch_name(
         # ref. Targeting it keeps the orchestrator anchored on the
         # existing PR rather than orphaning it on the new namespaced
         # branch.
-        return f"orchestrator/issue-{issue_number}"
+        return _legacy_branch_name(issue_number)
     return _branch_name(spec, issue_number)
 
 

@@ -97,6 +97,9 @@ workflow/                   publishes the two label vocabularies, `guard_transit
     state.py                the `late_*` pinned keys -- the frozen evidence, the ledgers, and the cancellation and
                             pending-owner-check markers -- and the round trip through them that leaves a legacy
                             comment untouched and an unreadable obligation intact
+    lineage.py              what a child born of a split inherits and reads back fail-closed: the lineage it
+                            continues, the adjudication that created it, the snapshot ref and exact commit it may
+                            reuse, and the slice it owns
     exemption.py            the one commit an accepted candidate publishes under -- written, read, and compared
                             fail-closed, and deliberately outside the group a cleared generation drops
     restart.py              the two-phase restart marker: the closed pair of labels it may apply, the cycle it
@@ -189,6 +192,30 @@ workflow/                   publishes the two label vocabularies, `guard_transit
                             cancellation a closed owner earns, the park an unreadable one takes only where nothing
                             else already holds the issue, and the one follow-up that park owes the thread --
                             posted before the write that clears it
+      late_snapshot.py      the immutable copy every child of a split is cut from: the ref this generation's
+                            identity names, the obligation written ahead of the push and again behind the proof, the
+                            create-or-verify that never overwrites, the fetch that proves a child could obtain it,
+                            and the one park every refusal takes
+      late_children.py      the children a split creates: the umbrella flag and count written before the first one,
+                            the single write that records each as a child, a consumer, and an obligation, the adopt
+                            -- never repeat -- a resumed walk does, the seed that adds an ancestry without replacing
+                            a child's own work, and the body naming the snapshot, the two reuse forms, and the hunk
+                            splitting it forbids
+      late_transaction.py   the order a cleared split runs in: the three refusals no step below could repair, the
+                            snapshot before any child, the children before any link, the forward links behind the
+                            receipt that stops them repeating, the held plan PR superseded and closed under a
+                            marker scoped to this adjudication, the generation retired onto `workflow:umbrella` in
+                            the write that hands the issue on, the activation behind it -- through the shared
+                            dep-graph walk, so a child that ended while the supersession was parked is left where
+                            it is -- and the branch cleanup recorded as owed and attempted after
+      late_cleanup.py       what a split still owes a remote once its children are running: the branch obligations
+                            that are not reconciled and the refs still held, the exact-name check a branch and a
+                            snapshot ref each have to pass before anything is deleted by it, the rule that decides
+                            whether a ref's recorded consumers have all ended, the two deletes -- the branch one
+                            taking the remote ref, the checkout, and the local ref, and proving all three gone --
+                            and the one write that records either answer, what may not be left behind (an opaque
+                            ledger and a damaged identity included), and the question the umbrella's terminal asks
+                            before it closes
       late_settlement.py    what a guarded verdict earns: the announcement a question owes the issue, the exemption
                             naming the measured commit, the plan-PR hold released and the pull request reconciled
                             against that commit in any state -- with a settled pointer dropped rather than handed on
@@ -207,9 +234,10 @@ workflow/                   publishes the two label vocabularies, `guard_transit
                             every concurrent answer, the certificate a bare continue writes, the question a real
                             answer reopens, and the continue that answers none
       late_revision.py      the developer run guidance buys -- the locked session resumed under `agent_role=developer`
-                            and `stage=decomposing` -- and the clean tree, re-frozen commit, and fresh measurement its
-                            result is reconciled through, with the `ACK:` marker an UNCHANGED commit needs before it
-                            counts as an answer
+                            and `stage=decomposing` -- the refusal a candidate whose split already created children
+                            earns instead, and the clean tree, re-frozen commit, and fresh measurement its result is
+                            reconciled through (which carries none of the last generation's split receipts), with
+                            the `ACK:` marker an UNCHANGED commit needs before it counts as an answer
       late_relabel.py       the `workflow:decomposing` label a live generation pins -- one still oversized, or one
                             whose owner read is still owed: the kill-switch route it refuses, and the dispatch it
                             refuses -- with the hand relabel it repairs -- when a human has moved the label out from

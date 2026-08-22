@@ -300,6 +300,7 @@ answering it.
 A **split** is handed on rather than acted on. Creating the children, taking the snapshot they are cut from, and
 superseding the plan pull request are one transaction; what the guard owes it is the guarantee it cannot check for
 itself, that the outcome was re-checked against an owner read taken after the agent finished. Nothing is created here.
+What that transaction then does is [the section below](#what-a-cleared-split-actually-does).
 
 A **single** is reconciled as an EXEMPTION for the measured commit (`late_settlement.py`). The
 candidate is already committed in the developer's own worktree, and the ordinary implementing publication is what
@@ -350,6 +351,228 @@ obligation the remote is owed does not stop being owed because the adjudication 
 `decomposing` issue with no generation on it is one the INITIAL decomposer would pick up and re-decompose, and an
 `implementing` issue with a live generation is one the relabel guard puts back and the next tick re-settles — so the
 ordering is what keeps the first of those from ever existing.
+
+## What a cleared split actually does
+
+`late_transaction.py` is the order, and the order is the contract: every step is preceded by the durable fact that
+lets the next tick tell "already done" from "never started", and every step is idempotent where that fact turns out
+to be ambiguous. Three refusals come first, because no step below could repair any of them. A lineage already at
+`MAX_LINEAGE_DEPTH` creates nothing (the bound is enforced where the children would be born as well as where the
+reply was parsed). A recorded **ancestry that disagrees** with the generation's lineage creates nothing either, and
+that is the same bound read from the other side: a child of an earlier split carries the lineage it was created
+under, its own generation is minted from that record, and a generation naming a shallower depth or a different root
+is one minted without it — which is exactly how a lineage would buy itself a generation past the cap. And an
+obligation ledger holding an entry this binary cannot type stops the whole transaction, since a split records a
+snapshot and one consumer per child on exactly that ledger and merging into one written back verbatim would drop
+whatever it did not understand.
+
+**The snapshot, before any child** (`late_snapshot.py`, over `git/snapshots/`). A split ends with the parent's branch
+superseded, its pull request closed, and the parent itself an umbrella that implements nothing — so once children
+exist, the only thing between them and the work they were told to reuse is one ref. Four properties, each a refusal
+rather than a convention:
+
+- **One namespace.** `refs/orchestrator/late-split/issue-<n>/cycle-<c>/gen-<g>`, built from the generation's own
+  identity and validated against the one pattern this orchestrator writes — a custom ref namespace rather than a
+  branch precisely because a branch is listed, protected by rulesets, attached to pull requests, and auto-deleted on
+  merge, and a snapshot has to outlive all of that. A ref assembled from a damaged pinned field is refused rather
+  than pushed. Whether a production token may write the namespace under production rulesets is proved before rollout
+  by the capability check in
+  [`../configuration/snapshot-capability-check.md`](../configuration/snapshot-capability-check.md).
+- **No blind overwrite.** The remote is read first, so a retry finds the ref it already pushed and spends a read
+  rather than a write; every write is lease-pinned to what that read established, a create leasing the ref as
+  absent. A ref already carrying **another** commit is reported as a mismatch and left exactly as it is, because the
+  automatic alternative is destroying the only copy of somebody else's candidate.
+- **Exact SHA, proved twice.** The remote has to answer with the exact frozen candidate, and then the ref is fetched
+  back into the clone the worktrees share and resolved locally — a namespace a token can write and not read would
+  otherwise pass every check here and fail the first child that tried to use it.
+- **The obligation is durable on both sides of the push.** The intended ref is written to `late_resources` as
+  `pending` before anything is pushed (a push that landed and a process that died a statement later look identical
+  from the outside) and moved to `retained` once proved. Every failure writes `failed` and parks with the recorded
+  verdict standing, so the retry costs a GitHub read rather than an agent.
+
+**Then the children** (`late_children.py`). The umbrella flag and `expected_children_count` go down before the first
+child exists — that pair is what tells a partial split from a finished one — and each child's number is recorded on
+the generation's own ordered register (`late_split_children`), in `late_consumers`, and as its own `child`
+obligation in **one** write, before anything else is done with it. That write is the direct-consumer ledger slot the
+reclamation rule waits on, which is why it has to be durable before the child can run.
+
+The register is the generation's rather than the stage's shared `children` list, and that is load-bearing: an issue
+that was decomposed, saw its children resolve, flipped back to `ready`, and implemented an oversized candidate still
+carries the earlier decomposition's `children` and `dep_graph`, so a walk reading that list would adopt **completed**
+issues by manifest index, reseed them with an ancestry they have nothing to do with, and activate them. The stage's
+list and graph are written *from* the register instead, which is also what replaces the earlier decomposition's
+dependency graph rather than leaving a stale one standing over the new children.
+
+A resumed walk therefore adopts every child **this generation** already records rather than opening a second issue
+for the same slice, and the recorded list is monotonic: a resumed pass never writes back fewer children than the
+previous one knew about. Past that register there is one more recovery, for the crash between `create_child_issue`
+returning and the write recording it — a window in which nothing outside GitHub knows the number. Every child is
+created carrying a hidden marker naming this **issue**, this cycle, this generation, and its slice index, and a walk
+about to create looks for that marker before opening anything. The issue is in the marker because a cycle identity
+is minted per issue and repeats across them — two parents adjudicating their first candidate are both cycle 1 — and
+the lookup is not scoped to one parent's children, so without it one parent would adopt, reseed, and activate
+another's.
+
+That lookup is a walk over the repository's issues in **every state and under no label**, which is the expensive
+reading and the only correct one: in the window it exists for nobody has attributed the child, so a human is free to
+close it as junk or move its label, and a search bounded to open issues on the label it was born with would miss
+exactly those and open a second issue beside the one they had just acted on. It is taken only on a **resumed** pass
+— one where an expected-children count already stood on the parent before this pass wrote its own — so a first
+split, which has nothing to find, pays nothing for it. An enumeration nobody could take raises and parks, because
+"could not ask" read as "there is no orphan" is what duplicates. And a candidate a human has since closed or moved
+off the child label is *refused* rather than adopted: reopening or re-labelling it would undo a deliberate act on an
+issue this orchestrator had not even attributed yet, so the transaction parks and lets them say which they meant.
+
+Each child is born knowing what it needs and nothing more: its declared scope in the words the adjudication used, the
+current base branch, the ancestor snapshot ref and exact commit, and the lineage and cycle identity a later record is
+correlated by — written to the child's own pinned state as the `late_ancestry_*` group
+([`../state-machine/labels-and-state.md#late-generation-state`][late-state]) and read fail-closed like every other
+late field. Its body says how the work may be reused: **cherry-pick a coherent commit**, or **copy selected paths**,
+and never split hunks mechanically to make the change smaller. File and hunk boundaries do not express issue scope, so
+a change partitioned along them is one nobody can build or review — the judgment about what belongs to a slice stays
+with the developer who implements it. The seed is re-applied on a resume by reading the child's state and adding to
+it, never by writing a fresh record: by the time a retry reaches a child that was already created, that child may be
+implementing. The write that first *attributes* a child also takes back the park it may have collected in the
+meantime — poll order is the repository's, not the transaction's, so an orphan can reach the stage machine before
+anything records it and be parked as an unattributed `blocked` issue. Leaving that standing would activate a child
+that then waits for a reply nobody owes it. A child that already records a parent keeps whatever park it has: that
+one is its own.
+
+**Only then the links and the supersession.** The parent says what it became and where its work went, exactly once,
+and both halves of "once" are needed. The generation's own `late_links_announced` flag is the cheap gate and the one
+that holds on the ordinary retry — it is scoped to this adjudication, unlike `decomposed_at`, which an **earlier**
+decomposition of the same issue already wrote and which would therefore suppress the announcement entirely. The
+thread is the gate that covers what a flag cannot: a comment that landed and a process that died before the write
+are indistinguishable from the outside, so the marker this generation stamps into its own sentence is looked for
+among the issue's comments before another is posted. That search is asked only when the flag is unset, so a resume
+past the announcement costs nothing.
+
+The held plan PR then gets its original description back and is superseded through the new `supersede_pr` helper:
+one marked notice linking forward to the umbrella, every child, the snapshot ref, and the exact commit, and a close
+if it is still open. Idempotent through the **thread** rather than through a receipt, since the comment and the
+record of it cannot be made one operation. Both markers are scoped to the exact adjudication — the pull request
+outlives a cycle and the issue thread outlives everything, so an unscoped one would read an earlier episode's
+receipt as this one's — and both are honored only on a comment **this orchestrator authored**, since an HTML comment
+is invisible in the rendered thread and anybody could otherwise post the marker to suppress the sentence it gates. A
+merged or closed pull request is told and left alone; one that could not be read, or a release that failed on a
+still-open plan PR, parks — and nothing is activated while a pull request carrying the superseded work is still
+open. That last part is why the supersession runs on **every** pass, including one whose ledger already reads
+`reconciled`: that entry records what an earlier pass did, and a human who reopens the pull request between the write
+and the resume would otherwise have the resume skip straight past, report settled, and let the children loose beside
+a change still carrying the superseded work. Re-asking costs one fetch and one comment listing, and neither step
+repeats anything.
+
+**Then the label, the retirement, and the activation, in that order.** The generation is retired in the same write
+that hands the issue to `workflow:umbrella`: identity, both commits, and both ledgers kept, the measurement dropped,
+and the recorded `pr_number` cleared. Dropping the measurement is what makes the label stick — a parent that has
+become an umbrella has no candidate to measure, and a record still answering "oversized" is exactly what pins
+`workflow:decomposing` and would have the relabel guard put the umbrella label back every tick. Activation runs after
+that write for the reason the initial split's does: a crash between them must not leave a runnable child under a
+parent still labelled `decomposing`, and a child this pass could not flip is picked up by the umbrella's own walk as
+the retry.
+
+It runs *through* that walk rather than through the initial split's one-shot flip, and the difference is the
+supersession above it: that step can park for as long as a human takes to settle a pull request, so by the time
+activation runs a child may have reached `rejected` or `done` on its own. A write that read nothing would put it
+back to `ready`, and the transition guard only warns by default. So each child is read fresh and only the ones still
+`blocked` with their recorded dependencies satisfied are moved; a read that failed leaves every child where it is,
+since the umbrella takes the same reading on its next tick.
+
+A child GitHub reports as closed is passed over there too, and that one is not specific to the late split: closing an
+issue leaves its label untouched, so a child a human ended while it was still `blocked` goes on looking startable to
+every walk that reads labels alone. The close is read the way GitHub spells it — `state`, the only spelling a real
+issue carries — which is also how the reclamation counts a direct consumer that ended without a terminal label.
+
+**Cleanup last, and never in the way.** The superseded branch is written to the ledger as `pending` in that same
+retirement write and attempted *after* activation: an attempt that does not finish records `failed`, emits
+`branch_cleanup_failed`, and holds no child back. Children waiting on a branch deletion would be work stalled on
+tidiness.
+
+"The branch" is every surface it exists on — the remote ref, the checkout holding it, and the local ref — and the
+entry reads `reconciled` only once all three are provably gone. A remote delete that succeeded beside a worktree
+that would not come down is not settled: what is left is a checkout on a superseded branch that the per-tick base
+refresh treats as a pre-PR tree and goes on merging into. The local half is *verified* rather than trusted, because
+`git worktree remove` and `git branch -D` are best-effort helpers that report nothing — so the entry is decided by a
+read taken afterwards, and that read fails closed. Taking the checkout down at all is safe here for one reason: the
+snapshot was created and proved before any of this, so the commit it holds is no longer the only copy.
+
+Only a branch this issue is actually published under is ever deleted. The target comes off a ledger a human can edit
+and is spent on a destructive call, so it has to *be* one of the two names this spec gives this issue — the
+slug-namespaced form and the legacy flat one — before the remote is touched. A namespace-and-tail reading is not
+enough: `orchestrator/other-repository/issue-41` is inside `orchestrator/` and ends in this issue's tail while
+belonging to another repository entirely, and two specs sharing one `target_root` is the case slug-namespacing
+exists for. The number is taken from the issue being walked rather than from the record, so a hand-edited identity
+cannot aim the delete either. Anything that does not match is recorded `failed` and left for a human, which is the
+one answer that neither deletes somebody's branch nor quietly forgets the obligation.
+
+What the obligation **does** block is the umbrella's own terminal completion, and the retry lives there rather than
+in the transaction — an issue that has become an umbrella never reaches the transaction again, so nothing else would
+bring a tick back to it. `late_cleanup.py` is asked at the one boundary where an unsettled obligation still matters:
+every umbrella tick that finds every child resolved settles whatever is still owed, and the parent closes only once
+nothing is. A refusal keeps the label, which *is* the retry, and leaves the parent visibly open instead of closed
+over a remote nobody will ever reap.
+
+That boundary is also the first at which the **snapshot** can go, and under the rule that owns it: a ref may be
+deleted only once every recorded direct consumer is terminal, and all-children-resolved is exactly when that becomes
+true for the consumers this split created. The dispositions are read off the child scan the umbrella already took,
+so proving it costs no request of its own, and `done` covers a nested split too — a child that reached it has
+published, so its own descendants are past needing the ancestor. Anything that cannot be proved keeps the ref: a
+consumer missing from the scan, one wearing a label this binary does not recognize, or a consumer ledger it could
+not type. Deletion is idempotent because an absent ref is a success, so the crash between the push that removed it
+and the write that would have recorded it costs one request on the retry — and it is named against the commit the
+split preserved rather than against whatever a fresh read observes, so a ref somebody re-pointed is a mismatch left
+for a human instead of the one blind write in the whole namespace, aimed at destruction.
+
+The ref that gets deleted is re-derived, never taken on the ledger's word: it has to equal the name the namespace
+mints for this issue, this cycle, and this generation. The transport's own checks are the namespace and the commit,
+and neither is identity — every generation of every issue in a lineage was cut from the same candidate and so names
+the same SHA, which means a hand-edited entry pointing at a sibling's ref would satisfy both and destroy the only
+copy of exactly what that sibling was told to reuse. A target that is not this generation's own is recorded `failed`
+and holds the terminal open, the same answer a foreign branch gets.
+
+`retained` never blocks the terminal and `failed` always does, and that asymmetry is the safety argument. A ref kept
+because a consumer could not be proved terminal is one a later sweep settles — the closed-owner sweep and the
+cancellation rules are the change that follows this one — and blocking on it would hold the umbrella open for a
+condition nothing here can clear. A ref the remote *refused* to delete is a permission or ruleset problem an
+operator has to see, and the parent staying open is how they see it.
+
+Two more things block it outright, and both are the same rule: nothing that cannot be *proved* settled lets a
+terminal fire. An obligation ledger this orchestrator could not fully type blocks whatever the typed view says — the
+entries it could not read are still obligations, and closing on the strength of a projection is the reading the
+verbatim copy exists to prevent. So does a ledger holding anything at all on a record whose cycle identity is
+damaged: there is nothing to correlate a reclamation to and no issue number to prove a branch belongs to this
+generation, so the umbrella stays open and says so where an operator reads it. An issue that never entered the late
+gate carries no ledger and answers without a write, which is every umbrella the initial decomposer made.
+
+### What a human can still change once the transaction has started
+
+Every transaction park is a moment the humans can speak into, and the coordinator settles what they said *before* it
+replays the recorded verdict — so a split that stopped halfway can meet a fresh edit or a fresh instruction on the
+next tick. Two rules keep that from undoing work that already exists.
+
+A generation whose split has **already acted outside this process** may not be revised into a new one, and two
+effects put it past that point.
+
+*Children*, because a second manifest over the top of real GitHub issues strands every one of them: nothing polls a
+child the parent stops recording, they carry an ancestry naming the adjudication that made them, and they are the
+consumers the snapshot is retained for.
+
+*A recorded snapshot obligation*, even with no child yet. The ref is named for the generation but the **commit under
+it** is the candidate that generation froze, and the reclamation proves a ref is ours to delete by comparing the two
+— so a revision that moves `candidate_sha` leaves the entry pointing at a ref that no longer matches it, the
+reclamation reads a mismatch and refuses, and the umbrella's terminal stays open over a ref nothing can ever settle.
+The entry is refused in every state it can hold, because none of them proves the ref is absent: `pending` is a push
+that may have landed, and `failed` is a create that may have landed beside a verification that did not. An opaque
+ledger is refused with them, since an entry this binary could not type may be exactly that obligation.
+
+Either way the issue is handed back naming what stands — their comment stands, whatever the split created stands,
+and the recorded verdict stands — and which of those to keep is a decision about things that already exist.
+
+A generation that **does** advance carries none of the previous one's split receipts. `late_split_children` and
+`late_links_announced` are cleared with the counter, because both are one-shot and positional: a register carried
+forward would have the new manifest adopt an old child by index, and a link receipt carried forward would swallow the
+announcement the new split owes. What is *not* cleared is either external ledger — a ref the remote holds is owed
+whatever this generation decides next.
 
 ## What the humans can still change while a candidate is frozen
 

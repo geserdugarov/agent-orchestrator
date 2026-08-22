@@ -66,6 +66,8 @@ _PLAN_PR_NUMBER = "late_plan_pr_number"
 _PLAN_PR_BODY = "late_plan_pr_body"
 _RESOURCES = "late_resources"
 _CONSUMERS = "late_consumers"
+_SPLIT_CHILDREN = "late_split_children"
+_LINKS_ANNOUNCED = "late_links_announced"
 _OWNER_CHECK_PENDING = "late_owner_check_pending"
 _CANCELLED = "late_cancelled"
 _CANCELLED_AT = "late_cancelled_at"
@@ -93,6 +95,8 @@ LATE_STATE_KEYS = (
     _PLAN_PR_BODY,
     _RESOURCES,
     _CONSUMERS,
+    _SPLIT_CHILDREN,
+    _LINKS_ANNOUNCED,
     _OWNER_CHECK_PENDING,
     _CANCELLED,
     _CANCELLED_AT,
@@ -161,6 +165,8 @@ def read_late_generation(state: PinnedState) -> LateGeneration:
         plan_pr_body=_payloads.as_text(state.get(_PLAN_PR_BODY)),
         resources=resources,
         consumers=consumers,
+        split_children=_ledgers.read_register(state.get(_SPLIT_CHILDREN)),
+        links_announced=_payloads.as_flag(state.get(_LINKS_ANNOUNCED)),
         opaque_resources=opaque_resources,
         opaque_consumers=opaque_consumers,
         owner_check_pending=_payloads.as_flag(
@@ -220,10 +226,37 @@ def _written_fields(generation: LateGeneration) -> dict[str, Any]:
     ledgers = _ledger_fields(generation)
     if not generation.is_present:
         return ledgers
+    fields = {
+        **_evidence_fields(generation),
+        **ledgers,
+        _SPLIT_CHILDREN: list(generation.split_children) or None,
+        _LINKS_ANNOUNCED: generation.links_announced or None,
+        _OWNER_CHECK_PENDING: generation.owner_check_pending or None,
+        _CANCELLED: generation.cancelled or None,
+        _CANCELLED_AT: generation.cancelled_at,
+        _RESTART_PENDING: generation.restart_pending or None,
+        _RESTART_TARGET: generation.restart_target,
+        _RESTART_CYCLE_ID: generation.restart_cycle_id,
+        _RESTART_PREDECESSOR: generation.restart_predecessor,
+    }
+    return {
+        key: written
+        for key, written in fields.items()
+        if written is not None
+    }
+
+
+def _evidence_fields(generation: LateGeneration) -> dict[str, Any]:
+    """Return the identity, the frozen commits, and what they measured.
+
+    A lineage depth of 0 is written as itself: it is the root of a lineage,
+    and what is dropped instead is an unknown depth, which is not the same
+    thing and must not be recorded as if it were.
+    """
     phase: Optional[str] = None
     if generation.phase is not None:
         phase = str(generation.phase)
-    fields = {
+    return {
         _CYCLE_ID: generation.cycle_id or None,
         _GENERATION: generation.generation or None,
         _ROOT_ISSUE: generation.root_issue or None,
@@ -240,19 +273,6 @@ def _written_fields(generation: LateGeneration) -> dict[str, Any]:
         _COMMENT_WATERMARK_ID: generation.comment_watermark_id,
         _PLAN_PR_NUMBER: generation.plan_pr_number,
         _PLAN_PR_BODY: generation.plan_pr_body,
-        **ledgers,
-        _OWNER_CHECK_PENDING: generation.owner_check_pending or None,
-        _CANCELLED: generation.cancelled or None,
-        _CANCELLED_AT: generation.cancelled_at,
-        _RESTART_PENDING: generation.restart_pending or None,
-        _RESTART_TARGET: generation.restart_target,
-        _RESTART_CYCLE_ID: generation.restart_cycle_id,
-        _RESTART_PREDECESSOR: generation.restart_predecessor,
-    }
-    return {
-        key: written
-        for key, written in fields.items()
-        if written is not None
     }
 
 

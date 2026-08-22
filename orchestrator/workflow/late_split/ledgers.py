@@ -1,6 +1,6 @@
 # Copyright 2026 Geser Dugarov
 # SPDX-License-Identifier: Apache-2.0
-"""What the two external ledgers read back as, and what they never lose.
+"""What the external ledgers and the ordered child register read back as.
 
 An obligation this binary cannot type is still owed, and a consumer list it
 cannot read is not an empty one, so neither reader answers with a default the
@@ -114,3 +114,20 @@ def _as_resource(entry: Any) -> Optional[LateResource]:
     if not _formats.is_bounded_text(target, MAX_RESOURCE_TARGET):
         return None
     return LateResource(kind=kind, target=target, resource_state=recorded)
+
+
+def read_register(raw: Any) -> tuple[int, ...]:
+    """Return the ordered child register, or empty unless all of it is ours.
+
+    Ordered and positional, unlike the consumer ledger beside it: entry `i`
+    is the child that owns manifest slice `i`, so a value this binary did not
+    write is not one to skip past -- skipping would shift every child after it
+    onto somebody else's slice. All or nothing is the only safe reading, and
+    an empty answer costs a marker lookup rather than a wrong adoption.
+    """
+    if not isinstance(raw, list):
+        return ()
+    numbers = tuple(_payloads.as_identity(entry) for entry in raw)
+    if any(number is None for number in numbers):
+        return ()
+    return numbers

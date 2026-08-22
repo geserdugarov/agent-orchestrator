@@ -46,6 +46,10 @@ class _PullStateView:
         return self._pull_state._delete_remote_branch_returns_ok
 
     @property
+    def unsupersedable_prs(self) -> set[int]:
+        return self._pull_state._unsupersedable_prs
+
+    @property
     def unreadable_pr_commits(self) -> set[int]:
         return self._pull_state._unreadable_pr_commits
 

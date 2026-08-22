@@ -36,6 +36,10 @@ class _FakePullState:
     _pulls: dict[int, FakePR] = field(default_factory=dict)
     _merge_returns_ok: bool = True
     _delete_remote_branch_returns_ok: bool = True
+    # PR numbers whose supersession GitHub refuses, which the real client
+    # reports as False rather than raising -- the caller retries the whole
+    # notice-and-close, which is idempotent on the second pass.
+    _unsupersedable_prs: set[int] = field(default_factory=set)
     # PR numbers whose commit list GitHub refuses to serve, which the real
     # client reports as an unreadable lookup rather than as "does not carry
     # the commit".

@@ -1,6 +1,6 @@
 # Copyright 2026 Geser Dugarov
 # SPDX-License-Identifier: Apache-2.0
-"""Non-PR issue filtering and PyGithub issue-query options."""
+"""Non-PR issue filtering, issue-query options, and the closed predicate."""
 from __future__ import annotations
 
 import unittest
@@ -36,6 +36,58 @@ class _StubIssue:
 class _StubLabel:
     def __init__(self, name: str) -> None:
         self.name = name
+
+
+class _ShapedIssue:
+    """An issue carrying exactly the attributes one shape of it carries.
+
+    PyGithub hands a reader `state` and nothing called `closed`; an in-memory
+    double can hand it either or both, and which attributes are absent is the
+    whole point of every case below.
+    """
+
+    def __init__(self, **shape: Any) -> None:
+        for name, carried in shape.items():
+            setattr(self, name, carried)
+
+
+class IssueIsClosedTest(unittest.TestCase):
+    """Every shape a caller is handed, answered the same way.
+
+    The real one is the one that matters: a PyGithub issue carries `state` and
+    nothing called `closed`, so a reader asking for the flag alone reports
+    every closed issue as open in production -- and reports it correctly
+    against a double that carries the flag, which is how such a bug ships
+    green. Both shapes are asserted here so no caller has to guess.
+    """
+
+    def test_a_real_issue_is_read_by_state(self) -> None:
+        for state, expected in ((_STATE_CLOSED, True), (_STATE_OPEN, False)):
+            with self.subTest(state=state):
+                self.assertEqual(
+                    _issues.issue_is_closed(_ShapedIssue(state=state)),
+                    expected,
+                )
+
+    def test_a_doubles_flag_is_still_honored(self) -> None:
+        for closed in (True, False):
+            with self.subTest(closed=closed):
+                self.assertEqual(
+                    _issues.issue_is_closed(_ShapedIssue(closed=closed)),
+                    closed,
+                )
+
+    def test_a_cleared_flag_falls_through_to_state(self) -> None:
+        # The double carries both, and the flag being unset is not an answer:
+        # `state` is what the shape is asked next.
+        issue = _ShapedIssue(closed=False, state=_STATE_CLOSED)
+
+        self.assertTrue(_issues.issue_is_closed(issue))
+
+    def test_nothing_at_all_is_not_closed(self) -> None:
+        # What a scan holds for a consumer it never fetched. Absence is the
+        # caller's to interpret, and its callers fail closed on it themselves.
+        self.assertFalse(_issues.issue_is_closed(None))
 
 
 class IterNewNonPrIssuesTest(unittest.TestCase):

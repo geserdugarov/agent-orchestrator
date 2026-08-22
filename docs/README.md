@@ -56,7 +56,8 @@ and forbids, and how a role's command spec is parsed and pinned.
 
 - [`workflow/roles.md`](workflow/roles.md) — the three roles, the stages that spawn each, the session-reuse rules, the
   late adjudication an oversized committed candidate earns under the decomposer's own role, the owner read that
-  adjudication passes before anything acts on it and what each verdict earns past it, what a human editing the
+  adjudication passes before anything acts on it and what each verdict earns past it, the snapshot-first order a
+  cleared `split` creates its children in, what a human editing the
   issue or answering under it changes while that candidate is frozen, and the local verify gate that is a stage step
   rather than a role.
 - [`workflow/conversations.md`](workflow/conversations.md) — the `question` and `discussion` prompt contracts, what a
@@ -74,6 +75,9 @@ changes. [`../.env.example`](../.env.example) holds the basic parameters for a f
   analytics database URL, skill-trigger tracking, the dashboard read mode, and the dashboard quickstart.
 - [`configuration/operations.md`](configuration/operations.md) — continuous integration, run modes, the systemd user
   service, and what an edited `.env` takes to apply.
+- [`configuration/snapshot-capability-check.md`](configuration/snapshot-capability-check.md) — the
+  disposable-repository check that proves a production token and its rulesets can create, fetch, verify, and delete
+  the late split's snapshot refs, and what each failure means.
 
 ## Observability
 

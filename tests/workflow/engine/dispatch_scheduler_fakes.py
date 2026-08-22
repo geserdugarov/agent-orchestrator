@@ -50,8 +50,3 @@ class _FakeWorktreeRoot:
 
     def iterdir(self) -> list[_FakeWorktreeDir]:
         return [_FakeWorktreeDir()]
-
-
-class _PyGithubIssue:
-    def __init__(self, state: str):
-        self.state = state

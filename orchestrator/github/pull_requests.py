@@ -11,11 +11,13 @@ from github.IssueComment import IssueComment
 from github.PullRequest import PullRequest
 
 from orchestrator.github.aliases import StaticMethodAlias
+from orchestrator.github.comments import carries_own_marker
 from orchestrator.github.pinned_state import GitHubStateMixin
 
 log = logging.getLogger("orchestrator.github")
 
 _ISSUE_STATE_OPEN = "open"
+_ISSUE_STATE_CLOSED = "closed"
 # What a lookup asks for when a PR that is no longer open is still the answer:
 # a publication that crashed before recording its number can have been merged
 # (and its branch auto-deleted) by the time anything comes looking.
@@ -151,6 +153,48 @@ class GitHubPullRequestMixin(GitHubStateMixin):
         """Post one pull-request conversation comment."""
         return self.repo.get_pull(pr_number).create_issue_comment(body)
 
+    def supersede_pr(
+        self, pr: PullRequest, *, notice: str, marker: str,
+    ) -> bool:
+        """Say once on a pull request that it is superseded, and close it.
+
+        Two effects with one guard, because they are one obligation: a change
+        nobody is going to merge has to say so where the humans looking at it
+        will read it, and then stop being open. Splitting them would let a
+        pull request end up closed with nothing on it saying why, which is the
+        state the notice exists to prevent.
+
+        Idempotent by asking the thread rather than by remembering. The comment
+        and whatever durable record the caller keeps of it cannot be made one
+        operation, so a crash between them is a repeat waiting to happen: the
+        thread is searched for `marker` and the notice is posted only when it
+        is not already there. Two things make that search safe. The caller
+        scopes the marker to the one episode it belongs to, so a reused pull
+        request cannot read an earlier episode's receipt as this one's; and
+        the comment has to be OURS, since an HTML comment is invisible in the
+        rendered thread and anybody could otherwise post the marker to
+        suppress the one notice saying this change is not to be merged. The
+        close needs no such check; a pull request that is not open is left
+        exactly as it is, which also keeps a merged one from being reopened
+        and re-closed.
+
+        False is every way this did not finish, and the caller retries the
+        whole thing: the notice is idempotent and the close is a no-op on the
+        second pass, so a retry costs a read. Every exception is caught rather
+        than only GitHub's, because a lazy pull request raises from the first
+        attribute read as readily as from the write, and a supersession that
+        could not be made must hand the tick back rather than end it.
+        """
+        try:
+            self._supersede(pr, notice, marker)
+        except Exception:
+            log.warning(
+                "could not supersede PR #%s", getattr(pr, "number", "?"),
+                exc_info=True,
+            )
+            return False
+        return True
+
     def find_open_pr(
         self,
         *,
@@ -274,6 +318,21 @@ class GitHubPullRequestMixin(GitHubStateMixin):
             )
             return False
         return True
+
+    def _supersede(self, pr: PullRequest, notice: str, marker: str) -> None:
+        """Post the notice this thread does not carry, then close it."""
+        if not self._pr_carries_marker(pr, marker):
+            pr.create_issue_comment(notice)
+        if pr_state(pr) == _ISSUE_STATE_OPEN:
+            pr.edit(state=_ISSUE_STATE_CLOSED)
+
+    def _pr_carries_marker(self, pr: PullRequest, marker: str) -> bool:
+        """Whether a comment of OURS on this pull request carries `marker`."""
+        return carries_own_marker(
+            pr.get_issue_comments(),
+            marker,
+            bot_login=getattr(self, "_bot_login", None),
+        )
 
     def _scan_prs_for_commit(self, branch: str, base: str, head_sha: str):
         """Walk this branch's pull requests for one carrying `head_sha`."""

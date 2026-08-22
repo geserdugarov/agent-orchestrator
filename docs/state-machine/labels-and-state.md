@@ -390,7 +390,7 @@ machine fall into a few groups:
   size gate re-sets its own reasons for the same kind of reason: `late_plan_pr_hold_failed`,
   `late_generation_incomplete`, `late_worktree_missing`, `late_worktree_mutated`, `late_adjudicator_timeout`,
   `late_manifest_invalid`, `late_result_unrecordable`, `late_owner_unreadable`, `late_pr_unreconciled`,
-  `late_content_drift`,
+  `late_snapshot_failed`, `late_children_failed`, `late_supersession_failed`, `late_content_drift`,
   `late_revision_dirty`, `late_revision_unmeasured`, `late_revision_unanswered`, and `late_question` — see
   [the late run](#the-late-run) for which of them the next attempt retires. `late_owner_unreadable` is the one of
   them that recovers on its own: it is a GitHub read that failed after the agent had already answered, so the retry
@@ -584,7 +584,10 @@ rather than preserving.
   generation already under adjudication. `late_phase` names the reconciliation boundary reached —
   `measuring`, `holding_plan_pr`, `adjudicating`, `owner_check`, `snapshotting`, `splitting`, `superseding`,
   `cleaning_up`, `cancelling`, `restarting` — so a tick that crashed mid-step reconciles that step rather than
-  starting a new one.
+  starting a new one. It is a boundary marker rather than a resume token: the owner-read claim every retry passes
+  through rewrites it to `owner_check`, so a step that has to know whether it already ran keys on its own durable
+  fact instead — the ledger entry for the snapshot and the branch, the recorded `children` for the children, and
+  `decomposed_at` for the one comment a split owes its parent.
 - **Local fingerprints.** `late_title_body_hash`, and `late_comment_hash` beside the `late_comment_watermark_id` it
   covers from, are what tell a scope edit apart from a trusted answer arriving after the late baseline. They are
   local by design: the global `user_content_hash` above keeps its single baseline and its meaning unchanged, so
@@ -638,6 +641,50 @@ rather than preserving.
   owed when the identity beside it is damaged. Dropping any of it would be an obligation deleted from the issue that
   still owes it — a cleanup that looks complete, or a snapshot reclaimed as though nobody were waiting on it — so a
   generation holding an opaque ledger is one nothing may treat as settled.
+- **The split's own registers.** `late_split_children` is the ordered, positional list of the children THIS
+  generation created — entry `i` is the child that owns slice `i` of its manifest — and `late_links_announced` says
+  the forward-link comment has been made. Both live on the generation rather than beside the stage's shared keys
+  because both have to be scoped to one adjudication. The stage's `children` list and `dep_graph` belong to
+  whichever decomposition last wrote them, and an issue that was decomposed, saw its children resolve, and then
+  implemented an oversized candidate still carries the old ones — so a transaction reading `children` would adopt
+  **completed** issues by manifest index, and `decomposed_at` would suppress the very announcement the split owes.
+  The stage's list and graph are written *from* the register instead, which replaces the earlier decomposition's
+  rather than leaving one standing. The register is read all-or-nothing: an entry this binary did not write makes
+  the whole field read back empty, because skipping one would shift every child after it onto somebody else's slice
+  — and an empty answer costs a marker lookup rather than a wrong adoption. That lookup is the other half: every
+  child is created carrying `<!--orchestrator-late-child:issue=…:cycle=…:generation=…:index=…-->`, so a child created
+  into a crash before its number was recorded is adopted rather than opened twice. The issue is part of that identity
+  because a cycle is minted per issue and repeats across them, while the lookup is not scoped to one parent's
+  children — without it, two parents on their first candidate would each carry `cycle=1:generation=1:index=0` and one
+  would adopt the other's child. Both fields are also cleared whenever the generation counter advances: they are the
+  split transaction's own one-shot receipts, so a register carried into a revision would have the new manifest adopt
+  an old child by index and a link receipt would swallow the announcement the new split owes. Neither external ledger
+  is cleared with them — a ref the remote holds is owed whatever the next generation decides — and the counter is
+  refused from advancing at all once either a child or a snapshot obligation is recorded, since the commit a
+  recorded ref was created for is the one its reclamation compares against.
+- **Inherited lineage.** `late_ancestry_root_issue`, `late_ancestry_depth`, `late_ancestry_parent`,
+  `late_ancestry_cycle_id`, `late_ancestry_generation`, `late_ancestry_snapshot_ref`,
+  `late_ancestry_snapshot_sha`, `late_ancestry_base_branch`, and `late_declared_scope` are what a child born of a
+  late split carries, and they are a separate group from the generation above because they answer a separate
+  question and outlive it: a generation is minted, adjudicated, and retired inside one issue, while an ancestry is
+  written once when the child is created and is still true after that child has been implemented, split again, and
+  closed. The depth and the root are what the child's own size gate mints its generation from, so automatic
+  splitting stops at the same bound three generations down as it does at the root — a child that could not say how
+  deep it is would read as a root and buy the lineage another generation, which is why an unreadable depth reads
+  back unknown rather than 0. The cycle, the generation, and the parent issue are what a record about this child is
+  correlated back to the adjudication that created it by. The snapshot ref and commit are the only durable pointer
+  to the work the child is meant to reuse, since the branch it was committed on is superseded and the pull request
+  that carried it is closed — both halves or neither, because a ref with no commit cannot be verified against
+  anything and a commit with no ref names work nothing can fetch. `late_declared_scope` is the slice the
+  adjudication assigned, and it is what the child's own late prompt states rather than an issue body somebody has
+  since edited. Every field is additive and read fail-closed like the generation's own: an issue that reached this
+  workflow another way carries none of these keys, and a hand-edited one reads back absent rather than becoming a
+  lineage nobody wrote. The ref is checked against the namespace that owns it rather than merely for being a string
+  — a value outside `refs/orchestrator/late-split/` names a branch, a tag, or nothing, and handing one to a child is
+  worse than handing it none. The record is READ where it matters most: a split refuses outright when the ancestry
+  disagrees with the generation's own lineage, because a generation naming a shallower depth or a different root is
+  one minted without this record — and a shallower depth is exactly how a lineage would buy itself a generation past
+  `MAX_LINEAGE_DEPTH`.
 - **Pending owner check.** `late_owner_check_pending` says a completed run's outcome has not yet been cleared by a
   fresh read of the issue it belongs to. It is written *before* that read is taken and dropped when one succeeds or
   the cycle is cancelled, and while it is set no later tick may treat the generation as settled, however small,

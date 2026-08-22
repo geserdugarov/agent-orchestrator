@@ -154,6 +154,16 @@ class LateGeneration:
     one nobody is waiting on -- so what cannot be typed is carried through
     untouched and `has_opaque_ledger` says so out loud.
 
+    `split_children` and `links_announced` are the split transaction's own
+    receipts, and they live on the generation rather than beside the stage's
+    shared keys precisely because they have to be scoped to ONE adjudication.
+    The stage's `children` list belongs to whichever decomposition last wrote
+    it -- an issue that was decomposed, saw its children resolve, and then
+    implemented an oversized candidate still carries the old one -- so a
+    transaction reading it would adopt completed issues by manifest index.
+    `split_children` is ordered and positional for the same reason: entry `i`
+    is the child that owns slice `i` of this manifest.
+
     `owner_check_pending` is the one field that records an unfinished READ
     rather than a fact about the candidate: a completed run whose owner could
     not be re-read leaves it set, and while it is set no later tick may treat
@@ -181,6 +191,8 @@ class LateGeneration:
     plan_pr_body: Optional[str] = None
     resources: tuple[LateResource, ...] = ()
     consumers: tuple[int, ...] = ()
+    split_children: tuple[int, ...] = ()
+    links_announced: bool = False
     opaque_resources: Optional[str] = None
     opaque_consumers: Optional[str] = None
     owner_check_pending: bool = False
@@ -283,6 +295,22 @@ class LateGeneration:
                 )
         merged = set(self.consumers) | set(numbers)
         return replace(self, consumers=tuple(sorted(merged)))
+
+    def with_split_children(self, numbers: tuple[int, ...]) -> LateGeneration:
+        """Return this record with the ordered child register replaced.
+
+        Replaced rather than merged, because the register is positional and a
+        caller rebuilding it walks the whole manifest: merging would leave a
+        stale tail behind whenever a re-run shortened it. Only positive whole
+        numbers are children, for the reason the consumer ledger says so --
+        a value nobody can ask GitHub about is not one to adopt by index.
+        """
+        for number in numbers:
+            if not _formats.whole_number(number) or number <= 0:
+                raise _formats.InvalidLateValue(
+                    f"child is not an issue ({type(number).__name__})",
+                )
+        return replace(self, split_children=tuple(numbers))
 
     def cancel(self, stamp: str) -> LateGeneration:
         """Return this record marked cancelled, keeping the first stamp.

@@ -136,6 +136,26 @@ class _PullStatusService:
         pr.state = _STATE_CLOSED
         return True
 
+    def supersede_pr(self, pr: FakePR, *, notice: str, marker: str) -> bool:
+        """Post one marked supersession notice and close an open PR.
+
+        Idempotent through the thread, exactly as the real helper is: the
+        marker is looked for among the pull request's own conversation
+        comments, so a second call after a crash adds nothing and closes
+        nothing that is already settled.
+        """
+        if pr.number in self.unsupersedable_prs:
+            return False
+        carried = any(
+            marker in (pr_comment.body or "")
+            for pr_comment in pr.issue_comments
+        )
+        if not carried:
+            self.pr_comment(pr.number, notice)
+        if self.pr_state(pr) == _STATE_OPEN:
+            pr.state = _STATE_CLOSED
+        return True
+
     def edit_pr_body(self, pr: FakePR, body: str) -> None:
         self.edited_pr_bodies.append((pr.number, body))
         pr.body = body

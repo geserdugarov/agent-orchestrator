@@ -65,11 +65,7 @@ from github.Issue import Issue
 
 from orchestrator import config
 from orchestrator.github.client import GitHubClient
-from orchestrator.github.issues import (
-    _ISSUE_STATE_CLOSED,
-    _ISSUE_STATE_OPEN,
-    _STATE_ATTR,
-)
+from orchestrator.github.issues import issue_is_closed
 from orchestrator.observability.analytics import recording
 from orchestrator.github.labels import hard_skip_control_label
 from orchestrator.scheduler import IssueScheduler
@@ -231,17 +227,6 @@ def _process_issue(gh: GitHubClient, spec: config.RepoSpec, issue: Issue) -> Non
         )
 
 
-def _issue_is_closed(issue) -> bool:
-    """True when the issue is closed.
-
-    Tolerant of both shapes the dispatcher sees: PyGithub's ``Issue.state``
-    (``"open"`` / ``"closed"``) and the in-memory fake's ``closed`` bool.
-    """
-    return bool(getattr(issue, "closed", False)) or (
-        getattr(issue, _STATE_ATTR, _ISSUE_STATE_OPEN) == _ISSUE_STATE_CLOSED
-    )
-
-
 @dataclass(frozen=True)
 class _PollablePartition:
     """Family / fanout split of one repo's pollable issues for a single tick.
@@ -347,7 +332,7 @@ def _partition_pollable_issues(
         skip, label = _classify_pollable_issue(gh, spec, issue)
         if skip:
             continue
-        builder.add(int(issue.number), label, _issue_is_closed(issue))
+        builder.add(int(issue.number), label, issue_is_closed(issue))
     return builder.build()
 
 

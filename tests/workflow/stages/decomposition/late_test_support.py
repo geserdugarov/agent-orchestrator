@@ -94,6 +94,8 @@ class _StateKeys:
     plan_pr_body: str = "late_plan_pr_body"
     candidate_sha: str = "late_candidate_sha"
     base_sha: str = "late_base_sha"
+    threshold: str = "late_threshold"
+    additions: str = "late_additions"
     phase: str = "late_phase"
     cancelled: str = "late_cancelled"
     cancelled_at: str = "late_cancelled_at"

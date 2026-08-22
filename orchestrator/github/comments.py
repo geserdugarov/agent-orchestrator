@@ -28,6 +28,14 @@ The low-level readers (`GitHubClient.comments_after`, the PR comment /
 review readers) stay raw. Callers that want the allowlist applied filter
 their result through `filter_trusted`, or gate a single author on
 `is_trusted_author`.
+
+`carries_own_marker` answers a different question and lives here for the same
+reason: whether a hidden marker on a thread is one this orchestrator wrote.
+That question is asked wherever a comment is the receipt for an effect that
+cannot be made one operation with recording it, and the author is part of it --
+a marker anybody may post is a marker anybody may use to suppress the sentence
+it stands for. A client with no authenticated login to compare against checks
+the marker alone, which is the same fallback the pinned-state read takes.
 """
 from __future__ import annotations
 
@@ -88,3 +96,27 @@ def filter_trusted(
         comment for comment in comments
         if is_trusted_author(getattr(comment, "user", None), allowed=allowed_lower)
     ]
+
+
+def carries_own_marker(
+    comments: Iterable[Any], marker: str, *, bot_login: Optional[str],
+) -> bool:
+    """Whether one of these comments is OURS and carries `marker`.
+
+    Both halves are required. The marker says which effect the comment is the
+    receipt for, and it has to be scoped by its caller to the one episode it
+    belongs to -- a marker shared across episodes reads a previous one's
+    receipt as this one's. The author says the receipt is ours: an HTML
+    comment is invisible in the rendered thread and trivially copied, so
+    without the check a third party could post the marker and silence
+    whatever the receipt gates.
+    """
+    for comment in comments:
+        if marker not in (getattr(comment, "body", "") or ""):
+            continue
+        if bot_login is None:
+            return True
+        author = getattr(getattr(comment, "user", None), "login", None)
+        if author == bot_login:
+            return True
+    return False

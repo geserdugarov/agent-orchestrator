@@ -80,6 +80,44 @@ Add a branch-protection rule for `main` (and any release branch) at `Settings �
   personal access token does **not** belong here — granting it direct-push access would only widen blast radius if the
   token leaked.
 
+### The snapshot ref namespace
+
+The late size gate preserves a superseded candidate under
+`refs/orchestrator/late-split/issue-<n>/cycle-<c>/gen-<g>` — a **custom ref namespace**, deliberately outside
+`refs/heads/` and `refs/tags/`. Three things follow for an operator:
+
+- **It is not a branch.** Nothing in the branch protection above applies to it, and nothing about it is meant to:
+  the ref is written once, verified, and later deleted by the orchestrator, and no pull request, review, or merge
+  ever touches it. Ruleset authors adding a catch-all `refs/**` rule should exclude
+  `refs/orchestrator/**`, or the orchestrator will be unable to preserve a candidate it is
+  about to supersede — which parks the issue rather than losing the work, but blocks every split until the rule is
+  fixed.
+- **The token needs to write and read it.** The same personal access token that pushes issue branches creates,
+  fetches, and deletes these refs. It needs no *additional* scope, but a ruleset or a token permission that permits
+  `refs/heads/orchestrator/*` and nothing else will refuse them. Prove it before enabling the gate:
+  [`configuration/snapshot-capability-check.md`](configuration/snapshot-capability-check.md) is the
+  disposable-repository runbook, and a failure there blocks rollout rather than being answered by weakening a rule.
+- **Nothing is ever overwritten, and only our own content is deleted.** Every write is lease-pinned: a create leases
+  the ref as absent, and a ref already carrying a different commit is reported and left alone. A delete is leased at
+  the commit the split *preserved* rather than at whatever a fresh read observes — leasing against the reading would
+  delete a re-pointed ref as readily as ours, and this is the one operation whose blast radius is somebody else's
+  content rather than a refused push. A snapshot ref outside the namespace — anything a hand-edited ledger entry
+  could name — is refused before the remote is contacted at all, so this path can neither clobber nor delete a
+  branch, a tag, or a pull-request ref. Being *in* the namespace is not enough to be deleted, either: the target has
+  to equal the ref this issue's own identity mints, because every generation in a lineage names the same commit and
+  a sibling's ref would otherwise pass both the namespace and the lease. The **branch** cleanup beside it is held to
+  the same rule from the other direction: its target also comes off a ledger a human can edit, and it has to be one
+  of the exact names this repository publishes this issue under — not merely inside `orchestrator/` with a matching
+  `/issue-<n>` tail, which is also another repository's branch — so a hand-edited entry naming an unprotected
+  default branch, or a neighbouring repository's work, deletes nothing and holds the umbrella open instead.
+
+The refs hold objects, so they hold *content*: a snapshot is a copy of a candidate that was never published. This
+host keeps its own copy under `refs/orchestrator/late-split-local/<repository>/…`, qualified so that two configured
+repositories sharing one clone cannot read each other's, and it is dropped when the remote ref is. It lives
+in the same repository under the same visibility as the branch it came from, and it is deleted at the umbrella's own
+terminal once every recorded direct consumer is terminal — a ref whose delete the remote refuses holds that terminal
+open rather than being silently abandoned. It is not a place to put anything the repository itself may not hold.
+
 ### Required human reviews for dependency-touching changes
 
 A PR that adds, removes, or pins a dependency — or that edits a workflow file pulling actions — should not merge on

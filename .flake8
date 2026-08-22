@@ -484,6 +484,18 @@
 # failed to bring. Splitting them would put that rule in two places to drift
 # apart, so WPS202 is waived.
 #
+# orchestrator/git/worktrees/paths.py owns every name one issue's work is
+# addressed by -- the slug sanitizers the filesystem and a git ref each need,
+# the worktree roots and paths, the branch name a fresh issue is published
+# under, the legacy flat one an in-flight issue is still on, the pair of them a
+# caller about to DELETE a recorded branch has to match exactly, and the
+# resolver that picks between them -- so it carries 2 members past the WPS202
+# ceiling of 7. They are one fact each and they are the same fact: a name this
+# orchestrator gives an issue. Splitting them would put the legacy spelling in
+# two modules, which is precisely the drift that would let a publication write
+# a branch the reclamation then refuses to recognize as its own, so WPS202 is
+# waived.
+#
 # orchestrator/git/verification/probes.py owns every read over what an agent
 # run left in a worktree -- the HEAD snapshot and the question of whether HEAD
 # is the branch a caller is about to publish to, the status form and the path
@@ -556,6 +568,100 @@
 # events, telemetry, and the phase a completion's own write stamps, the reply
 # parser, the run record, the undelivered notice a park owes, and the engine
 # guard a park goes through. WPS201 and WPS202 are waived.
+#
+# orchestrator/git/snapshots/namespace.py is what a snapshot ref IS, and it
+# carries 8 members past the WPS202 ceiling of 7: the refusal, the builder and
+# the recognizer for the ref a remote holds, the same pair for the local copy
+# this host fetches, and the three field checks the builders refuse on. They
+# are one vocabulary -- the local name is the remote one with the repository
+# that owns it spliced in, and a recognizer that did not agree with its own
+# builder would let a ref be created that nothing could later reclaim. WPS202
+# is waived.
+#
+# orchestrator/git/snapshots/refs.py owns every operation over that namespace
+# and carries 8 members past the same ceiling: the outcome vocabulary, the
+# create-or-verify, the fetch-and-resolve, the delete and the remote half it
+# is composed of, the local name both the fetch and the child's instructions
+# are written from, the mirror a reclaimed remote leaves behind, and the local
+# resolution that proves what a fetch brought. Splitting them would put "what
+# a snapshot ref is worth" and "what was done to it" in two modules while the
+# lock and the exact-SHA proof run across both. WPS202 is waived.
+#
+# orchestrator/workflow/late_split/state.py is the whole round trip a late
+# generation makes through the pinned comment, and it carries 8 members past
+# the WPS202 ceiling of 7: the read, the write, the clear that defines what
+# "late mode off" means, and the five composers behind the write -- the
+# evidence half, the two ledgers, the rule that a verbatim copy outranks a
+# typed view, and the JSON one obligation is spelled as. They are one contract:
+# what a field means when it is unset is decided by the same owner that decides
+# what it reads back as, and splitting them would let the two disagree about a
+# key a live issue already carries. WPS202 is waived.
+#
+# orchestrator/workflow/late_split/models.py is the frozen record one late
+# generation IS, and it carries 8 methods past the WPS214 ceiling of 7. Four
+# are the questions every reader asks of it -- whether a cycle was ever
+# recorded, whether the measurement trips the ceiling, whether the lineage has
+# room, and whether an obligation on it is one this binary cannot type -- and
+# four are the transforms that return a NEW record rather than mutating this
+# one: an obligation recorded, a consumer recorded, the ordered child register
+# replaced, and the cancellation stamped. Splitting them would put the record
+# and the only legal ways to change it in two modules, which is exactly the
+# separation a frozen record exists to prevent. WPS214 is waived.
+#
+# orchestrator/workflow/stages/decomposition/late_snapshot.py owns the whole
+# snapshot step -- the ref this generation's identity names, the durable
+# obligation written ahead of the push and again behind the proof, the
+# create-or-verify and the fetch that proves it, and the one shape every
+# refusal takes -- and names 13 imports past the WPS201 ceiling of 12. They are
+# what "snapshot-first" costs: the namespace and the transport that write the
+# ref, the domain's typed failure, resource vocabulary, and refusal, the event
+# and the dual emission that report one external resource, and the outcome
+# owner every park and persist rides. WPS201 is waived.
+#
+# orchestrator/workflow/stages/decomposition/late_children.py owns the whole
+# child half of a split -- the walk that adopts what the parent already
+# records, the umbrella flag and count written before the first child, the one
+# write that records a child as a child, a consumer, and an obligation at
+# once, the seed that adds an ancestry without replacing a child's own work,
+# and the body and the lineage that child is born with -- so it carries 13
+# members past the WPS202 ceiling of 7 and names 15 imports past the WPS201
+# ceiling of 12. The order is the crash-safety contract, and the imports are
+# what a child needs to exist: the lineage record it inherits, the depth
+# bound, the phase, the two ledger vocabularies, the initial split's own child
+# labels, the stage's pinned keys and split plan, and the outcome owner every
+# park and persist rides. Splitting it would put "created" and "recorded" in
+# two modules, so WPS201 and WPS202 are waived.
+#
+# orchestrator/workflow/stages/decomposition/late_cleanup.py owns everything a
+# split still owes a remote once its children are running, so it carries 14
+# members past the WPS202 ceiling of 7 and names 15 imports past the WPS201
+# ceiling of 12. The members are one question asked twice over: which branches
+# and which refs are unsettled, whether the consumers a ref is kept for are
+# terminal (and what "terminal" is for one of them), the delete for each kind
+# and the one write that records either answer, the obligation the transaction
+# records ahead of its own first attempt, the pass that settles what can be
+# settled and what it asked, the subset that may not be left behind, the two
+# emissions, and the decision the umbrella's terminal reads. Splitting them
+# would separate "may this be deleted" from "delete it", which is the pair the
+# whole reclamation rule is. The imports are what asking costs: the pinned
+# generation the ledger is read off, the resource vocabulary it is typed by,
+# the snapshot transport and the client the two deletes go through, the events
+# and telemetry one reclamation is reported on, and the child scan the terminal
+# rule is proved against. WPS201 and WPS202 are waived.
+#
+# orchestrator/workflow/stages/decomposition/late_transaction.py is the order
+# a cleared split runs in -- the two refusals no step below could repair, the
+# snapshot, the children, the forward links and the stamp that stops them
+# repeating, the supersession of the held plan PR, the retirement that hands
+# the parent to `umbrella`, the activation behind it, and the branch
+# obligation reconciled after -- so it carries 13 members past the WPS202
+# ceiling of 7 and names 20 imports past the WPS201 ceiling of 12. Every step
+# is what makes the next one safe, and the imports are the union of what the
+# order touches: the snapshot and children owners, the hold's release, the
+# worktree teardown and branch resolution, the comment poster and the stamp
+# clock, the domain's failure, phase, resource, and generation records with
+# the events and telemetry that report them, and the label the parent is
+# handed on under. WPS201 and WPS202 are waived.
 #
 # orchestrator/workflow/stages/decomposition/late_settlement.py is what a
 # guarded verdict earns -- the announcement a question owes the issue, the
@@ -670,7 +776,11 @@ per-file-ignores =
     orchestrator/workflow/__init__.py:WPS412,WPS410
     orchestrator/observability/usage/__init__.py:WPS412,WPS410
     orchestrator/observability/analytics/recording/__init__.py:WPS412,WPS410
+    orchestrator/git/snapshots/namespace.py:WPS202
+    orchestrator/git/snapshots/refs.py:WPS202
     orchestrator/workflow/state.py:WPS202
+    orchestrator/workflow/late_split/models.py:WPS214
+    orchestrator/workflow/late_split/state.py:WPS202
     orchestrator/workflow/engine/comments.py:WPS202
     orchestrator/workflow/engine/dispatch.py:WPS201,WPS202
     orchestrator/workflow/engine/drift.py:WPS202
@@ -694,6 +804,10 @@ per-file-ignores =
     orchestrator/workflow/stages/decomposition/late_outcome.py:WPS201,WPS202
     orchestrator/workflow/stages/decomposition/late_owner.py:WPS202
     orchestrator/workflow/stages/decomposition/late_settlement.py:WPS201,WPS202
+    orchestrator/workflow/stages/decomposition/late_snapshot.py:WPS201
+    orchestrator/workflow/stages/decomposition/late_children.py:WPS201,WPS202
+    orchestrator/workflow/stages/decomposition/late_cleanup.py:WPS201,WPS202
+    orchestrator/workflow/stages/decomposition/late_transaction.py:WPS201,WPS202
     orchestrator/workflow/stages/decomposition/late_revision.py:WPS201,WPS202
     orchestrator/workflow/stages/decomposition/late_session.py:WPS201,WPS202
     orchestrator/workflow/stages/decomposition/split.py:WPS201,WPS202
@@ -727,4 +841,5 @@ per-file-ignores =
     orchestrator/git/authentication.py:WPS202
     orchestrator/git/verification/probes.py:WPS202
     orchestrator/git/worktrees/creation.py:WPS202
+    orchestrator/git/worktrees/paths.py:WPS202
     orchestrator/github/pull_requests.py:WPS214

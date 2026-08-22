@@ -304,9 +304,10 @@ class LateContentCase(unittest.TestCase):
 
         These modules are about what a human's content does to a candidate,
         not about what a verdict earns, so the default reply is the one whose
-        settlement neither posts nor rewrites: a split is handed to the
-        transaction that creates its children and leaves the generation, its
-        fingerprints, and the thread exactly as this tick left them.
+        settlement neither posts nor rewrites: a split is handed on to the
+        transaction that creates its children, which the harness holds unless
+        a test asks for it -- so the generation, its fingerprints, and the
+        thread stay exactly as this tick left them.
         """
         return adjudicate(
             self.github,

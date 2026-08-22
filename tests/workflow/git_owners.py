@@ -26,11 +26,13 @@ from orchestrator.git.publication import (
     squash as _squash,
     titles as _publication_titles,
 )
+from orchestrator.git.snapshots import refs as _snapshot_refs
 from orchestrator.git.verification import (
     probes as _verification_probes,
     runner as _verify_runner,
 )
 from orchestrator.git.worktrees import (
+    cleanup as _worktree_cleanup,
     creation as _worktree_creation,
     decomposition as _worktree_decomposition,
     paths as _worktree_paths,
@@ -52,6 +54,7 @@ GIT_SEAM_OWNERS = MappingProxyType({
     "_commit_present": _verification_probes,
     "_committed_paths_since": _verification_probes,
     "_decompose_worktree_path": _worktree_decomposition,
+    "_delete_local_issue_branch": _worktree_cleanup,
     "_ensure_decompose_worktree": _worktree_decomposition,
     "_ensure_pr_worktree": _worktree_creation,
     "_ensure_worktree": _worktree_creation,
@@ -62,12 +65,14 @@ GIT_SEAM_OWNERS = MappingProxyType({
     "_head_on_branch": _verification_probes,
     "_head_sha": _verification_probes,
     "_infer_subject_prefix": _publication_titles,
+    "_local_branch_present": _worktree_cleanup,
     "_measure_candidate": _measurement,
     "_push_branch": _authentication,
     "_rebase_base_into_worktree": _base_sync_pre_pr,
     "_rebase_in_progress": _base_sync_pre_pr,
     "_refresh_base_and_worktrees": _base_sync_refresh,
     "_remote_branch_tip": _authentication,
+    "_remove_issue_worktree": _worktree_cleanup,
     "_resolve_branch_name": _worktree_paths,
     "_revision_contains_path": _verification_probes,
     "_run_verify_commands": _verify_runner,
@@ -75,6 +80,9 @@ GIT_SEAM_OWNERS = MappingProxyType({
     "_worktree_dirty_files": _verification_probes,
     "_worktree_path": _worktree_paths,
     "_worktree_status": _verification_probes,
+    "create_snapshot_ref": _snapshot_refs,
+    "delete_snapshot_ref": _snapshot_refs,
+    "prove_snapshot_ref": _snapshot_refs,
 })
 
 
