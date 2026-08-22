@@ -11,6 +11,7 @@ from github.IssueComment import IssueComment
 from github.PullRequest import PullRequest
 
 from orchestrator.github.aliases import StaticMethodAlias
+from orchestrator.github.comments import carries_own_marker
 from orchestrator.github.pinned_state import GitHubStateMixin
 
 log = logging.getLogger("orchestrator.github")
@@ -166,11 +167,16 @@ class GitHubPullRequestMixin(GitHubStateMixin):
         Idempotent by asking the thread rather than by remembering. The comment
         and whatever durable record the caller keeps of it cannot be made one
         operation, so a crash between them is a repeat waiting to happen: the
-        thread is searched for `marker` -- the caller's own hidden marker, so
-        one episode cannot be silenced by another's -- and the notice is posted
-        only when it is not already there. The close needs no such check; a
-        pull request that is not open is left exactly as it is, which also
-        keeps a merged one from being reopened and re-closed.
+        thread is searched for `marker` and the notice is posted only when it
+        is not already there. Two things make that search safe. The caller
+        scopes the marker to the one episode it belongs to, so a reused pull
+        request cannot read an earlier episode's receipt as this one's; and
+        the comment has to be OURS, since an HTML comment is invisible in the
+        rendered thread and anybody could otherwise post the marker to
+        suppress the one notice saying this change is not to be merged. The
+        close needs no such check; a pull request that is not open is left
+        exactly as it is, which also keeps a merged one from being reopened
+        and re-closed.
 
         False is every way this did not finish, and the caller retries the
         whole thing: the notice is idempotent and the close is a no-op on the
@@ -321,10 +327,11 @@ class GitHubPullRequestMixin(GitHubStateMixin):
             pr.edit(state=_ISSUE_STATE_CLOSED)
 
     def _pr_carries_marker(self, pr: PullRequest, marker: str) -> bool:
-        """Whether one hidden marker is already on this pull request."""
-        return any(
-            marker in (pr_comment.body or "")
-            for pr_comment in pr.get_issue_comments()
+        """Whether a comment of OURS on this pull request carries `marker`."""
+        return carries_own_marker(
+            pr.get_issue_comments(),
+            marker,
+            bot_login=getattr(self, "_bot_login", None),
         )
 
     def _scan_prs_for_commit(self, branch: str, base: str, head_sha: str):

@@ -18,6 +18,7 @@ from github.Label import Label
 
 from orchestrator import config
 from orchestrator.github import events, labels
+from orchestrator.github.comments import carries_own_marker
 from orchestrator.workflow.state import (
     WorkflowLabel,
     coerce_workflow_label,
@@ -238,6 +239,42 @@ class GitHubIssueMixin:
             body=full_body,
             labels=validated_labels,
         )
+
+    def find_issue_carrying(
+        self, marker: str, *, label: str,
+    ) -> Optional[Issue]:
+        """Return the open issue this orchestrator created carrying `marker`.
+
+        The lookup a create that returned and a process that died a statement
+        later needs. Creating an issue is not undoable and nothing outside
+        GitHub knows the number, so the only way back to it is something the
+        creator put IN it: a hidden marker naming the exact adjudication and
+        the exact slice the issue was opened for.
+
+        Scoped to one workflow label rather than searched repository-wide,
+        because a child is born on exactly one and the alternative is a walk
+        over every open issue. An absent label is an absent child -- nothing
+        this orchestrator created could be wearing it -- so it answers None
+        rather than widening the search.
+
+        The body is what carries the marker, and the author is checked with
+        it: the whole point is to recognize an issue THIS orchestrator opened,
+        and an issue somebody else wrote the marker into is not one to adopt,
+        reseed, and activate as a child.
+        """
+        label_object = self._cached_label(label)
+        if label_object is None:
+            return None
+        for candidate in self.repo.get_issues(
+            **issue_query_options(
+                issue_state=_ISSUE_STATE_OPEN, since=None, label=label_object,
+            ),
+        ):
+            if carries_own_marker(
+                [candidate], marker, bot_login=getattr(self, "_bot_login", None),
+            ):
+                return candidate
+        return None
 
     def _iter_closed_sweep_issues(
         self,

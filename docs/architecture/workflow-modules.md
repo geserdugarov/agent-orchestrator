@@ -201,11 +201,17 @@ workflow/                   publishes the two label vocabularies, `guard_transit
                             -- never repeat -- a resumed walk does, the seed that adds an ancestry without replacing
                             a child's own work, and the body naming the snapshot, the two reuse forms, and the hunk
                             splitting it forbids
-      late_transaction.py   the order a cleared split runs in: the two refusals no step below could repair, the
+      late_transaction.py   the order a cleared split runs in: the three refusals no step below could repair, the
                             snapshot before any child, the children before any link, the forward links behind the
-                            stamp that stops them repeating, the held plan PR superseded and closed, the generation
-                            retired onto `workflow:umbrella` in the write that hands the issue on, the activation
-                            behind it, and the branch cleanup recorded as owed and reconciled after
+                            receipt that stops them repeating, the held plan PR superseded and closed under a
+                            marker scoped to this adjudication, the generation retired onto `workflow:umbrella` in
+                            the write that hands the issue on, the activation behind it, and the branch cleanup
+                            recorded as owed and attempted after
+      late_cleanup.py       what a split still owes a remote once its children are running: the branch obligations
+                            that are not reconciled and the refs still held, the rule that decides whether a ref's
+                            recorded consumers have all ended, the two deletes and the one write that records either
+                            answer, what may not be left behind, and the question the umbrella's terminal asks
+                            before it closes anything
       late_settlement.py    what a guarded verdict earns: the announcement a question owes the issue, the exemption
                             naming the measured commit, the plan-PR hold released and the pull request reconciled
                             against that commit in any state -- with a settled pointer dropped rather than handed on

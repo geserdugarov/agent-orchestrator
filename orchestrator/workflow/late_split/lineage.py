@@ -39,12 +39,15 @@ branch, a tag, or nothing at all.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any
+
+from typing import Optional
 
 from orchestrator.git.snapshots import namespace as _namespace
 from orchestrator.github.pinned_state import PinnedState
 from orchestrator.workflow.late_split import formats as _formats
 from orchestrator.workflow.late_split import payloads as _payloads
+from orchestrator.workflow.late_split.models import LateGeneration
 
 _ROOT_ISSUE = "late_ancestry_root_issue"
 _DEPTH = "late_ancestry_depth"
@@ -148,6 +151,41 @@ def clear_late_ancestry(state: PinnedState) -> None:
     """Drop every ancestry field, leaving the rest of the state alone."""
     for key in LATE_ANCESTRY_KEYS:
         state.data.pop(key, None)
+
+
+def contradicted_lineage(
+    state: PinnedState, generation: LateGeneration,
+) -> Optional[str]:
+    """Why this generation's lineage disagrees with the ancestry, or None.
+
+    The one production reading of an ancestry, and it is a refusal rather than
+    a substitution. What a child's own generation is minted from is this
+    record; if the two ever disagree, the generation was minted without it --
+    and the failure that matters is the one that reads the child as shallower
+    or rooted elsewhere than it is, which is exactly how a lineage buys itself
+    another generation past the cap the bound exists to enforce.
+
+    Refusing rather than correcting is deliberate. A generation whose depth
+    was minted wrong has already been adjudicated under a prompt that told the
+    agent how much room it had, so quietly deepening it here would act on a
+    verdict nobody asked for at that depth. An issue with no recorded ancestry
+    is a root and contradicts nothing.
+    """
+    ancestry = read_late_ancestry(state)
+    if not ancestry.is_present:
+        return None
+    if ancestry.root_issue != generation.root_issue:
+        return (
+            f"it was created by issue #{ancestry.parent_issue} under root "
+            f"#{ancestry.root_issue}, and the generation names root "
+            f"#{generation.root_issue}"
+        )
+    if ancestry.lineage_depth != generation.lineage_depth:
+        return (
+            f"it was created at lineage depth {ancestry.lineage_depth}, and "
+            f"the generation names depth {generation.lineage_depth}"
+        )
+    return None
 
 
 def _snapshot_ref(raw: Any) -> str:

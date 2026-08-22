@@ -641,6 +641,19 @@ rather than preserving.
   owed when the identity beside it is damaged. Dropping any of it would be an obligation deleted from the issue that
   still owes it — a cleanup that looks complete, or a snapshot reclaimed as though nobody were waiting on it — so a
   generation holding an opaque ledger is one nothing may treat as settled.
+- **The split's own registers.** `late_split_children` is the ordered, positional list of the children THIS
+  generation created — entry `i` is the child that owns slice `i` of its manifest — and `late_links_announced` says
+  the forward-link comment has been made. Both live on the generation rather than beside the stage's shared keys
+  because both have to be scoped to one adjudication. The stage's `children` list and `dep_graph` belong to
+  whichever decomposition last wrote them, and an issue that was decomposed, saw its children resolve, and then
+  implemented an oversized candidate still carries the old ones — so a transaction reading `children` would adopt
+  **completed** issues by manifest index, and `decomposed_at` would suppress the very announcement the split owes.
+  The stage's list and graph are written *from* the register instead, which replaces the earlier decomposition's
+  rather than leaving one standing. The register is read all-or-nothing: an entry this binary did not write makes
+  the whole field read back empty, because skipping one would shift every child after it onto somebody else's slice
+  — and an empty answer costs a marker lookup rather than a wrong adoption. That lookup is the other half: every
+  child is created carrying `<!--orchestrator-late-child:cycle=…:generation=…:index=…-->`, so a child created into
+  a crash before its number was recorded is adopted rather than opened twice.
 - **Inherited lineage.** `late_ancestry_root_issue`, `late_ancestry_depth`, `late_ancestry_parent`,
   `late_ancestry_cycle_id`, `late_ancestry_generation`, `late_ancestry_snapshot_ref`,
   `late_ancestry_snapshot_sha`, `late_ancestry_base_branch`, and `late_declared_scope` are what a child born of a
@@ -660,7 +673,10 @@ rather than preserving.
   workflow another way carries none of these keys, and a hand-edited one reads back absent rather than becoming a
   lineage nobody wrote. The ref is checked against the namespace that owns it rather than merely for being a string
   — a value outside `refs/orchestrator/late-split/` names a branch, a tag, or nothing, and handing one to a child is
-  worse than handing it none.
+  worse than handing it none. The record is READ where it matters most: a split refuses outright when the ancestry
+  disagrees with the generation's own lineage, because a generation naming a shallower depth or a different root is
+  one minted without this record — and a shallower depth is exactly how a lineage would buy itself a generation past
+  `MAX_LINEAGE_DEPTH`.
 - **Pending owner check.** `late_owner_check_pending` says a completed run's outcome has not yet been cleared by a
   fresh read of the issue it belongs to. It is written *before* that read is taken and dropped when one succeeds or
   the cycle is cancelled, and while it is set no later tick may treat the generation as settled, however small,

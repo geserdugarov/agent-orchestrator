@@ -104,8 +104,9 @@ The late size gate preserves a superseded candidate under
   tag, or a pull-request ref.
 
 The refs hold objects, so they hold *content*: a snapshot is a copy of a candidate that was never published. It lives
-in the same repository under the same visibility as the branch it came from, and it is reclaimed once every recorded
-direct consumer is terminal. It is not a place to put anything the repository itself may not hold.
+in the same repository under the same visibility as the branch it came from, and it is deleted at the umbrella's own
+terminal once every recorded direct consumer is terminal — a ref whose delete the remote refuses holds that terminal
+open rather than being silently abandoned. It is not a place to put anything the repository itself may not hold.
 
 ### Required human reviews for dependency-touching changes
 

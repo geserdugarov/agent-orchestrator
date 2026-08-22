@@ -19,9 +19,10 @@ from contextlib import nullcontext
 from dataclasses import replace
 
 from orchestrator.git.snapshots.refs import SnapshotOutcome
+from orchestrator.workflow.late_split import lineage as _lineage
 from orchestrator.workflow.late_split import state as _late_state
-from orchestrator.workflow.stages.decomposition import late_hold as _late_hold
 from orchestrator.workflow.stages.decomposition import (
+    late_hold as _late_hold,
     late_transaction as _late_transaction,
 )
 from orchestrator.workflow.stages.decomposition.late_models import (
@@ -66,6 +67,8 @@ KEY_CHILDREN = "children"
 KEY_CONSUMERS = "late_consumers"
 KEY_DEP_GRAPH = "dep_graph"
 KEY_DECOMPOSED_AT = "decomposed_at"
+KEY_LINKS_ANNOUNCED = "late_links_announced"
+KEY_SPLIT_CHILDREN = "late_split_children"
 KEY_EXPECTED_CHILDREN = "expected_children_count"
 KEY_PARENT_NUMBER = "parent_number"
 KEY_PR_NUMBER = "pr_number"
@@ -81,6 +84,19 @@ KEY_ANCESTRY_CYCLE = "late_ancestry_cycle_id"
 KEY_ANCESTRY_GENERATION = "late_ancestry_generation"
 KEY_ANCESTRY_BASE = "late_ancestry_base_branch"
 KEY_DECLARED_SCOPE = "late_declared_scope"
+
+# The two receipts this transaction stamps, spelled for the exact adjudication
+# every case runs: a marker scoped to another one is a receipt for another
+# episode, which is the whole reason they carry an identity at all.
+SUPERSESSION_MARKER = (
+    f"<!--orchestrator-late-supersession:issue={LATE_ISSUE_NUMBER}"
+    f":cycle={CYCLE_ID}:generation={GENERATION_NUMBER}-->"
+)
+
+FORWARD_LINK_MARKER = (
+    f"<!--orchestrator-late-split:cycle={CYCLE_ID}"
+    f":generation={GENERATION_NUMBER}-->"
+)
 
 EVENT_LATE_SNAPSHOT = "late_snapshot"
 EVENT_LATE_CLEANUP = "late_cleanup"
@@ -205,6 +221,18 @@ def label_of(github: FakeGitHubClient, issue_number: int) -> str:
 def first_child(github: FakeGitHubClient):
     """The child a split created for the first slice of its manifest."""
     return github.created_child_issues[0]
+
+
+def ancestry_of(github: FakeGitHubClient, issue_number: int):
+    """What one child reads back as the lineage it was created under.
+
+    Read through the domain's own reader rather than off the raw keys, so a
+    test asserts on what a descendant's size gate will actually inherit
+    rather than on the spelling it happens to be stored under.
+    """
+    return _lineage.read_late_ancestry(
+        github.read_pinned_state(github.get_issue(issue_number)),
+    )
 
 
 def refused_snapshot(outcome: SnapshotOutcome) -> SnapshotSeed:

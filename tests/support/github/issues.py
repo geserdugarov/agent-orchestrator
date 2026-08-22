@@ -18,9 +18,16 @@ from orchestrator.workflow.state import (
     stage_name,
 )
 
+from orchestrator.github.comments import carries_own_marker
+
 from tests.support.github.model_helpers import _has_closed_sweep_label
 from tests.support.github.state import _CommentHistory, _LabelHistory
-from tests.support.github.models import FakeComment, FakeIssue, FakeLabel
+from tests.support.github.models import (
+    FakeComment,
+    FakeIssue,
+    FakeLabel,
+    FakeUser,
+)
 
 
 _STATE_CLOSED = "closed"
@@ -139,10 +146,26 @@ class _IssueService:
             title=title,
             body=full_body,
             labels=[FakeLabel(label) for label in validated],
+            user=FakeUser(self._bot_login),
         )
         self._issues[child.number] = child
         self.created_child_issues.append(child)
         return child
+
+    def find_issue_carrying(
+        self, marker: str, *, label: str,
+    ) -> Optional[FakeIssue]:
+        """The open issue this client created carrying `marker`, or None."""
+        for candidate in self._issues.values():
+            if candidate.closed:
+                continue
+            if not any(each.name == label for each in candidate.labels):
+                continue
+            if carries_own_marker(
+                [candidate], marker, bot_login=self._bot_login,
+            ):
+                return candidate
+        return None
 
 
 class _WorkflowStateService:
@@ -209,7 +232,14 @@ class _WorkflowStateService:
 
 class _IssueCommentService:
     def comment(self, issue: FakeIssue, body: str) -> FakeComment:
-        new_comment = FakeComment(id=next(self._comment_id), body=body)
+        # Authored as the client's own login, like the real one: a receipt the
+        # orchestrator reads back off a thread is recognized by its author as
+        # well as by its marker.
+        new_comment = FakeComment(
+            id=next(self._comment_id),
+            body=body,
+            user=FakeUser(self._bot_login),
+        )
         issue.comments.append(new_comment)
         self.posted_comments.append((issue.number, body))
         return new_comment

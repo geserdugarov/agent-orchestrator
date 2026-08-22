@@ -20,7 +20,13 @@ _STATE_OPEN = "open"
 _STATE_CLOSED = "closed"
 _PR_NUMBER = 7
 _HTTP_FORBIDDEN = 403
-_MARKER = "<!--orchestrator-late-supersession-->"
+_BOT_LOGIN = "orchestrator"
+_MARKER = (
+    "<!--orchestrator-late-supersession:issue=7:cycle=3:generation=1-->"
+)
+_EARLIER_MARKER = (
+    "<!--orchestrator-late-supersession:issue=7:cycle=2:generation=1-->"
+)
 _NOTICE = f"superseded by its children\n\n{_MARKER}"
 _GITHUB_LOG = "orchestrator.github"
 
@@ -32,13 +38,19 @@ def _unmarked_pr(*, merged: bool = False, state: str = _STATE_OPEN):
     return pull_request
 
 
+def _bot_comment(body: str):
+    """A comment this orchestrator's own token authored."""
+    return MagicMock(body=body, user=MagicMock(login=_BOT_LOGIN))
+
+
 class PullRequestSupersessionTest(unittest.TestCase):
     """One notice, said at most once, and then the pull request is closed."""
 
     def setUp(self) -> None:
         # Bypass the networked __init__; the method reads only the PR it is
-        # handed.
+        # handed and the login it authenticated as.
         self.gh = GitHubClient.__new__(GitHubClient)
+        self.gh._bot_login = _BOT_LOGIN
 
     def test_it_says_so_and_closes_an_open_pr(self) -> None:
         pull_request = _unmarked_pr()
@@ -57,7 +69,7 @@ class PullRequestSupersessionTest(unittest.TestCase):
         # said" -- and a retry after that crash adds nothing.
         pull_request = _unmarked_pr()
         pull_request.get_issue_comments.return_value = [
-            MagicMock(body=f"earlier notice\n\n{_MARKER}"),
+            _bot_comment(f"earlier notice\n\n{_MARKER}"),
         ]
 
         self.gh.supersede_pr(pull_request, notice=_NOTICE, marker=_MARKER)
@@ -68,7 +80,32 @@ class PullRequestSupersessionTest(unittest.TestCase):
     def test_another_episode_s_marker_is_not_ours(self) -> None:
         pull_request = _unmarked_pr()
         pull_request.get_issue_comments.return_value = [
-            MagicMock(body="<!--orchestrator-late-owner-recovery-->"),
+            _bot_comment("<!--orchestrator-late-owner-recovery-->"),
+        ]
+
+        self.gh.supersede_pr(pull_request, notice=_NOTICE, marker=_MARKER)
+
+        pull_request.create_issue_comment.assert_called_once_with(_NOTICE)
+
+    def test_an_earlier_receipt_is_not_this_one(self) -> None:
+        # A plan pull request outlives a cycle, so an unscoped marker would
+        # read the previous episode's notice as this one's and say nothing.
+        pull_request = _unmarked_pr()
+        pull_request.get_issue_comments.return_value = [
+            _bot_comment(f"superseded before\n\n{_EARLIER_MARKER}"),
+        ]
+
+        self.gh.supersede_pr(pull_request, notice=_NOTICE, marker=_MARKER)
+
+        pull_request.create_issue_comment.assert_called_once_with(_NOTICE)
+
+    def test_a_forged_marker_silences_nothing(self) -> None:
+        # An HTML comment is invisible in the rendered thread and trivially
+        # copied, so anybody could otherwise suppress the one sentence saying
+        # this change is not to be merged.
+        pull_request = _unmarked_pr()
+        pull_request.get_issue_comments.return_value = [
+            MagicMock(body=_MARKER, user=MagicMock(login="outsider")),
         ]
 
         self.gh.supersede_pr(pull_request, notice=_NOTICE, marker=_MARKER)
@@ -92,6 +129,14 @@ class PullRequestSupersessionTest(unittest.TestCase):
                     _NOTICE,
                 )
                 pull_request.edit.assert_not_called()
+
+
+class PullRequestSupersessionRefusalTest(unittest.TestCase):
+    """What a marker nobody here wrote, and a refused call, are worth."""
+
+    def setUp(self) -> None:
+        self.gh = GitHubClient.__new__(GitHubClient)
+        self.gh._bot_login = _BOT_LOGIN
 
     def test_a_refused_step_reports_back(self) -> None:
         # A lazy pull request raises from the first attribute read as readily

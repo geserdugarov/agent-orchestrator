@@ -426,8 +426,13 @@ established. Two more arrive with the split transaction
 snapshot ref established (`retained`) or refused (`failed`), and one `late_cleanup` per superseded branch the
 transaction reconciled (`reconciled`) or could not (`failed`) — the latter beside a `late_failure` carrying
 `snapshot_failed` or `branch_cleanup_failed`, and `child_create_failed` or `supersession_failed` where those steps
-park instead. `late_restart` is still the contract the restart step will emit under, and no record of it can appear
-in either stream until that step lands.
+park instead. What the transaction could not reclaim is retried at the umbrella's terminal gate, which emits the
+same pair under `stage: umbrella` on every tick that finds every child resolved and something still owed — the
+branch unconditionally, and the snapshot ref once every recorded direct consumer is terminal, carrying
+`snapshot_delete_failed` where the remote refuses one. So a repeated `late_cleanup` with `outcome: failed` on one
+issue is exactly the shape of an obligation nobody can settle, and the umbrella stays open while it repeats.
+`late_restart` is still the contract the restart step will emit under, and no record of it can appear in either
+stream until that step lands.
 
 **Family-typed events.** A record is built from a `LateEvent` on `workflow/late_split/events.py`, and each family
 declares which detail fields it requires and which it may carry (`_FAMILY_FIELDS`). Anything else raises

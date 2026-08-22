@@ -16,8 +16,6 @@ import unittest
 from orchestrator.git.snapshots import refs as _snapshot_refs
 from orchestrator.workflow.stages.decomposition import (
     late_children as _late_children,
-)
-from orchestrator.workflow.stages.decomposition import (
     late_transaction as _late_transaction,
 )
 from orchestrator.workflow.stages.decomposition.late_models import (
@@ -32,14 +30,20 @@ from tests.workflow.stages.decomposition.late_crash_support import (
 from tests.workflow.stages.decomposition.late_test_support import (
     LATE_ISSUE_NUMBER,
 )
+from tests.support.fakes import FakeComment, FakeUser
 from tests.workflow.stages.decomposition.late_transaction_support import (
     CHILDREN,
+    FORWARD_LINK_MARKER,
+    SNAPSHOT_REF,
+    SUPERSESSION_MARKER,
+)
+from tests.workflow.stages.decomposition.late_transaction_support import (
     KEY_CHILDREN,
     KEY_CONSUMERS,
     KEY_DECOMPOSED_AT,
     KEY_EXPECTED_CHILDREN,
+    KEY_LINKS_ANNOUNCED,
     KEY_UMBRELLA,
-    SNAPSHOT_REF,
 )
 from tests.workflow.stages.decomposition.late_transaction_support import (
     HeldPlanPrSplitCase,
@@ -140,26 +144,47 @@ class ChildBoundaryTest(LateSplitCase, unittest.TestCase):
 
 
 class AnnouncementBoundaryTest(LateSplitCase, unittest.TestCase):
-    """The comment goes out ahead of the stamp that suppresses a repeat."""
+    """The thread is what stops a repeat the durable receipt cannot."""
 
-    def test_a_death_pre_stamp_repeats_once(self) -> None:
-        # The window costs a repeated sentence rather than an umbrella that
-        # never said where its work went.
+    def test_a_death_pre_stamp_says_it_once(self) -> None:
+        # The comment landed and the write that recorded it did not, which is
+        # indistinguishable from the outside -- so the resume looks for this
+        # generation's own marker before saying anything.
         with self.assertRaises(KeyboardInterrupt):
             self._transact(killed=killed_after(self.github, "comment"))
 
-        self.assertIsNone(self._pinned().get(KEY_DECOMPOSED_AT))
+        self.assertFalse(self._pinned().get(KEY_LINKS_ANNOUNCED, False))
 
         self._resume()
 
         self.assertEqual(
             len([
                 body for _, body in self.github.posted_comments
-                if SNAPSHOT_REF in body
+                if FORWARD_LINK_MARKER in body
             ]),
-            2,
+            1,
         )
+        self.assertTrue(self._pinned()[KEY_LINKS_ANNOUNCED])
         self.assertIsNotNone(self._pinned()[KEY_DECOMPOSED_AT])
+
+    def test_a_forged_marker_silences_nothing(self) -> None:
+        # An HTML comment is invisible and trivially copied, so a third party
+        # posting the marker must not suppress the one sentence saying where
+        # this issue's work went.
+        self.issue.comments.append(FakeComment(
+            id=9, body=f"nothing to see\n\n{FORWARD_LINK_MARKER}",
+            user=FakeUser("outsider"),
+        ))
+
+        self._transact()
+
+        self.assertEqual(
+            len([
+                body for _, body in self.github.posted_comments
+                if FORWARD_LINK_MARKER in body
+            ]),
+            1,
+        )
 
 
 class SupersessionBoundaryTest(HeldPlanPrSplitCase, unittest.TestCase):
@@ -177,7 +202,7 @@ class SupersessionBoundaryTest(HeldPlanPrSplitCase, unittest.TestCase):
         self.assertEqual(
             len([
                 body for _, body in self.github.posted_pr_comments
-                if _late_transaction.SUPERSESSION_MARKER in body
+                if SUPERSESSION_MARKER in body
             ]),
             1,
         )

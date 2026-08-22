@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import unittest
 from dataclasses import replace
+from types import MappingProxyType
 
 from orchestrator.workflow.late_split.models import MAX_LINEAGE_DEPTH
 from orchestrator.workflow.stages.decomposition.late_models import (
@@ -19,26 +20,18 @@ from tests.workflow.stages.decomposition.late_test_support import (
     LATE_ISSUE_NUMBER,
     ROOT_ISSUE,
 )
+from tests.support.fakes import make_issue
+from tests.workflow.fixtures import LABEL_BLOCKED, LABEL_DONE
 from tests.workflow.stages.decomposition.late_crash_support import (
+    killed_after,
     recording_children,
     refusing,
     refusing_child_writes,
 )
 from tests.workflow.stages.decomposition.late_transaction_support import (
-    KEY_ANCESTRY_BASE,
-    KEY_ANCESTRY_CYCLE,
-    KEY_ANCESTRY_DEPTH,
-    KEY_ANCESTRY_GENERATION,
-    KEY_ANCESTRY_PARENT,
-    KEY_ANCESTRY_REF,
-    KEY_ANCESTRY_ROOT,
-    KEY_ANCESTRY_SHA,
-)
-from tests.workflow.stages.decomposition.late_transaction_support import (
     CHILDREN,
     KEY_CHILDREN,
     KEY_CONSUMERS,
-    KEY_DECLARED_SCOPE,
     KEY_DEP_GRAPH,
     KEY_EXPECTED_CHILDREN,
     KEY_PARENT_NUMBER,
@@ -48,10 +41,25 @@ from tests.workflow.stages.decomposition.late_transaction_support import (
     PARK_CHILDREN_FAILED,
     SNAPSHOT_REF,
     LateSplitCase,
+    ancestry_of,
     first_child,
+    label_of,
 )
 
 RESOURCE_CHILD = "child"
+
+# The children an earlier decomposition of this same issue left behind, and
+# the graph it recorded over them.
+_DONE_CHILD = 900
+
+_PRIOR_MANIFEST = MappingProxyType({
+    "children": [_DONE_CHILD, _DONE_CHILD + 1],
+    "dep_graph": {"1": [0]},
+    "decomposed_at": "2026-01-01T00:00:00Z",
+})
+
+# A child marker naming a generation this transaction is not running.
+_FOREIGN_MARKER = "<!--orchestrator-late-child:cycle=1:generation=1:index=0-->"
 
 STATE_PENDING = "pending"
 
@@ -108,7 +116,7 @@ class ChildCreationOrderTest(LateSplitCase, unittest.TestCase):
         self._transact()
         created = list(self.github.created_child_issues)
 
-        self._transact()
+        self._resume()
 
         self.assertEqual(self.github.created_child_issues, created)
         self.assertEqual(
@@ -146,7 +154,7 @@ class ChildCreationOrderTest(LateSplitCase, unittest.TestCase):
         recorded = list(self._pinned()[KEY_CHILDREN])
         widths = []
         with recording_children(self.github, widths):
-            self._transact()
+            self._resume()
 
         self.assertEqual(recorded, self._pinned()[KEY_CHILDREN])
         self.assertTrue(
@@ -155,30 +163,112 @@ class ChildCreationOrderTest(LateSplitCase, unittest.TestCase):
         )
 
 
+class PriorDecompositionTest(LateSplitCase, unittest.TestCase):
+    """An earlier decomposition's children are not this split's to adopt.
+
+    The shape that produces one: an issue is decomposed, its children resolve,
+    the parent flips back to `ready`, implements, and its committed candidate
+    turns out to be oversized. It still carries the earlier `children` list
+    and dependency graph the whole time.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.settled = [_DONE_CHILD, _DONE_CHILD + 1]
+        for number in self.settled:
+            self.github.add_issue(make_issue(number, label=LABEL_DONE))
+        self.github.seed_state(
+            self.issue.number, **{**self._pinned(), **_PRIOR_MANIFEST},
+        )
+
+    def test_it_creates_its_own_children_instead(self) -> None:
+        # Adopting them would reseed and reactivate completed issues, each
+        # under an ancestry it has nothing to do with.
+        self._transact()
+
+        created = [child.number for child in self.github.created_child_issues]
+        self.assertEqual(len(created), len(CHILDREN))
+        self.assertNotIn(_DONE_CHILD, created)
+        self.assertEqual(self._pinned()[KEY_CHILDREN], created)
+
+    def test_it_leaves_the_settled_children_alone(self) -> None:
+        self._transact()
+
+        for number in self.settled:
+            with self.subTest(child=number):
+                self.assertEqual(
+                    label_of(self.github, number), LABEL_DONE,
+                )
+                self.assertEqual(self.github.pinned_data(number), {})
+
+    def test_the_earlier_graph_does_not_survive(self) -> None:
+        # A graph indexed against another manifest would hold this split's
+        # children behind dependencies that are not theirs.
+        self._transact(children=({"title": "A", "body": "only slice"},))
+
+        self.assertIsNone(self._pinned().get(KEY_DEP_GRAPH))
+
+
+class OrphanAdoptionTest(LateSplitCase, unittest.TestCase):
+    """A child created into a crash is adopted, never opened twice."""
+
+    def test_an_unrecorded_child_is_adopted(self) -> None:
+        # The one window the ordered register cannot close on its own: the
+        # create returned and nothing outside GitHub knows the number.
+        with self.assertRaises(KeyboardInterrupt):
+            self._transact(
+                killed=killed_after(self.github, "create_child_issue"),
+            )
+        orphan = self.github.created_child_issues[0].number
+
+        resumed = self._resume()
+
+        self.assertEqual(resumed.disposition, _LateDisposition.SETTLED)
+        self.assertEqual(
+            len(self.github.created_child_issues), len(CHILDREN),
+        )
+        self.assertEqual(self._pinned()[KEY_CHILDREN][0], orphan)
+
+    def test_another_generation_is_not_adopted(self) -> None:
+        # The marker names the adjudication and the slice, so a child of some
+        # earlier generation is not this one's to take over.
+        stranger = self.github.create_child_issue(
+            title="A", body=_FOREIGN_MARKER, parent_number=self.issue.number,
+            labels=[LABEL_BLOCKED],
+        )
+
+        self._transact()
+
+        self.assertNotIn(
+            stranger.number, self._pinned()[KEY_CHILDREN],
+        )
+
+
 class ChildInheritanceTest(LateSplitCase, unittest.TestCase):
     """A child is seeded with the lineage and the snapshot it may reuse."""
 
     def test_it_carries_the_ancestry_it_will_read(self) -> None:
+        seeded = self._seeded_ancestry()
+
+        self.assertEqual(seeded.root_issue, ROOT_ISSUE)
+        self.assertEqual(seeded.parent_issue, LATE_ISSUE_NUMBER)
+        self.assertEqual(seeded.cycle_id, CYCLE_ID)
+        self.assertEqual(seeded.generation, GENERATION_NUMBER)
+        self.assertEqual(seeded.base_branch, BASE_BRANCH)
+
+    def test_it_carries_the_parent_link(self) -> None:
         self._transact()
-        child = first_child(self.github)
 
-        seeded = self._child_state(child.number)
-
-        self.assertEqual(seeded[KEY_ANCESTRY_ROOT], ROOT_ISSUE)
-        self.assertEqual(seeded[KEY_ANCESTRY_PARENT], LATE_ISSUE_NUMBER)
-        self.assertEqual(seeded[KEY_ANCESTRY_CYCLE], CYCLE_ID)
-        self.assertEqual(seeded[KEY_ANCESTRY_GENERATION], GENERATION_NUMBER)
-        self.assertEqual(seeded[KEY_ANCESTRY_BASE], BASE_BRANCH)
-        self.assertEqual(seeded[KEY_PARENT_NUMBER], LATE_ISSUE_NUMBER)
+        self.assertEqual(
+            self._child_state(self._first())[KEY_PARENT_NUMBER],
+            LATE_ISSUE_NUMBER,
+        )
 
     def test_it_carries_the_snapshot_and_commit(self) -> None:
-        self._transact()
-        child = first_child(self.github)
+        seeded = self._seeded_ancestry()
 
-        seeded = self._child_state(child.number)
-
-        self.assertEqual(seeded[KEY_ANCESTRY_REF], SNAPSHOT_REF)
-        self.assertEqual(seeded[KEY_ANCESTRY_SHA], CANDIDATE_SHA)
+        self.assertEqual(seeded.snapshot_ref, SNAPSHOT_REF)
+        self.assertEqual(seeded.snapshot_sha, CANDIDATE_SHA)
 
     def test_a_child_carries_its_declared_scope(self) -> None:
         # What its own late prompt states as the scope, so an indivisible
@@ -188,7 +278,7 @@ class ChildInheritanceTest(LateSplitCase, unittest.TestCase):
 
         self.assertEqual(
             [
-                self._child_state(child.number)[KEY_DECLARED_SCOPE]
+                ancestry_of(self.github, child.number).scope
                 for child in self.github.created_child_issues
             ],
             [child["body"] for child in CHILDREN],
@@ -198,16 +288,23 @@ class ChildInheritanceTest(LateSplitCase, unittest.TestCase):
         # By the time a retry reaches a child that was already created, that
         # child may be implementing.
         self._transact()
-        child = first_child(self.github)
+        number = self._first()
         self.github.seed_state(
-            child.number, **self._child_state(child.number), dev_agent="codex",
+            number, **self._child_state(number), dev_agent="codex",
         )
 
+        self._resume()
+
+        self.assertEqual(self._child_state(number)["dev_agent"], "codex")
+
+    def _first(self) -> int:
+        """The number of the child that owns the manifest's first slice."""
+        return first_child(self.github).number
+
+    def _seeded_ancestry(self):
+        """Split once, and read what the first child was seeded with."""
         self._transact()
-
-        self.assertEqual(
-            self._child_state(child.number)["dev_agent"], "codex",
-        )
+        return ancestry_of(self.github, self._first())
 
 
 class ChildBodyTest(LateSplitCase, unittest.TestCase):
@@ -252,7 +349,7 @@ class LineageDepthTest(LateSplitCase, unittest.TestCase):
 
                 child = first_child(self.github)
                 self.assertEqual(
-                    self._child_state(child.number)[KEY_ANCESTRY_DEPTH],
+                    ancestry_of(self.github, child.number).lineage_depth,
                     born_at,
                 )
 

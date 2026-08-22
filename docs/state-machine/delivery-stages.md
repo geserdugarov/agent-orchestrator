@@ -216,12 +216,25 @@ The hash is re-persisted on every reaction so a single edit triggers exactly one
 ## `_handle_umbrella` (label `workflow:umbrella`)
 - **Trigger**: each tick while the label is `workflow:umbrella` (only ever a parent — set by the decomposer when the
   manifest's `umbrella` boolean is true).
-- **Input**: pinned `children` and optional `dep_graph` on the parent.
+- **Input**: pinned `children` and optional `dep_graph` on the parent, plus the late generation's obligation ledger
+  when the umbrella was made by a late split.
 - **Internal flow**: mirrors `_handle_blocked` for the rejected / manually-closed checks and dep-graph walk. The only
-  difference is the all-done terminal: when every child reaches `done`, post a checkmark comment, stamp
-  `umbrella_resolved_at`, set label `done`, close the issue. A `children`-less umbrella is treated as corrupt state and
-  parks.
-- **Output**: terminal `done`, OR a sibling unblocked, OR a HITL park, OR a no-op.
+  difference is the all-done terminal: when every child reaches `done`, reconcile whatever the issue still owes a
+  remote, and only then post a checkmark comment, stamp `umbrella_resolved_at`, set label `done`, and close the issue.
+  A `children`-less umbrella is treated as corrupt state and parks.
+- **What the terminal waits on.** An umbrella made by a late split
+  ([`../workflow/roles.md`](../workflow/roles.md#what-a-cleared-split-actually-does)) owes two things — the branch its
+  superseded candidate was committed on, and the immutable ref that candidate was preserved under — and this is the
+  last tick that could settle either: nothing revisits a closed umbrella, and no other handler reads that ledger. So
+  `late_cleanup` retries every `branch` entry that is not `reconciled`, and deletes each held `snapshot_ref` once
+  every recorded direct consumer is terminal — which all-children-resolved has just made true, proved off the child
+  scan this handler already took rather than off requests of its own. A consumer that cannot be proved terminal keeps
+  the ref. A refusal keeps the label rather than closing, which *is* the retry: the parent stays visibly open instead
+  of closing over a remote nobody will ever reap. A `snapshot_ref` still `retained` does not block — that condition is
+  a later sweep's to clear — while one the remote *refused* does, and an umbrella with no recorded generation owes
+  nothing and answers without a write.
+- **Output**: terminal `done`, OR a sibling unblocked, OR a HITL park, OR a held terminal (something still owed), OR
+  a no-op.
 
 ## `_handle_implementing` (label `workflow:implementing`)
 - **Trigger**: each tick while the label is `workflow:implementing`.

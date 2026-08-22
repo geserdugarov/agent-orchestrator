@@ -57,10 +57,12 @@ from typing import Optional
 
 from orchestrator.git.worktrees import cleanup as _worktree_cleanup
 from orchestrator.git.worktrees import paths as _worktree_paths
+from orchestrator.github import comments as _github_comments
 from orchestrator.workflow.engine import comments as _comments
 from orchestrator.workflow.engine import usage as _usage
 from orchestrator.workflow.late_split import events as _events
 from orchestrator.workflow.late_split import formats as _formats
+from orchestrator.workflow.late_split import lineage as _lineage
 from orchestrator.workflow.late_split import telemetry as _telemetry
 from orchestrator.workflow.late_split.models import (
     LateFailure,
@@ -72,6 +74,9 @@ from orchestrator.workflow.late_split.models import (
 )
 from orchestrator.workflow.stages.decomposition import (
     late_children as _late_children,
+)
+from orchestrator.workflow.stages.decomposition import (
+    late_cleanup as _late_cleanup,
 )
 from orchestrator.workflow.stages.decomposition import late_hold as _late_hold
 from orchestrator.workflow.stages.decomposition import (
@@ -97,10 +102,20 @@ _DECOMPOSED_AT = "decomposed_at"
 
 _PR_NUMBER = "pr_number"
 
-# Stamped on every supersession notice so a retry recognizes one it posted even
-# when the write that was supposed to record it never landed. This mode's own,
-# invisible in the rendered thread.
-SUPERSESSION_MARKER = "<!--orchestrator-late-supersession-->"
+# Stamped on the two comments this transaction owes, so a retry recognizes one
+# it posted even when the write that was supposed to record it never landed.
+# Both are scoped to the exact adjudication: a plan pull request outlives a
+# cycle and an issue thread outlives everything, so an unscoped marker would
+# read an earlier episode's receipt as this one's. HTML comments, so neither is
+# visible in the rendered thread.
+_SUPERSESSION_MARKER = (
+    "<!--orchestrator-late-supersession:issue={issue}"
+    ":cycle={cycle}:generation={generation}-->"
+)
+
+_FORWARD_LINK_MARKER = (
+    "<!--orchestrator-late-split:cycle={cycle}:generation={generation}-->"
+)
 
 _FORWARD_LINKS = (
     ":scissors: the late decomposer read the committed candidate `{sha}` as "
@@ -108,7 +123,7 @@ _FORWARD_LINKS = (
     "work is handed to its children:\n\n{children}\n\nThe committed work is "
     "preserved on the immutable ref `{ref}` at `{sha}`; each child reuses the "
     "part of it their own scope covers. This issue has no implementation of "
-    "its own and closes once every child resolves."
+    "its own and closes once every child resolves.\n\n{marker}"
 )
 
 _SUPERSESSION_NOTICE = (
@@ -117,8 +132,7 @@ _SUPERSESSION_NOTICE = (
     "request is closed without merging and issue #{parent} is now an "
     "umbrella.\n\nThe work it carried is preserved on the immutable ref "
     "`{ref}` at `{sha}` -- nothing is lost, and each child reuses the part of "
-    "it their scope covers:\n\n{children}\n\n"
-    f"{SUPERSESSION_MARKER}"
+    "it their scope covers:\n\n{children}\n\n{marker}"
 )
 
 _OPAQUE_LEDGER_PARK = (
@@ -129,6 +143,15 @@ _OPAQUE_LEDGER_PARK = (
     "and merging into one it cannot read would drop whatever it does not "
     "understand. Settle the ledger by hand, and the next tick continues from "
     "the same recorded verdict."
+)
+
+_CONTRADICTED_PARK = (
+    "the committed candidate for this issue was adjudicated as a split, but "
+    "this issue's recorded lineage does not agree with the generation that "
+    "was adjudicated: {reason}. Nothing was created. The generation was "
+    "minted without the ancestry this issue was created under, and acting on "
+    "it would let the lineage buy itself a generation past the bound -- so "
+    "the two have to be reconciled by hand."
 )
 
 _AT_BOUND_PARK = (
@@ -199,13 +222,20 @@ def _run_late_split(
 def _refused_split(context: _LateContext) -> Optional[str]:
     """Why this split may not run at all, or None when it may.
 
-    Two refusals, and both are about state no step below could repair. A
+    Three refusals, and each is about state no step below could repair. A
     lineage at the bound is checked again here even though the verdict was
     already converted to a question where it was read: this is the transaction
     that creates a generation, so the cap is enforced where the children would
     be born as well as where the reply is parsed.
 
-    An opaque ledger is the other. A split records a snapshot and one consumer
+    An ancestry that disagrees with the generation is the second, and it is
+    the same cap read from the other side. A child born of an earlier split
+    carries the lineage it was created under; its own generation is minted
+    from that record, so a generation naming a different root or a shallower
+    depth is one minted without it -- and a shallower depth is exactly how a
+    lineage buys itself another generation past the bound.
+
+    An opaque ledger is the third. A split records a snapshot and one consumer
     per child on ledgers whose unreadable entries are written back verbatim, so
     an update merged into the typed view would vanish at the next write --
     taking with it either the ref nobody would then reclaim or the consumer the
@@ -215,39 +245,86 @@ def _refused_split(context: _LateContext) -> Optional[str]:
         return _AT_BOUND_PARK
     if context.generation.has_opaque_ledger:
         return _OPAQUE_LEDGER_PARK
+    contradicted = _lineage.contradicted_lineage(
+        context.state, context.generation,
+    )
+    if contradicted is not None:
+        return _CONTRADICTED_PARK.format(reason=contradicted)
     return None
 
 
 def _announced(
     context: _LateContext, plan: _SplitPlan, snapshot_ref: str,
 ) -> None:
-    """Say on the parent what it became, and stamp that it was said.
+    """Say on the parent what it became, exactly once.
 
-    Gated on the stamp rather than on the phase, because the phase is rewritten
-    by the owner-read claim every retry passes through and would not survive to
-    be read here. The comment goes out ahead of the stamp, so the window a
-    crash can land in costs the write rather than the sentence -- and the next
-    tick, finding no stamp, repeats one comment instead of leaving an umbrella
-    that never said where its work went.
+    Two gates, because neither answers the whole question on its own. The
+    generation's own `links_announced` flag is the cheap one and the one that
+    holds on the ordinary retry -- it is scoped to this adjudication, unlike
+    `decomposed_at`, which an EARLIER decomposition of the same issue already
+    wrote and which would therefore suppress this announcement entirely. The
+    thread is the expensive one and the one that covers the window the flag
+    cannot: a comment that landed and a process that died before the write is
+    indistinguishable from the outside, so the marker this generation stamps
+    into its own sentence is looked for among the comments before another is
+    posted. It is asked only when the flag is unset, so a resume past the
+    announcement costs nothing.
+
+    `decomposed_at` is written all the same, because it is what the stage's
+    own readers date a decomposition by; it is simply not this step's receipt.
     """
-    if context.state.get(_DECOMPOSED_AT) is not None:
+    if context.generation.links_announced:
         return
-    _comments._post_issue_comment(
-        context.gh,
-        context.issue,
-        context.state,
-        _FORWARD_LINKS.format(
-            sha=context.generation.candidate_sha,
-            count=len(plan.created),
-            children=_child_lines(plan),
-            ref=snapshot_ref,
-        ),
-    )
+    if not _links_on_thread(context):
+        _comments._post_issue_comment(
+            context.gh,
+            context.issue,
+            context.state,
+            _FORWARD_LINKS.format(
+                sha=context.generation.candidate_sha,
+                count=len(plan.created),
+                children=_child_lines(plan),
+                ref=snapshot_ref,
+                marker=_forward_marker(context.generation),
+            ),
+        )
     context.state.set(_DECOMPOSED_AT, _usage._now_iso())
     context.generation = replace(
-        context.generation, phase=LatePhase.SUPERSEDING,
+        context.generation,
+        phase=LatePhase.SUPERSEDING,
+        links_announced=True,
     )
     _late_outcome._persist(context)
+
+
+def _links_on_thread(context: _LateContext) -> bool:
+    """Whether this generation's own forward links are already said.
+
+    Walked whole rather than from a watermark: the post moves every watermark
+    this mode keeps past itself, so a scan bounded by one would start above
+    the very comment it is looking for.
+    """
+    return _github_comments.carries_own_marker(
+        context.gh.comments_after(context.issue, None),
+        _forward_marker(context.generation),
+        bot_login=getattr(context.gh, "_bot_login", None),
+    )
+
+
+def _forward_marker(generation: LateGeneration) -> str:
+    """The receipt this generation's forward-link comment carries."""
+    return _FORWARD_LINK_MARKER.format(
+        cycle=generation.cycle_id, generation=generation.generation,
+    )
+
+
+def _supersession_marker(context: _LateContext) -> str:
+    """The receipt this generation's supersession notice carries."""
+    return _SUPERSESSION_MARKER.format(
+        issue=context.issue.number,
+        cycle=context.generation.cycle_id,
+        generation=context.generation.generation,
+    )
 
 
 def _superseded(
@@ -282,6 +359,7 @@ def _superseded(
             ref=snapshot_ref,
             sha=context.generation.candidate_sha,
             children=_child_lines(plan),
+            marker=_supersession_marker(context),
         ),
     )
     if not settled:
@@ -315,7 +393,7 @@ def _closed_over_notice(
         )
         return False
     return context.gh.supersede_pr(
-        held, notice=notice, marker=SUPERSESSION_MARKER,
+        held, notice=notice, marker=_supersession_marker(context),
     )
 
 
@@ -345,13 +423,15 @@ def _handed_to_children(
 
 
 def _reclaimed_branch(context: _LateContext, branch: str) -> None:
-    """Delete the superseded branch, and record whether it is gone.
+    """Take the first swing at the superseded branch, and record the answer.
 
     After activation on purpose: the branch is tidiness with a deadline rather
     than a precondition, and children held back until a remote delete succeeded
     would be work stalled on housekeeping. What it does gate is the umbrella's
-    own terminal completion, which is why a failure is written down as `failed`
-    rather than logged and forgotten.
+    own terminal completion -- which is why a failure is written down rather
+    than logged and forgotten, and why the retry lives on the umbrella
+    (`late_cleanup`) rather than here: an issue this transaction has finished
+    with is one nothing brings back to this owner.
 
     The local checkout goes with it, and it is safe here for one reason: the
     snapshot was created and proved before any of this, so the commit the
@@ -359,26 +439,17 @@ def _reclaimed_branch(context: _LateContext, branch: str) -> None:
     branch is not merely untidy -- the per-tick base refresh treats it as a
     pre-PR checkout and accretes merges onto a branch nobody will publish.
     """
-    try:
-        deleted = context.gh.delete_remote_branch(branch)
-    except Exception:
-        log.exception(
-            "issue=#%d superseded branch %r delete raised",
-            context.issue.number, branch,
-        )
-        deleted = False
+    context.generation = _late_cleanup._reclaim_branch(
+        context.gh, context.generation, branch,
+    )
     _worktree_cleanup._remove_issue_worktree(context.spec, context.issue.number)
     _worktree_cleanup._delete_local_issue_branch(
         context.spec, context.issue.number, branch,
     )
+    deleted = branch not in _late_cleanup._owed_branches(context.generation)
     if not deleted:
         _late_outcome._emit_failure(context, LateFailure.BRANCH_CLEANUP_FAILED)
-    _recorded_resource(
-        context,
-        LateResourceKind.BRANCH,
-        branch,
-        LateResourceState.RECONCILED if deleted else LateResourceState.FAILED,
-    )
+    _late_outcome._persist(context)
     _emit_cleanup(context, branch, deleted)
 
 
@@ -396,13 +467,12 @@ def _settled_generation(
     Everything a later reader still needs stays. The identity is what a
     cleanup record is correlated by, the commits are what the snapshot
     preserves, and both ledgers are what the remote is still owed -- including
-    the branch this write is recording as owed for the first time.
+    the branch this write is recording as owed for the first time. The ordered
+    child register stays with them: it is what says which child owns which
+    slice of the manifest, and a transaction re-entered against a retired
+    generation has to adopt them rather than open a second set.
     """
-    owed = generation.with_resource(LateResource(
-        kind=LateResourceKind.BRANCH,
-        target=branch,
-        resource_state=LateResourceState.PENDING,
-    ))
+    owed = _late_cleanup._record_branch_obligation(generation, branch)
     return LateGeneration(
         cycle_id=owed.cycle_id,
         generation=owed.generation,
@@ -415,6 +485,8 @@ def _settled_generation(
         phase=LatePhase.CLEANING_UP,
         resources=owed.resources,
         consumers=owed.consumers,
+        split_children=owed.split_children,
+        links_announced=owed.links_announced,
     )
 
 

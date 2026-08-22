@@ -34,11 +34,12 @@ from tests.workflow.stages.decomposition.late_test_support import (
     ROOT_ISSUE,
 )
 from tests.workflow.stages.decomposition.late_transaction_support import (
+    SUPERSESSION_MARKER,
     CHILDREN,
     EVENT_LATE_CLEANUP,
     KEY_CHILDREN,
     KEY_CONSUMERS,
-    KEY_DECOMPOSED_AT,
+    KEY_LINKS_ANNOUNCED,
     KEY_PR_NUMBER,
     SNAPSHOT_REF,
 )
@@ -75,15 +76,36 @@ class ForwardLinkTest(LateSplitCase, unittest.TestCase):
         self.assertIn(UMBRELLA_FRAGMENT, posted)
 
     def test_a_stamped_announcement_is_not_repeated(self) -> None:
-        # The stamp rather than the phase, which the owner-read claim every
-        # retry passes through rewrites before this owner could read it.
+        # The generation's own receipt rather than the phase, which the
+        # owner-read claim every retry passes through rewrites before this
+        # owner could read it.
         self._transact()
         said = len(self.github.posted_comments)
 
         self._resume()
 
         self.assertEqual(len(self.github.posted_comments), said)
-        self.assertIsNotNone(self._pinned()[KEY_DECOMPOSED_AT])
+        self.assertTrue(self._pinned()[KEY_LINKS_ANNOUNCED])
+
+    def test_an_earlier_stamp_suppresses_nothing(self) -> None:
+        # `decomposed_at` belongs to whichever decomposition last wrote it,
+        # and an issue that was decomposed, saw its children resolve, and then
+        # implemented an oversized candidate still carries the old one.
+        self.github.seed_state(
+            self.issue.number,
+            **self._pinned(),
+            decomposed_at="2026-01-01T00:00:00Z",
+        )
+
+        self._transact()
+
+        self.assertEqual(
+            len([
+                body for _, body in self.github.posted_comments
+                if SNAPSHOT_REF in body
+            ]),
+            1,
+        )
 
 
 class SupersessionTest(HeldPlanPrSplitCase, unittest.TestCase):
@@ -94,7 +116,7 @@ class SupersessionTest(HeldPlanPrSplitCase, unittest.TestCase):
 
         self.assertEqual(self.plan_pr.state, "closed")
         self.assertIn(
-            _late_transaction.SUPERSESSION_MARKER,
+            SUPERSESSION_MARKER,
             self.github.posted_pr_comments[-1][1],
         )
 
@@ -182,7 +204,7 @@ class SupersessionTest(HeldPlanPrSplitCase, unittest.TestCase):
         self.assertEqual(
             len([
                 body for _, body in self.github.posted_pr_comments
-                if _late_transaction.SUPERSESSION_MARKER in body
+                if SUPERSESSION_MARKER in body
             ]),
             1,
         )

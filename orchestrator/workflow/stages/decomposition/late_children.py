@@ -33,12 +33,31 @@ costs an orphan child an operator can see, never a duplicate the retry would
 create, and never a consumer the snapshot's reclamation would fail to wait for.
 
 **Re-entry is a reuse, not a repeat.** A retry walks the same manifest and
-adopts every child the parent already records rather than creating a second
-one, then re-seeds it: the seed is the one step that can have been lost after
-the number was durable, and writing it again costs a read and changes nothing
-on a child that already carries it. The child's own state is read and added to
-rather than replaced, because by the time a retry runs, a child may already be
-implementing.
+adopts every child this GENERATION already records rather than creating a
+second one, then re-seeds it: the seed is the one step that can have been lost
+after the number was durable, and writing it again costs a read and changes
+nothing on a child that already carries it. The child's own state is read and
+added to rather than replaced, because by the time a retry runs, a child may
+already be implementing.
+
+The register it adopts from is the generation's own `split_children`, not the
+stage's shared `children` list, and that distinction is load-bearing. An issue
+that was decomposed, saw its children resolve, flipped back to `ready`, and
+implemented an oversized candidate still carries the earlier decomposition's
+`children` -- so a walk reading that list would adopt COMPLETED issues by
+manifest index, reseed them with an ancestry they have nothing to do with, and
+activate them. The stage list is written FROM the register instead, which is
+also what drops the earlier decomposition's dependency graph rather than
+leaving a stale one over the new children.
+
+The one window an ordered register cannot close on its own is the crash
+between `create_child_issue` returning and the write recording it: nothing
+outside GitHub knows the number yet. So every child is created carrying a
+hidden marker naming this cycle, this generation, and its slice index, and a
+walk about to create looks for that marker among the open issues on the
+child's own workflow label first. The lookup is taken once per transaction and
+only where something has to be created, so a fully-adopted resume pays nothing
+for it.
 """
 from __future__ import annotations
 
@@ -75,6 +94,16 @@ _EXPECTED_CHILDREN = "expected_children_count"
 _DEP_GRAPH = "dep_graph"
 
 _WHOLE_ISSUE = "(the whole issue)"
+
+# Stamped into every child's body so the create that returned into a crash can
+# be recognized again. Scoped to the adjudication AND the slice, because what
+# it has to identify is not "a child of this issue" but "the child that owns
+# manifest index 2 of generation 1 of cycle 3". An HTML comment, so it is
+# invisible in the rendered issue.
+_CHILD_MARKER = (
+    "<!--orchestrator-late-child:cycle={cycle}"
+    ":generation={generation}:index={index}-->"
+)
 
 _CHILD_CREATE_PARK = (
     "the committed candidate for this issue was adjudicated as a split and "
@@ -140,16 +169,16 @@ class _ChildWalk:
     known: tuple[int, ...]
     snapshot_ref: str
 
-    def recorded_numbers(self) -> list:
-        """The children the parent records once this step is durable.
+    def recorded_numbers(self) -> tuple[int, ...]:
+        """The children this generation records once this step is durable.
 
         Monotonic on purpose. What the walk has placed so far, extended by
         whatever the previous pass recorded beyond it, so a crash in the
         middle of a resumed pass can never leave the parent knowing about
         fewer children than exist on GitHub.
         """
-        placed = [number for number, _ in self.plan.created]
-        return placed + list(self.known[len(placed):])
+        placed = tuple(number for number, _ in self.plan.created)
+        return placed + self.known[len(placed):]
 
 
 def _create_late_children(
@@ -164,7 +193,7 @@ def _create_late_children(
     _prepared(context, manifest)
     walk = _ChildWalk(
         plan=_SplitPlan.start(list(manifest), True),
-        known=tuple(_recorded_numbers(context)),
+        known=context.generation.split_children,
         snapshot_ref=snapshot_ref,
     )
     for index, child in enumerate(manifest):
@@ -222,12 +251,31 @@ def _child_issue(
 def _adopted_or_created(
     context: _LateContext, walk: _ChildWalk, index: int, child: dict,
 ) -> Issue:
-    """Return the child at this index, opening one only where none exists."""
+    """Return the child at this index, opening one only where none exists.
+
+    Three answers in order, and the middle one is the whole point. A number
+    this generation already recorded is the ordinary resume. A marker still
+    on GitHub with no number beside it is the crash between the create and
+    the write that would have recorded it -- adopted rather than duplicated,
+    which is the only recovery for a create nothing outside GitHub knows
+    about. Only past both is an issue actually opened.
+    """
     if index < len(walk.known):
         return context.gh.get_issue(walk.known[index])
+    orphan = context.gh.find_issue_carrying(
+        _child_marker(context.generation, index),
+        label=_split._child_initial_labels()[0],
+    )
+    if orphan is not None:
+        log.warning(
+            "issue=#%d adopting orphan child #%d for slice %d: it was created "
+            "and never recorded",
+            context.issue.number, orphan.number, index,
+        )
+        return orphan
     return context.gh.create_child_issue(
         title=child["title"],
-        body=_child_body(context, child, walk.snapshot_ref),
+        body=_child_body(context, child, walk.snapshot_ref, index),
         parent_number=context.issue.number,
         labels=_split._child_initial_labels(),
     )
@@ -269,10 +317,15 @@ def _recorded(
         )
         _parked(context, f"child #{child_issue.number} ({child.get('title')!r})")
         return False
-    context.generation = replace(owed, phase=LatePhase.SPLITTING)
-    context.state.set(_state._CHILDREN, walk.recorded_numbers())
-    if walk.plan.dep_graph:
-        context.state.set(_DEP_GRAPH, walk.plan.dep_graph)
+    recorded = walk.recorded_numbers()
+    context.generation = replace(
+        owed.with_split_children(recorded), phase=LatePhase.SPLITTING,
+    )
+    # The stage's own list is written FROM the register rather than appended
+    # to, so an earlier decomposition's children and dependency graph are
+    # replaced by this generation's rather than left standing over them.
+    context.state.set(_state._CHILDREN, list(recorded))
+    context.state.set(_DEP_GRAPH, walk.plan.dep_graph or None)
     _late_outcome._persist(context)
     return True
 
@@ -343,8 +396,17 @@ def _child_ancestry(
     )
 
 
+def _child_marker(generation, index: int) -> str:
+    """The hidden marker naming this adjudication and this manifest slice."""
+    return _CHILD_MARKER.format(
+        cycle=generation.cycle_id,
+        generation=generation.generation,
+        index=index,
+    )
+
+
 def _child_body(
-    context: _LateContext, child: dict, snapshot_ref: str,
+    context: _LateContext, child: dict, snapshot_ref: str, index: int,
 ) -> str:
     """The issue body one child is created with.
 
@@ -356,6 +418,7 @@ def _child_body(
     generation = context.generation
     return "\n\n".join((
         _declared_scope(child),
+        _child_marker(generation, index),
         _REUSE_BLOCK.format(
             parent=generation.current_issue,
             ref=snapshot_ref,
@@ -378,12 +441,6 @@ def _declared_scope(child: dict) -> str:
     if isinstance(written, str) and written.strip():
         return written.strip()
     return _WHOLE_ISSUE
-
-
-def _recorded_numbers(context: _LateContext) -> list:
-    """The child numbers this parent already records, in manifest order."""
-    recorded = context.state.get(_state._CHILDREN) or []
-    return [number for number in recorded if _formats.whole_number(number)]
 
 
 def _parked(context: _LateContext, described: str) -> None:
