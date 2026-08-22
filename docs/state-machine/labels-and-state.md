@@ -659,7 +659,9 @@ rather than preserving.
   would adopt the other's child. Both fields are also cleared whenever the generation counter advances: they are the
   split transaction's own one-shot receipts, so a register carried into a revision would have the new manifest adopt
   an old child by index and a link receipt would swallow the announcement the new split owes. Neither external ledger
-  is cleared with them — a ref the remote holds is owed whatever the next generation decides.
+  is cleared with them — a ref the remote holds is owed whatever the next generation decides — and the counter is
+  refused from advancing at all once either a child or a snapshot obligation is recorded, since the commit a
+  recorded ref was created for is the one its reclamation compares against.
 - **Inherited lineage.** `late_ancestry_root_issue`, `late_ancestry_depth`, `late_ancestry_parent`,
   `late_ancestry_cycle_id`, `late_ancestry_generation`, `late_ancestry_snapshot_ref`,
   `late_ancestry_snapshot_sha`, `late_ancestry_base_branch`, and `late_declared_scope` are what a child born of a

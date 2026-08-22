@@ -96,7 +96,11 @@ from orchestrator.workflow.engine import prompts as _prompts
 from orchestrator.workflow.engine import usage as _usage
 from orchestrator.workflow.late_split import events as _events
 from orchestrator.workflow.late_split import telemetry as _telemetry
-from orchestrator.workflow.late_split.models import LateFailure, LatePhase
+from orchestrator.workflow.late_split.models import (
+    LateFailure,
+    LatePhase,
+    LateResourceKind,
+)
 from orchestrator.workflow.stages.decomposition import (
     late_content as _late_content,
 )
@@ -145,13 +149,24 @@ _UNREADABLE_HEAD_PARK = (
     "to re-read it."
 )
 
-_STRANDED_PARK = (
+_STRANDED_CHILDREN_PARK = (
     "this issue's committed candidate cannot be revised: the adjudication "
     "before this one already created {children} from it, and a new candidate "
     "would be split into a manifest that has nothing to do with them. The "
     "children, the recorded verdict, and your comment all stand. Decide what "
     "the existing children should be first -- close them and clear this "
     "issue's `late_split_children`, or let them run -- and the next tick "
+    "continues from there."
+)
+
+_STRANDED_SNAPSHOT_PARK = (
+    "this issue's committed candidate cannot be revised: the adjudication "
+    "before this one has already asked the remote to preserve it, and this "
+    "issue records that obligation. A new candidate would replace the commit "
+    "the reclamation names, leaving the ref it created behind for good -- "
+    "nothing would then be able to prove the ref is ours to delete. The "
+    "recorded verdict and your comment both stand. Let the split finish, or "
+    "settle the snapshot obligation on this issue by hand, and the next tick "
     "continues from there."
 )
 
@@ -207,34 +222,71 @@ _UNANSWERED_PARK = (
 )
 
 
-def _stranded_by_children(
+def _stranded_by_effects(
     context: _LateContext,
 ) -> Optional[_LateContentSettlement]:
-    """Refuse to replace a candidate whose split has already created children.
+    """Refuse to replace a candidate whose split has already acted outside.
 
     A revision ends in a NEW candidate under a new generation, and everything
-    that generation decides is decided about work the old one has already
-    handed to real GitHub issues. Those children exist, carry an ancestry
-    naming the adjudication that made them, and are recorded as the consumers
-    a snapshot is retained for -- so a second manifest over the top of them
+    that generation decides is decided about work the old one may already have
+    handed to something this process does not own. Two effects put it past the
+    point of replacement, and both are read off the record rather than
+    guessed.
+
+    **Children.** They exist as real GitHub issues, carry an ancestry naming
+    the adjudication that made them, and are recorded as the consumers a
+    snapshot is retained for -- so a second manifest over the top of them
     would strand every one: nothing polls a child the parent no longer
     records, and no automatic rule can say which of two manifests a human
     meant.
 
+    **A snapshot obligation.** The ref is named for the generation but the
+    commit under it is the candidate that generation froze, and the
+    reclamation proves a ref is ours to delete by comparing the two. A
+    revision moves `candidate_sha` and leaves the entry pointing at a ref that
+    no longer matches it, so the reclamation reads a mismatch and refuses --
+    forever, holding the umbrella's terminal open over a ref nothing can
+    settle. The entry is refused in every state it can be in, because none of
+    them proves the ref is absent: `pending` is a push that may have landed,
+    and `failed` is a create that may have landed and a verification that did
+    not.
+
     So the issue is handed back instead. What the human asked for is not lost
-    -- their comment stands, the children stand, and the recorded verdict
-    stands -- and settling it is a decision about issues that already exist,
-    which is theirs to make.
+    -- their comment stands, whatever the split created stands, and the
+    recorded verdict stands -- and settling it is a decision about things that
+    already exist, which is theirs to make.
     """
-    if not context.generation.split_children:
+    if context.generation.split_children:
+        return _parked(
+            context, _STRANDED_CHILDREN_PARK.format(
+                children=", ".join(
+                    f"#{number}"
+                    for number in context.generation.split_children
+                ),
+            ),
+            reason=_late_outcome.PARK_REVISION_UNANSWERED,
+        )
+    if not _owes_a_snapshot(context.generation):
         return None
     return _parked(
-        context, _STRANDED_PARK.format(
-            children=", ".join(
-                f"#{number}" for number in context.generation.split_children
-            ),
-        ),
+        context,
+        _STRANDED_SNAPSHOT_PARK,
         reason=_late_outcome.PARK_REVISION_UNANSWERED,
+    )
+
+
+def _owes_a_snapshot(generation) -> bool:
+    """Whether this issue records a snapshot the remote may already hold.
+
+    An opaque ledger answers yes: an entry this binary could not type may be
+    exactly that obligation, and the one reading it must not take is the one
+    that lets the candidate under it be replaced.
+    """
+    if generation.has_opaque_ledger:
+        return True
+    return any(
+        entry.kind == LateResourceKind.SNAPSHOT_REF
+        for entry in generation.resources
     )
 
 
@@ -258,7 +310,7 @@ def _revise_from_guidance(
     than leaving the issue claiming it is still waiting to be told what the
     edit meant.
     """
-    stranded = _stranded_by_children(context)
+    stranded = _stranded_by_effects(context)
     if stranded is not None:
         return stranded
     _comments._post_issue_comment(
@@ -304,7 +356,7 @@ def _retry_revision(
         return _revise_from_guidance(context, signal)
     if not signal.bare_continue:
         return _LateContentSettlement(disposition=_LateDisposition.PARKED)
-    stranded = _stranded_by_children(context)
+    stranded = _stranded_by_effects(context)
     if stranded is not None:
         return stranded
     _consume(context, signal)

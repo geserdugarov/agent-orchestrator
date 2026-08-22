@@ -468,8 +468,15 @@ and the recorded `pr_number` cleared. Dropping the measurement is what makes the
 become an umbrella has no candidate to measure, and a record still answering "oversized" is exactly what pins
 `workflow:decomposing` and would have the relabel guard put the umbrella label back every tick. Activation runs after
 that write for the reason the initial split's does: a crash between them must not leave a runnable child under a
-parent still labelled `decomposing`, and a child with no recorded dependencies is picked up by the umbrella's own
-walk as the retry.
+parent still labelled `decomposing`, and a child this pass could not flip is picked up by the umbrella's own walk as
+the retry.
+
+It runs *through* that walk rather than through the initial split's one-shot flip, and the difference is the
+supersession above it: that step can park for as long as a human takes to settle a pull request, so by the time
+activation runs a child may have reached `rejected` or `done` on its own. A write that read nothing would put it
+back to `ready`, and the transition guard only warns by default. So each child is read fresh and only the ones still
+`blocked` with their recorded dependencies satisfied are moved; a read that failed leaves every child where it is,
+since the umbrella takes the same reading on its next tick.
 
 **Cleanup last, and never in the way.** The superseded branch is written to the ledger as `pending` in that same
 retirement write and attempted *after* activation: an attempt that does not finish records `failed`, emits
@@ -527,12 +534,23 @@ Every transaction park is a moment the humans can speak into, and the coordinato
 replays the recorded verdict — so a split that stopped halfway can meet a fresh edit or a fresh instruction on the
 next tick. Two rules keep that from undoing work that already exists.
 
-A generation that has **already created children** may not be revised into a new one. A revision ends in a new
-candidate under a new generation, and a second manifest over the top of real GitHub issues strands every one of them:
-nothing polls a child the parent stops recording, they carry an ancestry naming the adjudication that made them, and
-they are the consumers the snapshot is retained for. So the issue is handed back naming the children instead — their
-comment stands, the children stand, and the recorded verdict stands, and which of those to keep is a decision about
-issues that already exist.
+A generation whose split has **already acted outside this process** may not be revised into a new one, and two
+effects put it past that point.
+
+*Children*, because a second manifest over the top of real GitHub issues strands every one of them: nothing polls a
+child the parent stops recording, they carry an ancestry naming the adjudication that made them, and they are the
+consumers the snapshot is retained for.
+
+*A recorded snapshot obligation*, even with no child yet. The ref is named for the generation but the **commit under
+it** is the candidate that generation froze, and the reclamation proves a ref is ours to delete by comparing the two
+— so a revision that moves `candidate_sha` leaves the entry pointing at a ref that no longer matches it, the
+reclamation reads a mismatch and refuses, and the umbrella's terminal stays open over a ref nothing can ever settle.
+The entry is refused in every state it can hold, because none of them proves the ref is absent: `pending` is a push
+that may have landed, and `failed` is a create that may have landed beside a verification that did not. An opaque
+ledger is refused with them, since an entry this binary could not type may be exactly that obligation.
+
+Either way the issue is handed back naming what stands — their comment stands, whatever the split created stands,
+and the recorded verdict stands — and which of those to keep is a decision about things that already exist.
 
 A generation that **does** advance carries none of the previous one's split receipts. `late_split_children` and
 `late_links_announced` are cleared with the counter, because both are one-shot and positional: a register carried

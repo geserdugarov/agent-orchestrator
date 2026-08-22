@@ -84,7 +84,10 @@ from orchestrator.workflow.stages.decomposition import (
 from orchestrator.workflow.stages.decomposition import (
     late_snapshot as _late_snapshot,
 )
-from orchestrator.workflow.stages.decomposition import split as _split
+from orchestrator.workflow.stages.decomposition import (
+    activation as _activation,
+)
+from orchestrator.workflow.stages.decomposition import parents as _parents
 from orchestrator.workflow.stages.decomposition.late_models import (
     _LateAdjudicationRun,
     _LateContext,
@@ -415,9 +418,16 @@ def _handed_to_children(
     is durable before the cleanup that reconciles it is attempted -- and the
     activation that follows can therefore never be waiting on it.
 
-    Activation is last and is best-effort, exactly as the initial split's is: a
-    child with no recorded dependencies reads as deps-satisfied on the
-    umbrella's own next walk, which is the retry.
+    Activation is last and is best-effort: a child this pass could not flip
+    reads as deps-satisfied on the umbrella's own next walk, which is the
+    retry. It runs through that same walk rather than the initial split's
+    one-shot flip, because by the time it runs a child's state is no longer
+    this transaction's to assume. The supersession above can park for as long
+    as a human takes to settle a pull request, and a child that reached
+    `rejected` or `done` in that window would be flipped back to `ready` by a
+    write that reads nothing -- the transition guard only warns by default, so
+    nothing else would stop it. The walk reads each child fresh and moves only
+    the ones still `blocked` with their recorded dependencies satisfied.
     """
     context.generation = _settled_generation(context.generation, branch)
     # The pull request this issue recorded is closed and carries superseded
@@ -426,7 +436,30 @@ def _handed_to_children(
     context.state.set(_PR_NUMBER, None)
     context.gh.set_workflow_label(context.issue, WorkflowLabel.UMBRELLA)
     _late_outcome._persist(context)
-    _split._activate_initial_split_children(context.gh, context.issue, plan)
+    _activated(context, plan)
+
+
+def _activated(context: _LateContext, plan: _SplitPlan) -> None:
+    """Let the children this split may still start, run.
+
+    A read that failed leaves every child where it is. The umbrella's own walk
+    takes the same reading on its next tick, so nothing is lost by declining
+    to guess -- while flipping a child whose state could not be established is
+    the write this exists to avoid.
+    """
+    scan = _parents._read_child_labels(
+        context.gh, context.issue, [number for number, _ in plan.created],
+    )
+    if scan is None:
+        log.warning(
+            "issue=#%d could not read its children to activate them; the "
+            "umbrella's own walk retries on the next tick",
+            context.issue.number,
+        )
+        return
+    _activation._activate_ready_children(
+        context.gh, context.issue, context.state, scan,
+    )
 
 
 def _reclaimed_branch(context: _LateContext, branch: str) -> None:

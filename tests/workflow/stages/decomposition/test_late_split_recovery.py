@@ -24,6 +24,11 @@ from dataclasses import replace
 
 from orchestrator.git.snapshots.refs import SnapshotOutcome
 from orchestrator.workflow.late_split import state as _late_state
+from orchestrator.workflow.late_split.models import (
+    LateResource,
+    LateResourceKind,
+    LateResourceState,
+)
 from orchestrator.workflow.stages.decomposition.late_models import (
     _LateDisposition,
 )
@@ -40,6 +45,7 @@ from tests.workflow.stages.decomposition.late_run_support import (
     agent_reply,
 )
 from tests.workflow.stages.decomposition.late_test_support import (
+    CANDIDATE_SHA,
     KEYS,
     LATE_ISSUE_NUMBER,
     SPLIT_REPLY,
@@ -52,6 +58,13 @@ PARK_REVISION_UNANSWERED = "late_revision_unanswered"
 
 # A child an earlier pass of this split created and recorded.
 CREATED_CHILD = 4242
+
+# The ref a transaction records before it pushes anything, so the obligation
+# outlives a crash between the intent and the effect.
+SNAPSHOT_REF = "refs/orchestrator/late-split/issue-41/cycle-3/gen-1"
+
+# An obligation an older or newer binary recorded, preserved verbatim.
+OPAQUE_LEDGER = '[{"kind": "unknown-to-this-binary"}]'
 
 # The remote refusing to preserve the candidate, which parks the transaction
 # before a single child exists.
@@ -147,6 +160,84 @@ class RevisedAfterChildrenTest(RevisionCase, unittest.TestCase):
             generation_of(self.github, self.issue).split_children,
             (CREATED_CHILD,),
         )
+
+
+class RevisedAfterSnapshotTest(RevisionCase, unittest.TestCase):
+    """A candidate the remote has been asked to preserve is not replaceable.
+
+    The ref is named for the generation but the commit under it is the
+    candidate that generation froze, and the reclamation proves a ref is ours
+    by comparing the two. A revision moves `candidate_sha` and leaves the
+    entry pointing at a ref that no longer matches, so the reclamation refuses
+    for good -- and the umbrella's terminal stays open over a ref nothing can
+    settle.
+    """
+
+    def setUp(self) -> None:
+        self._seed_drifted()
+
+    def test_a_retained_snapshot_stops_a_revision(self) -> None:
+        self._owing(LateResourceState.RETAINED)
+        before = self._pinned()[KEY_GENERATION]
+
+        parked, spawn = self._revise()
+
+        spawn.assert_not_called()
+        self.assertEqual(parked.disposition, _LateDisposition.PARKED)
+        self.assertEqual(
+            self._pinned()[KEYS.park_reason], PARK_REVISION_UNANSWERED,
+        )
+        self.assertEqual(self._pinned()[KEY_GENERATION], before)
+
+    def test_every_state_an_entry_can_be_in_stops_it(self) -> None:
+        # None of them proves the ref is absent: `pending` is a push that may
+        # have landed, and `failed` is a create that may have landed beside a
+        # verification that did not.
+        for owed in (
+            LateResourceState.PENDING,
+            LateResourceState.RETAINED,
+            LateResourceState.FAILED,
+        ):
+            with self.subTest(state=owed):
+                self.setUp()
+                self._owing(owed)
+
+                parked, _spawn = self._revise()
+
+                self.assertEqual(parked.disposition, _LateDisposition.PARKED)
+
+    def test_the_frozen_candidate_is_left_alone(self) -> None:
+        # What the refusal protects: the commit the recorded ref was created
+        # for is the one the reclamation compares against.
+        self._owing(LateResourceState.RETAINED)
+
+        self._revise()
+
+        self.assertEqual(self._pinned()[KEYS.candidate_sha], CANDIDATE_SHA)
+
+    def test_an_opaque_ledger_stops_it_too(self) -> None:
+        # An entry this binary could not type may be exactly that obligation.
+        rewrite_generation(
+            self.github, self.issue, opaque_resources=OPAQUE_LEDGER,
+        )
+
+        parked, _spawn = self._revise()
+
+        self.assertEqual(parked.disposition, _LateDisposition.PARKED)
+
+    def test_a_generation_owing_nothing_still_revises(self) -> None:
+        # The refusal is about effects the split had, not about splits.
+        revised, _spawn = self._revise()
+
+        self.assertEqual(revised.disposition, _LateDisposition.REVISED)
+
+    def _owing(self, owed: LateResourceState) -> None:
+        """Record the snapshot obligation a transaction would have written."""
+        rewrite_generation(self.github, self.issue, resources=(LateResource(
+            kind=LateResourceKind.SNAPSHOT_REF,
+            target=SNAPSHOT_REF,
+            resource_state=owed,
+        ),))
 
 
 class RevisedBeforeChildrenTest(RevisionCase, unittest.TestCase):

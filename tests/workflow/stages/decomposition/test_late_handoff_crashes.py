@@ -192,8 +192,9 @@ class HandoffBoundaryTest(LateSplitCase, unittest.TestCase):
         # labelled `decomposing`; the umbrella's own walk is the retry.
         with self.assertRaises(KeyboardInterrupt):
             self._transact(
-                killed=killed_before(_late_transaction._split,
-                                     "_activate_initial_split_children"),
+                killed=killed_before(
+                    _late_transaction, "_activated",
+                ),
             )
 
         self.assertEqual(

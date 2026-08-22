@@ -205,8 +205,9 @@ workflow/                   publishes the two label vocabularies, `guard_transit
                             snapshot before any child, the children before any link, the forward links behind the
                             receipt that stops them repeating, the held plan PR superseded and closed under a
                             marker scoped to this adjudication, the generation retired onto `workflow:umbrella` in
-                            the write that hands the issue on, the activation behind it, and the branch cleanup
-                            recorded as owed and attempted after
+                            the write that hands the issue on, the activation behind it -- through the shared
+                            dep-graph walk, so a child that ended while the supersession was parked is left where
+                            it is -- and the branch cleanup recorded as owed and attempted after
       late_cleanup.py       what a split still owes a remote once its children are running: the branch obligations
                             that are not reconciled and the refs still held, the namespace-and-issue check a target
                             has to pass before anything is deleted by it, the rule that decides whether a ref's
