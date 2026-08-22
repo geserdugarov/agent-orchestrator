@@ -71,6 +71,7 @@ from typing import Optional
 from github.Issue import Issue
 
 from orchestrator.git.snapshots import refs as _snapshot_refs
+from orchestrator.github.issues import issue_is_closed
 from orchestrator.workflow.engine import usage as _usage
 from orchestrator.workflow.late_split import formats as _formats
 from orchestrator.workflow.late_split import identity as _identity
@@ -337,7 +338,7 @@ def _orphan_for(
     )
     if orphan is None:
         return None
-    if getattr(orphan, "closed", False) or _moved_off_blocked(context, orphan):
+    if issue_is_closed(orphan) or _moved_off_blocked(context, orphan):
         raise _StrandedChild(orphan.number)
     return orphan
 

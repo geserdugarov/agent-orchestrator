@@ -90,6 +90,29 @@ def _closed_sweep_lookups() -> tuple[tuple[str, bool], ...]:
 CLOSED_SWEEP_LOOKUPS = _closed_sweep_lookups()
 
 
+def issue_is_closed(issue: Any) -> bool:
+    """Whether GitHub reports this issue as closed.
+
+    The wire spelling is `state`, and on a PyGithub issue it is the only one:
+    nothing there is called `closed`. A reader that asks for that attribute
+    alone therefore answers "open" for every closed issue in production while
+    passing every test, because the in-memory double DOES carry the flag --
+    which is exactly the shape of bug this predicate exists to stop being
+    written twice. It lives here because the state vocabulary does.
+
+    Both shapes are honored, as the dispatcher's own check has always done:
+    the flag is asked first and only when it is set, so an issue that merely
+    lacks it falls through to `state` rather than reading as open. Anything
+    that is not an issue at all -- the `None` a scan holds for a consumer it
+    never fetched -- is not closed, leaving a caller that must fail closed on
+    an absence to say so itself, where it knows what the absence means.
+    """
+    if bool(getattr(issue, "closed", False)):
+        return True
+    state = getattr(issue, _STATE_ATTR, _ISSUE_STATE_OPEN)
+    return state == _ISSUE_STATE_CLOSED
+
+
 def iter_new_non_pr_issues(
     issues: Iterable[Issue],
     seen_numbers: set[int],

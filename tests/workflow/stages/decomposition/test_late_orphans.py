@@ -56,6 +56,27 @@ OTHER_PARENT = 77
 
 LABEL_BLOCKED = "workflow:blocked"
 
+STATE_CLOSED = "closed"
+
+
+class _RealShapedOrphan:
+    """The orphan the lookup found, in the shape GitHub hands one back in.
+
+    A PyGithub issue carries `state` and nothing called `closed`, so the
+    double's flag is the one spelling production never sees. Everything else
+    is the live issue, so a walk that read this as open would go on to adopt,
+    seed, and start the real thing -- which is what the refusal is for.
+    """
+
+    def __init__(self, issue) -> None:
+        self._issue = issue
+        self.state = STATE_CLOSED
+
+    def __getattr__(self, name: str):
+        if name == "closed":
+            raise AttributeError(name)
+        return getattr(self._issue, name)
+
 
 class OrphanAdoptionCase(LateSplitCase):
     """A split whose first pass died between the create and the record."""
@@ -175,6 +196,31 @@ class OrphanAdoptionTest(OrphanAdoptionCase, unittest.TestCase):
             len(self.github.created_child_issues), len(CHILDREN) + 1,
         )
         self.assertEqual(self.github.pinned_data(sibling.number), {})
+
+
+class RealShapedOrphanTest(OrphanAdoptionCase, unittest.TestCase):
+    """The same refusal, against the shape production is handed.
+
+    Asked for the double's `closed` flag alone -- which no PyGithub issue
+    carries -- a closed orphan reads as open, and the split adopts, reseeds,
+    and starts an issue a human ended.
+    """
+
+    def test_a_real_shaped_closed_child_is_left_alone(self) -> None:
+        orphan = self._crashed()
+        orphan.closed = True
+
+        with patch.object(
+            self.github, FIND_ISSUE, return_value=_RealShapedOrphan(orphan),
+        ):
+            with self.assertLogs(level=ERROR):
+                outcome = self._resume()
+
+        self.assertEqual(outcome.disposition, _LateDisposition.PARKED)
+        self.assertEqual(len(self.github.created_child_issues), 1)
+        self.assertEqual(
+            self.github.workflow_label(orphan), WorkflowLabel.BLOCKED,
+        )
 
 
 if __name__ == "__main__":

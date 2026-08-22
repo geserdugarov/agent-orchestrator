@@ -93,7 +93,8 @@ orchestrator/
     comments.py         the `ALLOWED_ISSUE_AUTHORS` trust policy a caller filters a thread or gates one author
                         through; the low-level comment and review readers stay raw
     events.py           audit event record construction and the optional JSONL sink
-    issues.py           issue polling and writes, the query options, and the wire issue-state vocabulary
+    issues.py           issue polling and writes, the query options, the wire issue-state vocabulary,
+                        and the closed predicate every reader of it asks through
     labels.py           the label vocabulary and bootstrap specs, and the in-place rename of a pre-namespace label
     pinned_state.py     the pinned durable-state model, the comment body it is written as and the length GitHub
                         takes, its parser, and the comment watermarks beside it

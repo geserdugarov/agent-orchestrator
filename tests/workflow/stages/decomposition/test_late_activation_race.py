@@ -51,6 +51,20 @@ class SupersessionRaceTest(HeldPlanPrSplitCase, unittest.TestCase):
             label_of(self.github, ended.number), WorkflowLabel.REJECTED,
         )
 
+    def test_a_child_a_human_closed_is_left(self) -> None:
+        # A close leaves the label exactly where it was, so this child still
+        # reads `blocked`. Started anyway, it would be relabeled `ready` over
+        # the close and the umbrella would wait on an issue nobody is running.
+        closed = first_child(self.github)
+        closed.closed = True
+
+        self._resume()
+
+        self.assertEqual(
+            label_of(self.github, closed.number), WorkflowLabel.BLOCKED,
+        )
+        self.assertTrue(closed.closed)
+
     def test_a_child_still_blocked_is_released(self) -> None:
         # The other half of the same read: the walk moves the ones that are
         # still where the split left them.

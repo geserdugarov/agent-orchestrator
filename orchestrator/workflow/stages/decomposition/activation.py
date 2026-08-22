@@ -8,6 +8,13 @@ vacuously, which is deliberate: it is also the retry for a no-dep child whose
 same-tick activation flip failed at split time, so nothing has to remember that
 the flip was missed.
 
+A child GitHub reports as closed is passed over, whatever label it wears.
+Closing an issue does not change its label, so a child a human ended while it
+was still `blocked` sits there looking startable forever -- and a walk that
+started it would relabel a closed issue `ready`, overriding the close and
+handing the umbrella a child that will never report. It is skipped rather than
+held, because nothing is going to release it.
+
 Held children are logged rather than parked, because the tree is still making
 progress: their siblings run concurrently and are what will eventually release
 them. The line names the exact unfinished dependencies so an operator reading a
@@ -23,6 +30,7 @@ from dataclasses import dataclass
 from github.Issue import Issue
 
 from orchestrator.github.client import GitHubClient
+from orchestrator.github.issues import issue_is_closed
 from orchestrator.github.pinned_state import PinnedState
 from orchestrator.workflow.stages.decomposition import state as _state
 from orchestrator.workflow.stages.decomposition.models import _ChildScan
@@ -47,15 +55,16 @@ class _ChildActivation:
 
     def consider(self, idx: int, child_number) -> None:
         number = int(child_number)
+        child = self.scan.issues.get(number)
         if self.scan.labels.get(number) != WorkflowLabel.BLOCKED:
+            return
+        if child is None or issue_is_closed(child):
             return
         pending = self._pending_dependencies(idx)
         if pending:
             self.held.append((number, pending))
         else:
-            self.gh.set_workflow_label(
-                self.scan.issues[number], WorkflowLabel.READY,
-            )
+            self.gh.set_workflow_label(child, WorkflowLabel.READY)
             self.relabeled = True
 
     def _pending_dependencies(self, idx: int) -> list[int]:
@@ -81,8 +90,9 @@ def _activate_ready_children(
     relabeled `ready`. A child with no recorded deps also flips (vacuous
     all-done over an empty list) -- this recovers any no-dep child that the
     decomposer's same-tick activation step left as `blocked` (network blip,
-    label-flip failure, etc.). Writes pinned state when at least one child
-    was relabeled. Returns the still-held children as
+    label-flip failure, etc.). A child that is closed, or that this scan holds
+    no issue for, is passed over: the first has ended and the second cannot be
+    written to. Writes pinned state when at least one child was relabeled. Returns the still-held children as
     `[(child_number, pending_dep_numbers)]` for visibility logging.
     """
     activation = _ChildActivation.start(gh, state, scan)

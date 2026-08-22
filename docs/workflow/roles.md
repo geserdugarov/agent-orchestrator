@@ -478,6 +478,11 @@ back to `ready`, and the transition guard only warns by default. So each child i
 `blocked` with their recorded dependencies satisfied are moved; a read that failed leaves every child where it is,
 since the umbrella takes the same reading on its next tick.
 
+A child GitHub reports as closed is passed over there too, and that one is not specific to the late split: closing an
+issue leaves its label untouched, so a child a human ended while it was still `blocked` goes on looking startable to
+every walk that reads labels alone. The close is read the way GitHub spells it — `state`, the only spelling a real
+issue carries — which is also how the reclamation counts a direct consumer that ended without a terminal label.
+
 **Cleanup last, and never in the way.** The superseded branch is written to the ledger as `pending` in that same
 retirement write and attempted *after* activation: an attempt that does not finish records `failed`, emits
 `branch_cleanup_failed`, and holds no child back. Children waiting on a branch deletion would be work stalled on

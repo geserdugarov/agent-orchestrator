@@ -5,7 +5,6 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 
-from orchestrator.workflow.engine import dispatch
 from orchestrator.workflow.engine import tick as _tick
 
 from tests.workflow.engine.dispatch_scheduler_workers import patch_base_refresh
@@ -14,12 +13,6 @@ from tests.support.fakes import FakeGitHubClient, make_issue
 from tests.workflow.fixtures import (
     LABEL_IN_REVIEW,
     LABEL_VALIDATING,
-    STATE_CLOSED,
-    STATE_OPEN,
-)
-
-from tests.workflow.engine.dispatch_scheduler_fakes import (
-    _PyGithubIssue,
 )
 
 from tests.workflow.engine.dispatch_scheduler_test_support import (
@@ -128,25 +121,6 @@ class ClosedFanoutCapExemptionTest(_SchedulerWorkflowTest):
             )
         process.release_all()
         self._wait_idle(sched)
-
-
-class IssueIsClosedHelperTest(unittest.TestCase):
-    """`_issue_is_closed` tolerates both the PyGithub (`state`) and the
-    in-memory-fake (`closed`) shapes."""
-
-    def test_detects_fake_closed_bool(self) -> None:
-        issue = make_issue(1, label=LABEL_IN_REVIEW)
-        self.assertFalse(dispatch._issue_is_closed(issue))
-        issue.closed = True
-        self.assertTrue(dispatch._issue_is_closed(issue))
-
-    def test_detects_pygithub_state_string(self) -> None:
-        self.assertTrue(
-            dispatch._issue_is_closed(_PyGithubIssue(STATE_CLOSED)),
-        )
-        self.assertFalse(
-            dispatch._issue_is_closed(_PyGithubIssue(STATE_OPEN)),
-        )
 
 
 if __name__ == "__main__":

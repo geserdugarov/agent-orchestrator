@@ -73,6 +73,7 @@ from orchestrator.git.snapshots import refs as _snapshot_refs
 from orchestrator.git.worktrees import cleanup as _worktree_cleanup
 from orchestrator.git.worktrees import paths as _worktree_paths
 from orchestrator.github.client import GitHubClient
+from orchestrator.github.issues import issue_is_closed
 from orchestrator.github.pinned_state import PinnedState
 from orchestrator.workflow.late_split import events as _events
 from orchestrator.workflow.late_split import formats as _formats
@@ -187,11 +188,19 @@ def _reclaimable(generation: LateGeneration, scan: _ChildScan) -> bool:
 
 
 def _is_terminal(scan: _ChildScan, consumer: int) -> bool:
-    """Whether one recorded consumer has ended, however it ended."""
+    """Whether one recorded consumer has ended, however it ended.
+
+    A terminal label is one way; a human closing the issue is the other, and
+    it leaves whatever label the child was wearing untouched. The close is
+    asked through the shared predicate rather than by reading an attribute
+    here, because the only spelling a real issue carries it under is `state`
+    -- and a consumer read as still running is one whose snapshot is never
+    reclaimed.
+    """
     number = int(consumer)
     if scan.labels.get(number) in _TERMINAL_CHILD:
         return True
-    return bool(getattr(scan.issues.get(number), "closed", False))
+    return issue_is_closed(scan.issues.get(number))
 
 
 def _ours(generation: LateGeneration, branch: str) -> bool:

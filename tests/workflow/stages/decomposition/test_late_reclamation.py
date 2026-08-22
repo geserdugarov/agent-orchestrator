@@ -17,6 +17,7 @@ from orchestrator.workflow.late_split.models import LateResourceState
 from orchestrator.workflow.stages.decomposition import (
     late_cleanup as _late_cleanup,
 )
+from orchestrator.workflow.stages.decomposition.models import _ChildScan
 
 from tests.workflow.fixtures import _PatchedWorkflowMixin
 from tests.workflow.stages.decomposition.late_cleanup_support import (
@@ -49,6 +50,21 @@ _OPAQUE_CONSUMERS = '["?"]'
 # this one cannot type, preserved verbatim rather than reduced to what it
 # understood.
 _UNTYPED_KIND = "unknown-to-this-binary"
+
+_STATE_CLOSED = "closed"
+
+
+class _RealShapedChild:
+    """A closed consumer in the shape GitHub actually hands one back.
+
+    A PyGithub issue carries `state` and nothing called `closed`, so the
+    double's flag is the one spelling the reclamation never sees in
+    production.
+    """
+
+    def __init__(self, number: int) -> None:
+        self.number = number
+        self.state = _STATE_CLOSED
 
 
 class UmbrellaReclamationTest(_PatchedWorkflowMixin, unittest.TestCase):
@@ -220,6 +236,18 @@ class TerminalConsumerTest(unittest.TestCase):
                         _one_consumer(), scan_of(label, closed=closed),
                     ),
                 )
+
+    def test_a_real_shaped_close_counts(self) -> None:
+        # The close is the whole answer here, since the label is one a running
+        # child wears. Asked for the double's flag instead, this consumer
+        # reads as live and the ref it holds is never reclaimed.
+        scan = _ChildScan(
+            children=[CHILD_NUMBER],
+            issues={CHILD_NUMBER: _RealShapedChild(CHILD_NUMBER)},
+            labels={CHILD_NUMBER: LABEL_IN_REVIEW},
+        )
+
+        self.assertTrue(_late_cleanup._reclaimable(_one_consumer(), scan))
 
     def test_a_live_consumer_keeps_the_ref(self) -> None:
         for label in (LABEL_IN_REVIEW, None):
