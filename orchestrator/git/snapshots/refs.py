@@ -150,7 +150,7 @@ def prove_snapshot_ref(
 
 
 def delete_snapshot_ref(
-    spec: config.RepoSpec, worktree: Path, *, ref: str,
+    spec: config.RepoSpec, worktree: Path, *, ref: str, sha: str,
 ) -> SnapshotOutcome:
     """Reclaim one snapshot ref, treating an absent one as already reclaimed.
 
@@ -160,9 +160,15 @@ def delete_snapshot_ref(
     whose record never landed. A reclamation retried after a crash is the
     second one, every time.
 
-    Pinned to the SHA this call just read, so a ref re-pointed between the read
-    and the delete is refused. The alternative -- deleting whatever is there --
-    is the same blind write the create refuses, aimed at destruction.
+    `sha` is the commit the caller preserved, and it is required rather than
+    inferred. Leasing against whatever the ref happens to be at now would
+    delete a re-pointed ref as readily as ours: the read would observe the new
+    commit, the lease would match it, and the delete would succeed -- which is
+    the blind write the create refuses, aimed at destruction, and this is the
+    one operation whose blast radius is somebody else's content rather than a
+    refused push. So a ref carrying anything but the exact candidate this
+    generation preserved is a `MISMATCH` and is left alone for a human, and
+    the lease is pinned to that expected commit rather than to the reading.
     """
     if not namespace.is_snapshot_ref(ref):
         log.error("refusing to delete %r: not a snapshot ref", ref)
@@ -172,8 +178,14 @@ def delete_snapshot_ref(
         return SnapshotOutcome.UNREADABLE
     if not observed:
         return SnapshotOutcome.ABSENT
+    if observed != sha:
+        log.error(
+            "%s: %s carries %s rather than the candidate %s it preserved; "
+            "leaving it untouched", spec.slug, ref, observed, sha,
+        )
+        return SnapshotOutcome.MISMATCH
     deleted = authentication._delete_remote_ref(
-        spec, worktree, ref=ref, expected=observed,
+        spec, worktree, ref=ref, expected=sha,
     )
     return SnapshotOutcome.DELETED if deleted else SnapshotOutcome.REFUSED
 

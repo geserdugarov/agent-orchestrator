@@ -53,11 +53,14 @@ leaving a stale one over the new children.
 The one window an ordered register cannot close on its own is the crash
 between `create_child_issue` returning and the write recording it: nothing
 outside GitHub knows the number yet. So every child is created carrying a
-hidden marker naming this cycle, this generation, and its slice index, and a
-walk about to create looks for that marker among the open issues on the
-child's own workflow label first. The lookup is taken once per transaction and
-only where something has to be created, so a fully-adopted resume pays nothing
-for it.
+hidden marker naming this ISSUE, this cycle, this generation, and its slice
+index, and a walk about to create looks for that marker among the open issues
+on the child's own workflow label first. The issue is in there because a cycle
+identity is minted per issue and repeats across them -- two parents on their
+first candidate are both cycle 1 -- while the lookup walks a label rather than
+one parent's children, so without it one parent would adopt another's. The
+lookup is taken only where something has to be created, so a fully-adopted
+resume pays nothing for it.
 """
 from __future__ import annotations
 
@@ -96,12 +99,15 @@ _DEP_GRAPH = "dep_graph"
 _WHOLE_ISSUE = "(the whole issue)"
 
 # Stamped into every child's body so the create that returned into a crash can
-# be recognized again. Scoped to the adjudication AND the slice, because what
-# it has to identify is not "a child of this issue" but "the child that owns
-# manifest index 2 of generation 1 of cycle 3". An HTML comment, so it is
-# invisible in the rendered issue.
+# be recognized again. It names the ISSUE as well as the adjudication and the
+# slice, because a cycle identity is minted per issue and repeats across them:
+# two parents adjudicating their first candidate are both cycle 1, generation
+# 1, and their first slices would otherwise carry the same marker -- while the
+# lookup that reads it walks every open issue on one workflow label, so one
+# parent would adopt, reseed, and activate the other's child. An HTML comment,
+# so it is invisible in the rendered issue.
 _CHILD_MARKER = (
-    "<!--orchestrator-late-child:cycle={cycle}"
+    "<!--orchestrator-late-child:issue={issue}:cycle={cycle}"
     ":generation={generation}:index={index}-->"
 )
 
@@ -397,8 +403,9 @@ def _child_ancestry(
 
 
 def _child_marker(generation, index: int) -> str:
-    """The hidden marker naming this adjudication and this manifest slice."""
+    """The hidden marker naming this issue, adjudication, and slice."""
     return _CHILD_MARKER.format(
+        issue=generation.current_issue,
         cycle=generation.cycle_id,
         generation=generation.generation,
         index=index,

@@ -18,6 +18,9 @@ from tests.workflow.stages.decomposition.late_test_support import (
     CANDIDATE_SHA,
     KEYS,
 )
+from tests.workflow.stages.decomposition.late_seam_support import (
+    SnapshotSeed,
+)
 from tests.workflow.stages.decomposition.late_transaction_support import (
     EVENT_LATE_FAILURE,
     EVENT_LATE_SNAPSHOT,
@@ -28,8 +31,6 @@ from tests.workflow.stages.decomposition.late_transaction_support import (
 )
 from tests.workflow.stages.decomposition.late_transaction_support import (
     LateSplitCase,
-    refused_snapshot,
-    unproven_snapshot,
 )
 
 RESOURCE_SNAPSHOT = "snapshot_ref"
@@ -48,21 +49,11 @@ FAILURE_SNAPSHOT = "snapshot_failed"
 # same way: nothing created, the obligation recorded as failed, and the issue
 # parked with the verdict still standing.
 REFUSALS = (
-    ("a ref another commit occupies", refused_snapshot(
-        SnapshotOutcome.MISMATCH,
-    )),
-    ("a remote nobody could ask", refused_snapshot(
-        SnapshotOutcome.UNREADABLE,
-    )),
-    ("a namespace the token cannot write", refused_snapshot(
-        SnapshotOutcome.REFUSED,
-    )),
-    ("a ref that would not fetch back", unproven_snapshot(
-        SnapshotOutcome.REFUSED,
-    )),
-    ("a fetch that brought another commit", unproven_snapshot(
-        SnapshotOutcome.MISMATCH,
-    )),
+    ("a ref another commit occupies", SnapshotSeed(create=SnapshotOutcome.MISMATCH)),
+    ("a remote nobody could ask", SnapshotSeed(create=SnapshotOutcome.UNREADABLE)),
+    ("a namespace the token cannot write", SnapshotSeed(create=SnapshotOutcome.REFUSED)),
+    ("a ref that would not fetch back", SnapshotSeed(prove=SnapshotOutcome.REFUSED)),
+    ("a fetch that brought another commit", SnapshotSeed(prove=SnapshotOutcome.MISMATCH)),
 )
 
 
@@ -89,7 +80,7 @@ class SnapshotEstablishedTest(LateSplitCase, unittest.TestCase):
         # The create-or-verify answer a crashed tick relies on: the ref it
         # already pushed is the answer and the transaction carries on.
         outcome = self._transact(
-            snapshot=refused_snapshot(SnapshotOutcome.PRESENT),
+            snapshot=SnapshotSeed(create=SnapshotOutcome.PRESENT),
         )
 
         self.assertEqual(outcome.disposition, _LateDisposition.SETTLED)
@@ -119,14 +110,14 @@ class SnapshotRefusedTest(LateSplitCase, unittest.TestCase):
     def test_a_refusal_leaves_the_obligation(self) -> None:
         # The create may have landed and the verification may be what failed,
         # so a reclamation is left a ref to ask about rather than a gap.
-        self._transact(snapshot=unproven_snapshot(SnapshotOutcome.MISMATCH))
+        self._transact(snapshot=SnapshotSeed(prove=SnapshotOutcome.MISMATCH))
 
         self.assertEqual(
             self._resources()[(RESOURCE_SNAPSHOT, SNAPSHOT_REF)], STATE_FAILED,
         )
 
     def test_a_refusal_reports_the_typed_failure(self) -> None:
-        self._transact(snapshot=refused_snapshot(SnapshotOutcome.UNREADABLE))
+        self._transact(snapshot=SnapshotSeed(create=SnapshotOutcome.UNREADABLE))
 
         self.assertEqual(
             [record["failure"] for record in
@@ -137,7 +128,7 @@ class SnapshotRefusedTest(LateSplitCase, unittest.TestCase):
     def test_a_refusal_keeps_the_recorded_verdict(self) -> None:
         # What makes the retry free: the candidate, the measurement, and the
         # identities are all exactly as the adjudication left them.
-        self._transact(snapshot=refused_snapshot(SnapshotOutcome.REFUSED))
+        self._transact(snapshot=SnapshotSeed(create=SnapshotOutcome.REFUSED))
 
         pinned = self._pinned()
         self.assertEqual(pinned[KEYS.candidate_sha], CANDIDATE_SHA)

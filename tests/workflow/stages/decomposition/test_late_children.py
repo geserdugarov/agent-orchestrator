@@ -44,9 +44,20 @@ from tests.workflow.stages.decomposition.late_transaction_support import (
     ancestry_of,
     first_child,
     label_of,
+    sibling_marker,
 )
 
 RESOURCE_CHILD = "child"
+
+STATE_PENDING = "pending"
+
+BASE_BRANCH = "main"
+
+CHERRY_PICK = "git cherry-pick"
+
+COPY_PATHS = "git checkout"
+
+NO_HUNK_SPLITTING = "Do **not** split hunks mechanically"
 
 # The children an earlier decomposition of this same issue left behind, and
 # the graph it recorded over them.
@@ -59,17 +70,15 @@ _PRIOR_MANIFEST = MappingProxyType({
 })
 
 # A child marker naming a generation this transaction is not running.
-_FOREIGN_MARKER = "<!--orchestrator-late-child:cycle=1:generation=1:index=0-->"
+_FOREIGN_MARKER = (
+    f"<!--orchestrator-late-child:issue={LATE_ISSUE_NUMBER}"
+    ":cycle=1:generation=1:index=0-->"
+)
 
-STATE_PENDING = "pending"
-
-BASE_BRANCH = "main"
-
-CHERRY_PICK = "git cherry-pick"
-
-COPY_PATHS = "git checkout"
-
-NO_HUNK_SPLITTING = "Do **not** split hunks mechanically"
+# Another issue entirely, adjudicating under the same cycle and generation --
+# which is the ordinary case, not a contrived one, since a cycle is minted per
+# issue.
+OTHER_PARENT = 77
 
 # Every depth automatic splitting is allowed from, paired with the depth the
 # children it creates are born at. Depth 3 is absent because it may not split
@@ -77,7 +86,15 @@ NO_HUNK_SPLITTING = "Do **not** split hunks mechanically"
 DEPTHS = ((0, 1), (1, 2), (2, 3))
 
 
-class ChildCreationOrderTest(LateSplitCase, unittest.TestCase):
+class SplitChildrenCase(LateSplitCase):
+    """A case that reads the register this generation records its children on."""
+
+    def _recorded(self) -> list:
+        """The child numbers the parent records for this generation."""
+        return self._pinned().get(KEY_CHILDREN) or []
+
+
+class ChildCreationOrderTest(SplitChildrenCase, unittest.TestCase):
     """The parent knows what it is making before it makes any of it."""
 
     def test_the_umbrella_precedes_every_child(self) -> None:
@@ -120,7 +137,7 @@ class ChildCreationOrderTest(LateSplitCase, unittest.TestCase):
 
         self.assertEqual(self.github.created_child_issues, created)
         self.assertEqual(
-            self._pinned()[KEY_CHILDREN], [child.number for child in created],
+            self._recorded(), [child.number for child in created],
         )
 
     def test_a_refused_creation_records_what_exists(self) -> None:
@@ -143,7 +160,7 @@ class ChildCreationOrderTest(LateSplitCase, unittest.TestCase):
 
         created = first_child(self.github).number
         self.assertEqual(outcome.disposition, _LateDisposition.PARKED)
-        self.assertEqual(self._pinned()[KEY_CHILDREN], [created])
+        self.assertEqual(self._recorded(), [created])
         self.assertEqual(self._pinned()[KEY_CONSUMERS], [created])
 
     def test_a_resumed_walk_records_no_fewer(self) -> None:
@@ -151,19 +168,19 @@ class ChildCreationOrderTest(LateSplitCase, unittest.TestCase):
         # that dropped back to what it had placed so far would leave a crash
         # in the middle of it with orphans the parent no longer knows about.
         self._transact()
-        recorded = list(self._pinned()[KEY_CHILDREN])
+        recorded = list(self._recorded())
         widths = []
         with recording_children(self.github, widths):
             self._resume()
 
-        self.assertEqual(recorded, self._pinned()[KEY_CHILDREN])
+        self.assertEqual(recorded, self._recorded())
         self.assertTrue(
             all(len(width) >= len(recorded) for width in widths),
             f"the recorded list narrowed mid-walk: {widths}",
         )
 
 
-class PriorDecompositionTest(LateSplitCase, unittest.TestCase):
+class PriorDecompositionTest(SplitChildrenCase, unittest.TestCase):
     """An earlier decomposition's children are not this split's to adopt.
 
     The shape that produces one: an issue is decomposed, its children resolve,
@@ -189,7 +206,7 @@ class PriorDecompositionTest(LateSplitCase, unittest.TestCase):
         created = [child.number for child in self.github.created_child_issues]
         self.assertEqual(len(created), len(CHILDREN))
         self.assertNotIn(_DONE_CHILD, created)
-        self.assertEqual(self._pinned()[KEY_CHILDREN], created)
+        self.assertEqual(self._recorded(), created)
 
     def test_it_leaves_the_settled_children_alone(self) -> None:
         self._transact()
@@ -209,7 +226,7 @@ class PriorDecompositionTest(LateSplitCase, unittest.TestCase):
         self.assertIsNone(self._pinned().get(KEY_DEP_GRAPH))
 
 
-class OrphanAdoptionTest(LateSplitCase, unittest.TestCase):
+class OrphanAdoptionTest(SplitChildrenCase, unittest.TestCase):
     """A child created into a crash is adopted, never opened twice."""
 
     def test_an_unrecorded_child_is_adopted(self) -> None:
@@ -227,7 +244,7 @@ class OrphanAdoptionTest(LateSplitCase, unittest.TestCase):
         self.assertEqual(
             len(self.github.created_child_issues), len(CHILDREN),
         )
-        self.assertEqual(self._pinned()[KEY_CHILDREN][0], orphan)
+        self.assertEqual(self._recorded()[0], orphan)
 
     def test_another_generation_is_not_adopted(self) -> None:
         # The marker names the adjudication and the slice, so a child of some
@@ -240,11 +257,32 @@ class OrphanAdoptionTest(LateSplitCase, unittest.TestCase):
         self._transact()
 
         self.assertNotIn(
-            stranger.number, self._pinned()[KEY_CHILDREN],
+            stranger.number, self._recorded(),
         )
 
+    def test_another_parent_s_child_is_not_adopted(self) -> None:
+        # A cycle identity is minted per issue and repeats across them: two
+        # parents adjudicating their first candidate are both cycle 1. The
+        # lookup walks a workflow label rather than one parent's children, so
+        # without the issue in the marker one parent would adopt, reseed, and
+        # activate the other's child.
+        sibling = self.github.create_child_issue(
+            title="A",
+            body=sibling_marker(self.generation, OTHER_PARENT),
+            parent_number=OTHER_PARENT,
+            labels=[LABEL_BLOCKED],
+        )
 
-class ChildInheritanceTest(LateSplitCase, unittest.TestCase):
+        self._transact()
+
+        self.assertNotIn(sibling.number, self._recorded())
+        self.assertEqual(
+            len(self.github.created_child_issues), len(CHILDREN) + 1,
+        )
+        self.assertEqual(self.github.pinned_data(sibling.number), {})
+
+
+class ChildInheritanceTest(SplitChildrenCase, unittest.TestCase):
     """A child is seeded with the lineage and the snapshot it may reuse."""
 
     def test_it_carries_the_ancestry_it_will_read(self) -> None:
@@ -307,7 +345,7 @@ class ChildInheritanceTest(LateSplitCase, unittest.TestCase):
         return ancestry_of(self.github, self._first())
 
 
-class ChildBodyTest(LateSplitCase, unittest.TestCase):
+class ChildBodyTest(SplitChildrenCase, unittest.TestCase):
     """A child's body says where the work is and how it may be reused."""
 
     def test_it_opens_on_the_declared_slice(self) -> None:
@@ -336,7 +374,7 @@ class ChildBodyTest(LateSplitCase, unittest.TestCase):
         return first_child(self.github).body
 
 
-class LineageDepthTest(LateSplitCase, unittest.TestCase):
+class LineageDepthTest(SplitChildrenCase, unittest.TestCase):
     """Children are born one deeper, and the bound is enforced here too."""
 
     def test_a_child_is_born_one_deeper(self) -> None:

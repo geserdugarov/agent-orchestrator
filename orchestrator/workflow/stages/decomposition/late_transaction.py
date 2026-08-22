@@ -342,11 +342,19 @@ def _superseded(
     also end up wearing a "do not merge" notice forever. A release that failed
     on a still-open pull request parks on its own, which is what stops this
     from closing a change whose description is not back where it belongs.
+
+    Run on every pass, including one where the ledger already reads
+    `reconciled`. That entry records what an EARLIER pass did, and a pull
+    request is not a thing that stays where it was put: a human who reopens it
+    between that write and the resume would otherwise have the resume skip
+    straight past, report settled, and let the children loose beside a change
+    still carrying the superseded work. Re-asking costs one fetch and one
+    comment listing, and neither step repeats anything -- the notice is gated
+    on this generation's own marker already on the thread, and a pull request
+    that is not open is left exactly as it is.
     """
     number = context.generation.plan_pr_number
     if number is None:
-        return True
-    if _reconciled_already(context, LateResourceKind.PLAN_PR, str(number)):
         return True
     release = _late_hold._release_plan_pr_hold(
         context.gh, context.issue, context.generation,
@@ -514,18 +522,6 @@ def _recorded_resource(
         )
         return
     _late_outcome._persist(context)
-
-
-def _reconciled_already(
-    context: _LateContext, kind: LateResourceKind, target: str,
-) -> bool:
-    """Whether this obligation is one an earlier attempt already settled."""
-    return any(
-        entry.kind == kind
-        and entry.target == target
-        and entry.resource_state == LateResourceState.RECONCILED
-        for entry in context.generation.resources
-    )
 
 
 def _unsuperseded(context: _LateContext, number: int) -> bool:

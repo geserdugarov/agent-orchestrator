@@ -26,15 +26,25 @@ KEY_CHILDREN = "children"
 
 
 class _RunAndDie:
-    """One effect that lands, followed by a process that does not return."""
+    """One effect that lands, followed by a process that does not return.
 
-    def __init__(self, ran, name: str) -> None:
+    `after` is which call of a repeated seam the death follows, so a step that
+    is taken once per child -- a label flip, a state write -- can be cut in
+    the middle rather than only at its first move.
+    """
+
+    def __init__(self, ran, name: str, after: int) -> None:
         self._ran = ran
         self._name = name
+        self._after = after
+        self._calls = 0
 
     def __call__(self, *call_args, **call_options):
-        self._ran(*call_args, **call_options)
-        raise KeyboardInterrupt(self._name)
+        self._calls += 1
+        answered = self._ran(*call_args, **call_options)
+        if self._calls >= self._after:
+            raise KeyboardInterrupt(self._name)
+        return answered
 
 
 class _ChildWrites:
@@ -60,9 +70,11 @@ class _ChildWrites:
 
 
 @contextlib.contextmanager
-def killed_after(owner, name: str):
+def killed_after(owner, name: str, *, after: int = 1):
     """The process dying immediately after one effect has landed."""
-    with patch.object(owner, name, _RunAndDie(getattr(owner, name), name)):
+    with patch.object(
+        owner, name, _RunAndDie(getattr(owner, name), name, after),
+    ):
         yield
 
 

@@ -120,12 +120,22 @@ def scan_of(label, *, closed: bool = False) -> _ChildScan:
 
 
 class RecordedDelete:
-    """A snapshot delete answering one outcome, recording what it was asked."""
+    """A snapshot delete answering one outcome, recording what it was asked.
 
-    def __init__(self, outcome) -> None:
+    `dies` is the crash between the call landing and the write that would have
+    recorded it: the delete has happened as far as the remote is concerned,
+    and nothing on the issue says so.
+    """
+
+    def __init__(self, outcome, *, dies: bool = False) -> None:
         self.outcome = outcome
+        self.dies = dies
         self.refs: list[str] = []
+        self.shas: list[str] = []
 
-    def __call__(self, _spec, _cwd, *, ref: str):
+    def __call__(self, _spec, _cwd, *, ref: str, sha: str):
         self.refs.append(ref)
+        self.shas.append(sha)
+        if self.dies:
+            raise KeyboardInterrupt("delete_snapshot_ref")
         return self.outcome

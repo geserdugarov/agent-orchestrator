@@ -42,6 +42,13 @@ def _prove(remote, *, ref: str = REF) -> refs.SnapshotOutcome:
     )
 
 
+def _delete(remote, *, ref: str = REF, sha=None) -> refs.SnapshotOutcome:
+    """Reclaim that snapshot, named against the commit it preserved."""
+    return refs.delete_snapshot_ref(
+        remote.spec, remote.clone, ref=ref, sha=sha or remote.sha,
+    )
+
+
 class SnapshotCreateTest(unittest.TestCase):
     """A snapshot is written once, and never over something else."""
 
@@ -140,9 +147,7 @@ class SnapshotDeleteTest(unittest.TestCase):
         with real_remote() as remote:
             remote.plant_ref(REF, remote.sha)
 
-            outcome = refs.delete_snapshot_ref(
-                remote.spec, remote.clone, ref=REF,
-            )
+            outcome = _delete(remote)
 
             self.assertEqual(outcome, refs.SnapshotOutcome.DELETED)
             self.assertEqual(remote.remote_ref_sha(REF), "")
@@ -152,19 +157,28 @@ class SnapshotDeleteTest(unittest.TestCase):
         # would have recorded it: the retry has nothing to do and says so.
         with real_remote() as remote:
             remote.plant_ref(REF, remote.sha)
-            refs.delete_snapshot_ref(remote.spec, remote.clone, ref=REF)
+            _delete(remote)
 
-            outcome = refs.delete_snapshot_ref(
-                remote.spec, remote.clone, ref=REF,
-            )
+            outcome = _delete(remote)
 
             self.assertEqual(outcome, refs.SnapshotOutcome.ABSENT)
 
+    def test_another_commit_under_it_is_not_reclaimed(self) -> None:
+        # The one operation whose blast radius is somebody else's content: a
+        # ref re-pointed before the reclamation is not the artifact this
+        # generation preserved, and deleting it would destroy theirs.
+        with real_remote() as remote:
+            remote.plant_ref(REF, remote.other_sha)
+
+            with self.assertLogs(PLUMBING_LOG, level=ERROR):
+                outcome = _delete(remote)
+
+            self.assertEqual(outcome, refs.SnapshotOutcome.MISMATCH)
+            self.assertEqual(remote.remote_ref_sha(REF), remote.other_sha)
+
     def test_a_never_created_ref_is_absent(self) -> None:
         with real_remote() as remote:
-            outcome = refs.delete_snapshot_ref(
-                remote.spec, remote.clone, ref=REF,
-            )
+            outcome = _delete(remote)
 
             self.assertEqual(outcome, refs.SnapshotOutcome.ABSENT)
 
@@ -172,9 +186,7 @@ class SnapshotDeleteTest(unittest.TestCase):
         # Deleting one would destroy an artifact this domain never created.
         with real_remote() as remote:
             with self.assertLogs(PLUMBING_LOG, level=ERROR):
-                outcome = refs.delete_snapshot_ref(
-                    remote.spec, remote.clone, ref=FOREIGN_REF,
-                )
+                outcome = _delete(remote, ref=FOREIGN_REF)
 
             self.assertEqual(outcome, refs.SnapshotOutcome.REFUSED)
             self.assertEqual(
@@ -184,9 +196,7 @@ class SnapshotDeleteTest(unittest.TestCase):
     def test_an_unreachable_remote_deletes_nothing(self) -> None:
         with real_remote(reachable=False) as remote:
             with self.assertLogs(PLUMBING_LOG, level=ERROR):
-                outcome = refs.delete_snapshot_ref(
-                    remote.spec, remote.clone, ref=REF,
-                )
+                outcome = _delete(remote)
 
             self.assertEqual(outcome, refs.SnapshotOutcome.UNREADABLE)
 
@@ -208,15 +218,11 @@ class SnapshotRoundTripTest(unittest.TestCase):
                 refs.SnapshotOutcome.PROVEN,
             )
             self.assertEqual(
-                refs.delete_snapshot_ref(
-                    remote.spec, remote.clone, ref=built,
-                ),
+                _delete(remote, ref=built),
                 refs.SnapshotOutcome.DELETED,
             )
             self.assertEqual(
-                refs.delete_snapshot_ref(
-                    remote.spec, remote.clone, ref=built,
-                ),
+                _delete(remote, ref=built),
                 refs.SnapshotOutcome.ABSENT,
             )
 

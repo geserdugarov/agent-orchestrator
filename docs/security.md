@@ -97,11 +97,13 @@ The late size gate preserves a superseded candidate under
   `refs/heads/orchestrator/*` and nothing else will refuse them. Prove it before enabling the gate:
   [`configuration/snapshot-capability-check.md`](configuration/snapshot-capability-check.md) is the
   disposable-repository runbook, and a failure there blocks rollout rather than being answered by weakening a rule.
-- **Nothing is ever overwritten.** Every write is lease-pinned to a remote read taken immediately before it: a create
-  leases the ref as absent, a delete leases it at the SHA just observed, and a ref already carrying a different
-  commit is reported and left alone. A snapshot ref outside the namespace — anything a hand-edited ledger entry could
-  name — is refused before the remote is contacted at all, so this path can neither clobber nor delete a branch, a
-  tag, or a pull-request ref.
+- **Nothing is ever overwritten, and only our own content is deleted.** Every write is lease-pinned: a create leases
+  the ref as absent, and a ref already carrying a different commit is reported and left alone. A delete is leased at
+  the commit the split *preserved* rather than at whatever a fresh read observes — leasing against the reading would
+  delete a re-pointed ref as readily as ours, and this is the one operation whose blast radius is somebody else's
+  content rather than a refused push. A snapshot ref outside the namespace — anything a hand-edited ledger entry
+  could name — is refused before the remote is contacted at all, so this path can neither clobber nor delete a
+  branch, a tag, or a pull-request ref.
 
 The refs hold objects, so they hold *content*: a snapshot is a copy of a candidate that was never published. It lives
 in the same repository under the same visibility as the branch it came from, and it is deleted at the umbrella's own

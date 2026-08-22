@@ -27,9 +27,13 @@ convention:
   and the answer has to be the exact frozen candidate; then the ref is fetched
   back and resolved locally, because "a child can obtain this" is the property
   the whole namespace exists for and an `ls-remote` does not establish it.
-- **Absent is success.** A deletion that finds nothing there has nothing to
-  do, which is what makes reclamation idempotent across a crash between the
-  push and the write that would have recorded it.
+- **Absent is success, and only ours is deletable.** A deletion that finds
+  nothing there has nothing to do, which is what makes reclamation idempotent
+  across a crash between the push and the write that would have recorded it. A
+  ref carrying anything OTHER than the commit the caller preserved is refused
+  rather than reclaimed: the delete is the one operation whose blast radius is
+  somebody else's content, so it is leased against the expected commit rather
+  than against whatever a fresh read happens to observe.
 
 Callers import the owner they need, so this initializer binds nothing: the
 namespace is pure string policy and costs nothing, while the ref operations

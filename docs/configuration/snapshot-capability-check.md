@@ -19,9 +19,11 @@ Four properties, in this order, because each is what makes the next meaningful:
    pushed. This is the half `ls-remote` cannot answer, and it is the property every child of a split depends on: a
    namespace the token may write and not read passes a remote read and fails the first child that tries to use it.
 3. **No overwrite.** A second create against the same ref at a *different* commit is refused rather than accepted.
-4. **Delete, and absent-is-success.** The ref can be deleted, and a second delete of the now-absent ref reports
-   success rather than failure — which is what makes reclamation idempotent across a crash between the push that
-   deleted a ref and the write that would have recorded it.
+4. **Delete, and absent-is-success.** The ref can be deleted *under a lease naming the commit it preserved*, and a
+   second delete of the now-absent ref reports success rather than failure — which is what makes reclamation
+   idempotent across a crash between the push that deleted a ref and the write that would have recorded it. The
+   orchestrator never deletes a ref carrying anything other than that commit, so the lease below is pinned to it
+   rather than to a fresh reading.
 
 ## Preparing the repository
 

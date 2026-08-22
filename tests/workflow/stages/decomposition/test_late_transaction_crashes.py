@@ -1,6 +1,10 @@
 # Copyright 2026 Geser Dugarov
 # SPDX-License-Identifier: Apache-2.0
-"""Every boundary the split transaction can die at, and what it left behind.
+"""What a split leaves behind when it dies over its snapshot or its children.
+
+The front half of the transaction: the ref every child is cut from, the
+children themselves, and the sentence the parent owes. The back half -- the
+supersession, the handoff, and the branch -- is the module beside this one.
 
 Each case kills the process at one seam and then runs the transaction again
 from what the pinned comment holds -- which is exactly what the next eligible
@@ -14,28 +18,26 @@ from __future__ import annotations
 import unittest
 
 from orchestrator.git.snapshots import refs as _snapshot_refs
+from orchestrator.git.snapshots.refs import SnapshotOutcome
 from orchestrator.workflow.stages.decomposition import (
     late_children as _late_children,
-    late_transaction as _late_transaction,
 )
 from orchestrator.workflow.stages.decomposition.late_models import (
     _LateDisposition,
 )
-from orchestrator.workflow.state import WorkflowLabel
 
+from tests.support.fakes import FakeComment, FakeUser
 from tests.workflow.stages.decomposition.late_crash_support import (
     killed_after,
     killed_before,
 )
-from tests.workflow.stages.decomposition.late_test_support import (
-    LATE_ISSUE_NUMBER,
+from tests.workflow.stages.decomposition.late_seam_support import (
+    SnapshotSeed,
 )
-from tests.support.fakes import FakeComment, FakeUser
 from tests.workflow.stages.decomposition.late_transaction_support import (
     CHILDREN,
     FORWARD_LINK_MARKER,
     SNAPSHOT_REF,
-    SUPERSESSION_MARKER,
 )
 from tests.workflow.stages.decomposition.late_transaction_support import (
     KEY_CHILDREN,
@@ -46,17 +48,16 @@ from tests.workflow.stages.decomposition.late_transaction_support import (
     KEY_UMBRELLA,
 )
 from tests.workflow.stages.decomposition.late_transaction_support import (
-    HeldPlanPrSplitCase,
     LateSplitCase,
-    label_of,
 )
 
 RESOURCE_SNAPSHOT = "snapshot_ref"
-RESOURCE_BRANCH = "branch"
 
 STATE_PENDING = "pending"
+
 STATE_RETAINED = "retained"
-STATE_RECONCILED = "reconciled"
+
+EVENT_LATE_SNAPSHOT = "late_snapshot"
 
 
 class SnapshotBoundaryTest(LateSplitCase, unittest.TestCase):
@@ -88,6 +89,34 @@ class SnapshotBoundaryTest(LateSplitCase, unittest.TestCase):
         self.assertEqual(
             self._resources()[(RESOURCE_SNAPSHOT, SNAPSHOT_REF)],
             STATE_RETAINED,
+        )
+
+    def test_a_death_after_the_proof_retains(self) -> None:
+        # The ref was created AND proved, and the write that would have moved
+        # it from `pending` to `retained` never landed. The obligation is
+        # already on the ledger, so nothing is lost and nothing is created.
+        with self.assertRaises(KeyboardInterrupt):
+            self._transact(
+                killed=killed_after(_snapshot_refs, "prove_snapshot_ref"),
+            )
+
+        self.assertEqual(
+            self._resources()[(RESOURCE_SNAPSHOT, SNAPSHOT_REF)],
+            STATE_PENDING,
+        )
+        self.assertEqual(self.github.created_child_issues, [])
+
+        resumed = self._resume(
+            snapshot=SnapshotSeed(create=SnapshotOutcome.PRESENT),
+        )
+
+        self.assertEqual(resumed.disposition, _LateDisposition.SETTLED)
+        self.assertEqual(
+            self._resources()[(RESOURCE_SNAPSHOT, SNAPSHOT_REF)],
+            STATE_RETAINED,
+        )
+        self.assertEqual(
+            len(self._events_named(EVENT_LATE_SNAPSHOT)), 1,
         )
 
 
@@ -122,6 +151,20 @@ class ChildBoundaryTest(LateSplitCase, unittest.TestCase):
         self.assertEqual(
             self._pinned()[KEY_EXPECTED_CHILDREN], len(CHILDREN),
         )
+
+    def test_a_death_between_children_resumes(self) -> None:
+        # The first slice is created, recorded, and seeded; the second has not
+        # been touched. The resume adopts the first and opens only the second.
+        with self.assertRaises(KeyboardInterrupt):
+            self._transact(killed=killed_after(_late_children, "_seeded"))
+        first = list(self._pinned()[KEY_CHILDREN])
+        self.assertEqual(len(first), 1)
+
+        resumed = self._resume()
+
+        self.assertEqual(resumed.disposition, _LateDisposition.SETTLED)
+        self.assertEqual(len(self.github.created_child_issues), len(CHILDREN))
+        self.assertEqual(self._pinned()[KEY_CHILDREN][:1], first)
 
     def test_a_death_after_the_record_adopts(self) -> None:
         # Recorded first, so the retry reuses the child rather than opening a
@@ -185,78 +228,6 @@ class AnnouncementBoundaryTest(LateSplitCase, unittest.TestCase):
             ]),
             1,
         )
-
-
-class SupersessionBoundaryTest(HeldPlanPrSplitCase, unittest.TestCase):
-    """The pull request's own thread is what stops a repeated notice."""
-
-    def test_a_death_post_notice_says_it_once(self) -> None:
-        with self.assertRaises(KeyboardInterrupt):
-            self._transact(
-                generation=self.generation,
-                killed=killed_after(self.github, "supersede_pr"),
-            )
-
-        self._resume()
-
-        self.assertEqual(
-            len([
-                body for _, body in self.github.posted_pr_comments
-                if SUPERSESSION_MARKER in body
-            ]),
-            1,
-        )
-        self.assertEqual(self.plan_pr.state, "closed")
-
-
-class HandoffBoundaryTest(LateSplitCase, unittest.TestCase):
-    """The parent is handed on before a child can run, and cleaned up after."""
-
-    def test_a_death_pre_activation_is_umbrella(self) -> None:
-        # A crash here cannot leave a runnable child under a parent still
-        # labelled `decomposing`; the umbrella's own walk is the retry.
-        with self.assertRaises(KeyboardInterrupt):
-            self._transact(
-                killed=killed_before(_late_transaction._split,
-                                     "_activate_initial_split_children"),
-            )
-
-        self.assertEqual(
-            label_of(self.github, LATE_ISSUE_NUMBER), WorkflowLabel.UMBRELLA,
-        )
-        self.assertEqual(len(self._pinned()[KEY_CHILDREN]), len(CHILDREN))
-        self.assertEqual(
-            label_of(self.github, self.github.created_child_issues[0].number),
-            WorkflowLabel.BLOCKED,
-        )
-
-    def test_a_death_pre_cleanup_leaves_it_owed(self) -> None:
-        # The obligation is durable before the delete is attempted, so a
-        # reclamation has something to retry rather than a gap.
-        with self.assertRaises(KeyboardInterrupt):
-            self._transact(
-                killed=killed_before(self.github, "delete_remote_branch"),
-            )
-
-        owed = [
-            recorded for (kind, _), recorded in self._resources().items()
-            if kind == RESOURCE_BRANCH
-        ]
-        self.assertEqual(owed, [STATE_PENDING])
-
-    def test_a_death_post_delete_reconciles(self) -> None:
-        with self.assertRaises(KeyboardInterrupt):
-            self._transact(
-                killed=killed_after(self.github, "delete_remote_branch"),
-            )
-
-        self._resume()
-
-        owed = [
-            recorded for (kind, _), recorded in self._resources().items()
-            if kind == RESOURCE_BRANCH
-        ]
-        self.assertEqual(owed, [STATE_RECONCILED])
 
 
 if __name__ == "__main__":

@@ -18,10 +18,10 @@ from __future__ import annotations
 from contextlib import nullcontext
 from dataclasses import replace
 
-from orchestrator.git.snapshots.refs import SnapshotOutcome
 from orchestrator.workflow.late_split import lineage as _lineage
 from orchestrator.workflow.late_split import state as _late_state
 from orchestrator.workflow.stages.decomposition import (
+    late_children as _late_children,
     late_hold as _late_hold,
     late_transaction as _late_transaction,
 )
@@ -223,6 +223,18 @@ def first_child(github: FakeGitHubClient):
     return github.created_child_issues[0]
 
 
+def sibling_marker(generation, parent_issue: int) -> str:
+    """The child marker ANOTHER parent's first slice would carry.
+
+    Built through the production builder rather than spelled out, so the day
+    that identity stops naming the issue this reads as the same marker and the
+    cross-parent adoption it guards against actually happens.
+    """
+    return _late_children._child_marker(
+        replace(generation, current_issue=parent_issue), 0,
+    )
+
+
 def ancestry_of(github: FakeGitHubClient, issue_number: int):
     """What one child reads back as the lineage it was created under.
 
@@ -233,13 +245,3 @@ def ancestry_of(github: FakeGitHubClient, issue_number: int):
     return _lineage.read_late_ancestry(
         github.read_pinned_state(github.get_issue(issue_number)),
     )
-
-
-def refused_snapshot(outcome: SnapshotOutcome) -> SnapshotSeed:
-    """A remote that would not let the snapshot be created."""
-    return SnapshotSeed(create=outcome)
-
-
-def unproven_snapshot(outcome: SnapshotOutcome) -> SnapshotSeed:
-    """A snapshot the remote reported and would not serve back."""
-    return SnapshotSeed(prove=outcome)

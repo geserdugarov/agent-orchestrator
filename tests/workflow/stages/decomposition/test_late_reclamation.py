@@ -39,6 +39,7 @@ from tests.workflow.stages.decomposition.late_cleanup_support import (
     walk_umbrella,
 )
 from tests.workflow.stages.decomposition.late_test_support import (
+    CANDIDATE_SHA,
     late_generation,
 )
 
@@ -56,10 +57,25 @@ class UmbrellaReclamationTest(_PatchedWorkflowMixin, unittest.TestCase):
         )
 
         self.assertEqual(deleted.refs, [SNAPSHOT_REF])
+        self.assertEqual(deleted.shas, [CANDIDATE_SHA])
         self.assertEqual(
             resource_states(github)[SNAPSHOT_REF], STATE_RECONCILED,
         )
         self.assertTrue(parent.closed)
+
+    def test_a_repointed_ref_is_not_reclaimed(self) -> None:
+        # Named against the commit the split preserved, so a ref somebody
+        # re-pointed is refused rather than deleted -- and the refusal holds
+        # the terminal open, because that is a human's to settle.
+        github, parent = _retaining()
+
+        with self.assertLogs(WORKFLOW_LOG, level="WARNING"):
+            self._walk_with(
+                github, parent, _snapshot_refs.SnapshotOutcome.MISMATCH,
+            )
+
+        self.assertEqual(resource_states(github)[SNAPSHOT_REF], STATE_FAILED)
+        self.assertFalse(parent.closed)
 
     def test_an_absent_ref_is_already_reclaimed(self) -> None:
         # The crash between the push that deleted a ref and the write that
@@ -107,6 +123,32 @@ class UmbrellaReclamationTest(_PatchedWorkflowMixin, unittest.TestCase):
         self.assertEqual(deleted.refs, [])
         self.assertEqual(
             resource_states(github)[SNAPSHOT_REF], STATE_RETAINED,
+        )
+        self.assertTrue(parent.closed)
+
+    def test_a_death_post_delete_reconciles(self) -> None:
+        # The delete landed and the write that recorded it did not. Absent is
+        # success, so the retry asks once and settles the same entry rather
+        # than reading a mismatch against a ref that is already gone.
+        github, parent = _retaining()
+        died = RecordedDelete(
+            _snapshot_refs.SnapshotOutcome.DELETED, dies=True,
+        )
+        with self.assertRaises(KeyboardInterrupt):
+            with patch.object(_snapshot_refs, "delete_snapshot_ref", died):
+                walk_umbrella(self, github, parent)
+        self.assertEqual(died.refs, [SNAPSHOT_REF])
+        self.assertEqual(
+            resource_states(github)[SNAPSHOT_REF], STATE_RETAINED,
+        )
+        self.assertFalse(parent.closed)
+
+        self._walk_with(
+            github, parent, _snapshot_refs.SnapshotOutcome.ABSENT,
+        )
+
+        self.assertEqual(
+            resource_states(github)[SNAPSHOT_REF], STATE_RECONCILED,
         )
         self.assertTrue(parent.closed)
 

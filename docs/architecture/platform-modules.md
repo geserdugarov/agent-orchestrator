@@ -157,7 +157,8 @@ orchestrator/
       namespace.py      the one `refs/orchestrator/late-split/...` namespace a snapshot may occupy, built from a
                         generation's own identity and refused for anything else
       refs.py           create-or-verify against the exact commit with no overwrite, the fetch-and-resolve that
-                        proves a child could obtain it, and the absent-is-success delete
+                        proves a child could obtain it, and the absent-is-success delete -- leased at the preserved
+                        commit, so a re-pointed ref is refused rather than reclaimed
     verification/       what a verify run is, and the reads a checkout is judged by
       models.py         the `VerifyResult` statuses and fields, and the output budget
       output.py         the redact-then-truncate pass over captured verify output

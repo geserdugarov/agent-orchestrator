@@ -179,11 +179,13 @@ def _reclaim_snapshot(
 ) -> LateGeneration:
     """Delete one snapshot ref and record whether the remote let it go.
 
-    An absent ref is a success, which is what makes the retry after a crash
-    between the delete and this write cost one request rather than a mismatch.
+    Named against the commit this generation preserved, so a ref somebody
+    re-pointed is refused rather than reclaimed. An absent ref is a success,
+    which is what makes the retry after a crash between the delete and this
+    write cost one request rather than a mismatch.
     """
     outcome = _snapshot_refs.delete_snapshot_ref(
-        spec, spec.target_root, ref=ref,
+        spec, spec.target_root, ref=ref, sha=generation.candidate_sha,
     )
     return _recorded(
         generation, _SNAPSHOT, ref, deleted=outcome in _RECLAIMED,

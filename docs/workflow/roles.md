@@ -407,10 +407,13 @@ A resumed walk therefore adopts every child **this generation** already records 
 for the same slice, and the recorded list is monotonic: a resumed pass never writes back fewer children than the
 previous one knew about. Past that register there is one more recovery, for the crash between `create_child_issue`
 returning and the write recording it — a window in which nothing outside GitHub knows the number. Every child is
-created carrying a hidden marker naming this cycle, this generation, and its slice index, and a walk about to create
-looks for that marker among the open issues on the child's own workflow label first, adopting the orphan instead of
-opening a duplicate. The lookup costs one listing and is taken only where something has to be created, so a fully
-adopted resume pays nothing for it.
+created carrying a hidden marker naming this **issue**, this cycle, this generation, and its slice index, and a walk
+about to create looks for that marker among the open issues on the child's own workflow label first, adopting the
+orphan instead of opening a duplicate. The issue is in the marker because a cycle identity is minted per issue and
+repeats across them — two parents adjudicating their first candidate are both cycle 1 — while the lookup walks a
+label rather than one parent's children, so without it one parent would adopt, reseed, and activate another's child.
+The lookup costs one listing and is taken only where something has to be created, so a fully adopted resume pays
+nothing for it.
 
 Each child is born knowing what it needs and nothing more: its declared scope in the words the adjudication used, the
 current base branch, the ancestor snapshot ref and exact commit, and the lineage and cycle identity a later record is
@@ -441,7 +444,11 @@ receipt as this one's — and both are honored only on a comment **this orchestr
 is invisible in the rendered thread and anybody could otherwise post the marker to suppress the sentence it gates. A
 merged or closed pull request is told and left alone; one that could not be read, or a release that failed on a
 still-open plan PR, parks — and nothing is activated while a pull request carrying the superseded work is still
-open.
+open. That last part is why the supersession runs on **every** pass, including one whose ledger already reads
+`reconciled`: that entry records what an earlier pass did, and a human who reopens the pull request between the write
+and the resume would otherwise have the resume skip straight past, report settled, and let the children loose beside
+a change still carrying the superseded work. Re-asking costs one fetch and one comment listing, and neither step
+repeats anything.
 
 **Then the label, the retirement, and the activation, in that order.** The generation is retired in the same write
 that hands the issue to `workflow:umbrella`: identity, both commits, and both ledgers kept, the measurement dropped,
@@ -472,7 +479,9 @@ so proving it costs no request of its own, and `done` covers a nested split too 
 published, so its own descendants are past needing the ancestor. Anything that cannot be proved keeps the ref: a
 consumer missing from the scan, one wearing a label this binary does not recognize, or a consumer ledger it could
 not type. Deletion is idempotent because an absent ref is a success, so the crash between the push that removed it
-and the write that would have recorded it costs one request on the retry.
+and the write that would have recorded it costs one request on the retry — and it is named against the commit the
+split preserved rather than against whatever a fresh read observes, so a ref somebody re-pointed is a mismatch left
+for a human instead of the one blind write in the whole namespace, aimed at destruction.
 
 `retained` never blocks the terminal and `failed` always does, and that asymmetry is the safety argument. A ref kept
 because a consumer could not be proved terminal is one a later sweep settles — the closed-owner sweep and the

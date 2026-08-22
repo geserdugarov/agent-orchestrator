@@ -652,8 +652,11 @@ rather than preserving.
   rather than leaving one standing. The register is read all-or-nothing: an entry this binary did not write makes
   the whole field read back empty, because skipping one would shift every child after it onto somebody else's slice
   — and an empty answer costs a marker lookup rather than a wrong adoption. That lookup is the other half: every
-  child is created carrying `<!--orchestrator-late-child:cycle=…:generation=…:index=…-->`, so a child created into
-  a crash before its number was recorded is adopted rather than opened twice.
+  child is created carrying `<!--orchestrator-late-child:issue=…:cycle=…:generation=…:index=…-->`, so a child created
+  into a crash before its number was recorded is adopted rather than opened twice. The issue is part of that identity
+  because a cycle is minted per issue and repeats across them, while the lookup walks one workflow label rather than
+  one parent's children — without it, two parents on their first candidate would each carry
+  `cycle=1:generation=1:index=0` and one would adopt the other's child.
 - **Inherited lineage.** `late_ancestry_root_issue`, `late_ancestry_depth`, `late_ancestry_parent`,
   `late_ancestry_cycle_id`, `late_ancestry_generation`, `late_ancestry_snapshot_ref`,
   `late_ancestry_snapshot_sha`, `late_ancestry_base_branch`, and `late_declared_scope` are what a child born of a
