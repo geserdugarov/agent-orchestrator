@@ -50,14 +50,30 @@ envelope, so a hook or a url rewrite on the operator's machine cannot make the c
 fail.
 
 ```sh
+#!/bin/sh
 set -eu   # the SETUP below must fail closed: a step that does not run cannot
           # be allowed to leave a later one certifying something it never tested
 
-printf '#!/bin/sh\nprintf %%s "$GIT_TOKEN"\n' > /tmp/askpass.sh && chmod 700 /tmp/askpass.sh
-export GIT_ASKPASS=/tmp/askpass.sh GIT_TERMINAL_PROMPT=0
+ASKPASS=$(mktemp)
+trap 'rm -f "$ASKPASS"' EXIT INT TERM
+printf '#!/bin/sh\nprintf %%s "$GIT_TOKEN"\n' > "$ASKPASS"
+chmod 700 "$ASKPASS"
+
+export GIT_ASKPASS="$ASKPASS" GIT_TERMINAL_PROMPT=0
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYSTEM=1
-git() { command git -c core.hooksPath=/dev/null -c credential.helper= -c core.fsmonitor= "$@"; }
 export MIRROR="refs/orchestrator/late-split-local/capability-check/issue-1/cycle-1/gen-0"
+
+# The detached config above takes the operator's `user.name` / `user.email`
+# with it, so the identity the setup commits under is supplied here -- as the
+# orchestrator's own hardened runner supplies it -- rather than assumed.
+git() {
+  command git \
+    -c core.hooksPath=/dev/null -c credential.helper= -c core.fsmonitor= \
+    -c user.name="capability check" -c user.email="capability@invalid" "$@"
+}
+
+FAILED=0
+fail() { FAILED=1; echo "FAIL: $1"; }
 
 # SETUP: two commits that are certainly distinct. Step 3 pushes the second one
 # over the first and requires a refusal, so a repository with one commit -- or
@@ -71,35 +87,46 @@ git commit -qm "capability check: second"
 SECOND=$(git rev-parse HEAD)
 test -n "$FIRST" && test -n "$SECOND" && test "$FIRST" != "$SECOND"
 
-set +e    # past setup, each check reports for itself rather than aborting
+set +e    # past setup, each check records its own verdict rather than aborting
 
 # 1. create, leased as absent
-git push --force-with-lease="$REF": "$AUTH_URL" "$FIRST:$REF"          || echo "FAIL: create"
+git push -q --force-with-lease="$REF": "$AUTH_URL" "$FIRST:$REF" || fail create
 
 # 2. fetch it back and resolve it here
-git fetch --quiet "$AUTH_URL" "+$REF:$MIRROR"                           || echo "FAIL: fetch"
-test "$(git rev-parse --verify "$MIRROR^{commit}")" = "$FIRST"          || echo "FAIL: verify"
+git fetch -q "$AUTH_URL" "+$REF:$MIRROR"                         || fail fetch
+test "$(git rev-parse --verify "$MIRROR^{commit}")" = "$FIRST"   || fail verify
 
-# 3. a different commit under the same ref must be refused
-git push --force-with-lease="$REF": "$AUTH_URL" "$SECOND:$REF" \
-  && echo "FAIL: an occupied ref was overwritten"
-test "$(git ls-remote "$AUTH_URL" "$REF" | cut -f1)" = "$FIRST"         || echo "FAIL: the ref moved"
+# 3. a different commit under the same ref must be refused, and must not move
+#    it. Both halves are needed: a push that failed for its own reasons is not
+#    proof the ref is protected.
+git push -q --force-with-lease="$REF": "$AUTH_URL" "$SECOND:$REF" 2>/dev/null \
+  && fail "an occupied ref was overwritten"
+test "$(git ls-remote "$AUTH_URL" "$REF" | cut -f1)" = "$FIRST"  || fail "the ref moved"
 
-# 4. delete, then delete again -- the second must succeed
-git push --force-with-lease="$REF:$FIRST" "$AUTH_URL" ":$REF"           || echo "FAIL: delete"
-test -z "$(git ls-remote "$AUTH_URL" "$REF")"                           || echo "FAIL: still present"
-git update-ref -d "$MIRROR"                                             || echo "FAIL: local drop"
+# 4. delete, then confirm the absence a retry reads as already reclaimed
+git push -q --force-with-lease="$REF:$FIRST" "$AUTH_URL" ":$REF" || fail delete
+test -z "$(git ls-remote "$AUTH_URL" "$REF")"                    || fail "still present"
+git update-ref -d "$MIRROR"                                      || fail "local drop"
+
+test "$FAILED" -eq 0 && echo "capability check: PASS"
+exit "$FAILED"
 ```
 
-Every step must print nothing. The setup runs under `set -eu` and stops on the first failure, because a step that
-silently did not happen is what lets a later one certify behavior it never exercised — the original hazard being an
-empty `SECOND`, which turns step 3's push into a delete refspec whose refusal reads exactly like overwrite
-protection. The line after step 3 closes that door from the other side: it is not enough that the push failed, the
-ref has to still be at the commit it was created with. The third step is inverted on purpose — it is expected to
-*fail*, and the check fails if it succeeds. Step 4's "delete again" is the `ls-remote` on the following line: the
-orchestrator's own deletion reads the ref first and reports an absent one as already reclaimed, so an empty listing
-is exactly the success it needs, and the `update-ref -d` after it is the local copy the orchestrator drops with the
-remote one.
+The script is the verdict: it exits **0** and prints `capability check: PASS` when every property holds, and exits
+**1** having printed one `FAIL: <step>` line per property that did not. Nothing is inferred from silence — a step
+that merely printed a warning is not a failure, and a step that failed cannot be missed by an operator skimming the
+output.
+
+Two parts of it are deliberately not what a casual reading expects. The setup runs under `set -eu` and stops on the
+first problem, because a step that silently did not happen is what lets a later one certify behavior it never
+exercised — the original hazard being an empty `SECOND`, which turns step 3's push into a delete refspec whose
+refusal reads exactly like overwrite protection. And step 3 is **inverted**: the push is expected to fail, so its
+success is what records a failure, and the `ls-remote` after it closes the same door from the other side by
+requiring the ref to still be at the commit it was created with.
+
+Step 4's "already reclaimed" is the `ls-remote` on the following line: the orchestrator's own deletion reads the ref
+first and reports an absent one as success, so an empty listing is exactly what it needs. The `update-ref -d` after
+it is the local copy the orchestrator drops with the remote one.
 
 ## Reading a failure
 

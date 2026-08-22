@@ -31,6 +31,9 @@ from orchestrator.workflow.state import (
 _STATE_ATTR = "state"
 _ISSUE_STATE_OPEN = "open"
 _ISSUE_STATE_CLOSED = "closed"
+# What the orphan lookup asks for: a child nobody has attributed yet is one a
+# human may have closed, so an open-only search would miss it and duplicate.
+_ISSUE_STATE_ALL = "all"
 _RECORDED_EVENTS_CAP = 500
 
 # The stages whose closed issues still have a terminal arc left to drain: an
@@ -240,10 +243,8 @@ class GitHubIssueMixin:
             labels=validated_labels,
         )
 
-    def find_issue_carrying(
-        self, marker: str, *, label: str,
-    ) -> Optional[Issue]:
-        """Return the open issue this orchestrator created carrying `marker`.
+    def find_issue_carrying(self, marker: str) -> Optional[Issue]:
+        """Return the issue this orchestrator created carrying `marker`.
 
         The lookup a create that returned and a process that died a statement
         later needs. Creating an issue is not undoable and nothing outside
@@ -251,32 +252,28 @@ class GitHubIssueMixin:
         creator put IN it: a hidden marker naming the exact adjudication and
         the exact slice the issue was opened for.
 
-        Scoped to one workflow label rather than searched repository-wide,
-        because a child is born on exactly one and the alternative is a walk
-        over every open issue. An absent label is an absent child -- nothing
-        this orchestrator created could be wearing it, since creating one is
-        what puts the label in the repository -- so a 404 answers None rather
-        than widening the search.
+        Searched in EVERY state and under no label, which is the expensive
+        reading and the only correct one. The window this exists for is a
+        child nobody has attributed yet, and in that window a human is free to
+        close it as junk or move its label -- and a lookup scoped to open
+        issues on the label it was born with would miss exactly those and open
+        a second issue beside the one they had just acted on. What the caller
+        does with a candidate it did not expect is the caller's; this answers
+        whether one exists.
 
-        Every OTHER label failure is raised rather than answered. The caller
-        is deciding whether an issue it may already have created exists, and
-        "could not ask" read as "no" is the one reading that opens a second
-        issue for work that already has one. The rate limit and a 5xx both
-        arrive that way, so the lookup fails closed and the caller retries.
+        Pull requests are dropped because the issue endpoint returns them too
+        and a pull request is not a child.
 
         The body is what carries the marker, and the author is checked with
         it: the whole point is to recognize an issue THIS orchestrator opened,
         and an issue somebody else wrote the marker into is not one to adopt,
         reseed, and activate as a child.
         """
-        label_object = self._cached_label(label, strict=True)
-        if label_object is None:
-            return None
         for candidate in self.repo.get_issues(
-            **issue_query_options(
-                issue_state=_ISSUE_STATE_OPEN, since=None, label=label_object,
-            ),
+            **issue_query_options(issue_state=_ISSUE_STATE_ALL, since=None),
         ):
+            if candidate.pull_request is not None:
+                continue
             if carries_own_marker(
                 [candidate], marker, bot_login=getattr(self, "_bot_login", None),
             ):

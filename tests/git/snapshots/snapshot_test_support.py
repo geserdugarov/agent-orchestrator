@@ -40,6 +40,9 @@ SLUG = "owner/repo"
 # what keeps its snapshots off the first one's local refs.
 OTHER_SLUG = "owner/private"
 
+# Which of the two a pair takes, keyed on whether it shares a clone.
+_CONFIGURED_SLUGS = (SLUG, OTHER_SLUG)
+
 # A remote path nothing was ever cloned from: what an unreachable remote looks
 # like to `ls-remote`, which is the read every snapshot decision starts with.
 UNREACHABLE = "unreachable.git"
@@ -143,21 +146,27 @@ _SESSIONS = _LocalAuthSession()
 
 
 @contextlib.contextmanager
-def real_remote(*, reachable: bool = True, clone: Path = None):
+def real_remote(
+    *, reachable: bool = True, clone: Path = None, slug: str = None,
+):
     """Yield a bare remote, a clone carrying two commits, and its spec.
 
     `clone` shares an existing checkout's `target_root`, which is the shape a
     single local clone with a public and a private remote produces -- and the
-    one where two repositories' snapshots meet in one ref store.
+    one where two repositories' snapshots meet in one ref store. `slug` names
+    the repository, for the tests about what a long one does to a ref built
+    from it.
     """
     with tempfile.TemporaryDirectory(prefix="orch-snapshot-test-") as scratch:
-        prepared = _prepared_pair(Path(scratch), clone)
+        prepared = _prepared_pair(Path(scratch), clone, slug)
         reached = prepared.remote if reachable else Path(scratch) / UNREACHABLE
         with _SESSIONS.registered(prepared.spec.slug, str(reached)):
             yield prepared
 
 
-def _prepared_pair(root: Path, shared: Path = None) -> RealRemote:
+def _prepared_pair(
+    root: Path, shared: Path = None, slug: str = None,
+) -> RealRemote:
     """Build the bare repository and the clone that has pushed to it."""
     remote = root / "remote.git"
     _git("init", "--bare", QUIET, str(remote), cwd=root)
@@ -168,7 +177,10 @@ def _prepared_pair(root: Path, shared: Path = None) -> RealRemote:
     _git("push", QUIET, str(remote), f"HEAD:refs/heads/{BASE_BRANCH}", cwd=clone)
     return RealRemote(
         spec=config.RepoSpec(
-            slug=SLUG if shared is None else OTHER_SLUG,
+            # A pair sharing an existing clone is the SECOND repository of a
+            # shared `target_root`, so it takes the other slug: the whole
+            # point of that shape is two repositories in one ref store.
+            slug=slug or _CONFIGURED_SLUGS[shared is not None],
             target_root=clone,
             base_branch=BASE_BRANCH,
         ),

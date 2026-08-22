@@ -408,14 +408,20 @@ for the same slice, and the recorded list is monotonic: a resumed pass never wri
 previous one knew about. Past that register there is one more recovery, for the crash between `create_child_issue`
 returning and the write recording it — a window in which nothing outside GitHub knows the number. Every child is
 created carrying a hidden marker naming this **issue**, this cycle, this generation, and its slice index, and a walk
-about to create looks for that marker among the open issues on the child's own workflow label first, adopting the
-orphan instead of opening a duplicate. The issue is in the marker because a cycle identity is minted per issue and
-repeats across them — two parents adjudicating their first candidate are both cycle 1 — while the lookup walks a
-label rather than one parent's children, so without it one parent would adopt, reseed, and activate another's child.
-The lookup costs one listing and is taken only where something has to be created, so a fully adopted resume pays
-nothing for it — and it fails closed: a 404 on the label means the repository has none, and therefore no orphan
-either, since creating a child is what puts that label there; every other label failure is raised and parks, because
-"could not ask" read as "there is no orphan" is exactly what opens a second issue for a slice that already has one.
+about to create looks for that marker before opening anything. The issue is in the marker because a cycle identity
+is minted per issue and repeats across them — two parents adjudicating their first candidate are both cycle 1 — and
+the lookup is not scoped to one parent's children, so without it one parent would adopt, reseed, and activate
+another's.
+
+That lookup is a walk over the repository's issues in **every state and under no label**, which is the expensive
+reading and the only correct one: in the window it exists for nobody has attributed the child, so a human is free to
+close it as junk or move its label, and a search bounded to open issues on the label it was born with would miss
+exactly those and open a second issue beside the one they had just acted on. It is taken only on a **resumed** pass
+— one where an expected-children count already stood on the parent before this pass wrote its own — so a first
+split, which has nothing to find, pays nothing for it. An enumeration nobody could take raises and parks, because
+"could not ask" read as "there is no orphan" is what duplicates. And a candidate a human has since closed or moved
+off the child label is *refused* rather than adopted: reopening or re-labelling it would undo a deliberate act on an
+issue this orchestrator had not even attributed yet, so the transaction parks and lets them say which they meant.
 
 Each child is born knowing what it needs and nothing more: its declared scope in the words the adjudication used, the
 current base branch, the ancestor snapshot ref and exact commit, and the lineage and cycle identity a later record is
@@ -514,6 +520,25 @@ verbatim copy exists to prevent. So does a ledger holding anything at all on a r
 damaged: there is nothing to correlate a reclamation to and no issue number to prove a branch belongs to this
 generation, so the umbrella stays open and says so where an operator reads it. An issue that never entered the late
 gate carries no ledger and answers without a write, which is every umbrella the initial decomposer made.
+
+### What a human can still change once the transaction has started
+
+Every transaction park is a moment the humans can speak into, and the coordinator settles what they said *before* it
+replays the recorded verdict — so a split that stopped halfway can meet a fresh edit or a fresh instruction on the
+next tick. Two rules keep that from undoing work that already exists.
+
+A generation that has **already created children** may not be revised into a new one. A revision ends in a new
+candidate under a new generation, and a second manifest over the top of real GitHub issues strands every one of them:
+nothing polls a child the parent stops recording, they carry an ancestry naming the adjudication that made them, and
+they are the consumers the snapshot is retained for. So the issue is handed back naming the children instead — their
+comment stands, the children stand, and the recorded verdict stands, and which of those to keep is a decision about
+issues that already exist.
+
+A generation that **does** advance carries none of the previous one's split receipts. `late_split_children` and
+`late_links_announced` are cleared with the counter, because both are one-shot and positional: a register carried
+forward would have the new manifest adopt an old child by index, and a link receipt carried forward would swallow the
+announcement the new split owes. What is *not* cleared is either external ledger — a ref the remote holds is owed
+whatever this generation decides next.
 
 ## What the humans can still change while a candidate is frozen
 

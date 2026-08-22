@@ -75,10 +75,27 @@ _LOCAL_SNAPSHOT_REF_RE = re.compile(
     r"/gen-(?:0|[1-9][0-9]*)\Z",
 )
 
-# How long a snapshot ref may be. Well past what three real identities and a
-# repository segment produce and far short of any path limit, so a number
-# nobody wrote cannot become a ref nobody can delete.
+# How long a snapshot ref may be. Well past what three real identities
+# produce and far short of any path limit, so a number nobody wrote cannot
+# become a ref nobody can delete.
 MAX_SNAPSHOT_REF = 200
+
+# How long the repository segment of a local ref may be. Configuration bounds
+# a slug at nothing, so the caller is required to hand over a segment already
+# inside this -- an injective one, since two repositories reduced to the same
+# segment would be back to sharing a ref. What produces one is the branch
+# namespace's own sanitizer plus the digest it already appends for a lossy
+# rewrite, which is where the bound is applied.
+MAX_REPOSITORY_SEGMENT = 64
+
+# How long a LOCAL snapshot ref may be: the remote name it mirrors, the
+# namespace prefix that differs, and a bounded repository segment. Derived
+# rather than restated, so widening either input cannot leave a shape the
+# builder produces and the recognizer rejects -- which is the failure that
+# would create a ref nothing could later prove or reclaim.
+MAX_LOCAL_SNAPSHOT_REF = (
+    MAX_SNAPSHOT_REF + MAX_REPOSITORY_SEGMENT + len("-local") + 1
+)
 
 
 class InvalidSnapshotRef(Exception):
@@ -111,11 +128,14 @@ def snapshot_ref(*, issue_number: int, cycle_id: int, generation: int) -> str:
 def local_snapshot_ref(*, ref: str, repository: str) -> str:
     """Return the local ref one repository's fetched snapshot lands under.
 
-    `repository` is a ref-safe segment naming which repository the snapshot
-    came from, supplied by the caller because sanitizing a slug into one is
-    the branch namespace's own contract and there is no second implementation
-    of it. It is what keeps two `REPOS` entries sharing a `target_root` off
-    one another's local refs.
+    `repository` is a ref-safe, bounded segment naming which repository the
+    snapshot came from, supplied by the caller because sanitizing a slug into
+    one is the branch namespace's own contract and there is no second
+    implementation of it. It is what keeps two `REPOS` entries sharing a
+    `target_root` off one another's local refs, so it has to be injective as
+    well as short: configuration bounds a slug at nothing, and a segment
+    merely truncated to fit would put two long-named repositories back on one
+    ref.
 
     Raises rather than returning a best effort, for the reason the remote
     builder does: the value is what a fetch writes and a reclamation deletes,
@@ -124,6 +144,8 @@ def local_snapshot_ref(*, ref: str, repository: str) -> str:
     """
     if not is_snapshot_ref(ref):
         raise InvalidSnapshotRef("not a snapshot ref")
+    if len(repository) > MAX_REPOSITORY_SEGMENT:
+        raise InvalidSnapshotRef("the repository segment is not bounded")
     built = ref.replace(
         SNAPSHOT_NAMESPACE, f"{LOCAL_SNAPSHOT_NAMESPACE}/{repository}", 1,
     )
@@ -139,7 +161,7 @@ def is_local_snapshot_ref(ref: object) -> bool:
     check is asked: the value is assembled from a segment a caller supplied
     and is spent on a read and a destructive update.
     """
-    if not isinstance(ref, str) or len(ref) > MAX_SNAPSHOT_REF:
+    if not isinstance(ref, str) or len(ref) > MAX_LOCAL_SNAPSHOT_REF:
         return False
     return _LOCAL_SNAPSHOT_REF_RE.match(ref) is not None
 

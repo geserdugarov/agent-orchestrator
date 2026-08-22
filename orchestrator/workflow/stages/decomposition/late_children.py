@@ -112,6 +112,19 @@ _CHILD_MARKER = (
     ":generation={generation}:index={index}-->"
 )
 
+class _StrandedChild(Exception):
+    """A child from an earlier pass that a human has since acted on."""
+
+    def __init__(self, number: int) -> None:
+        super().__init__(number)
+        self.number = number
+
+
+_STRANDED_CHILD = (
+    "child #{number}, created by an earlier pass of this split and never "
+    "recorded on this issue"
+)
+
 _CHILD_CREATE_PARK = (
     "the committed candidate for this issue was adjudicated as a split and "
     "its snapshot is safe, but {child} could not be created, recorded, or "
@@ -176,6 +189,7 @@ class _ChildWalk:
     plan: _SplitPlan
     known: tuple[int, ...]
     snapshot_ref: str
+    resumed: bool
 
     def recorded_numbers(self) -> tuple[int, ...]:
         """The children this generation records once this step is durable.
@@ -198,11 +212,16 @@ def _create_late_children(
     recorded, or seeded and the issue was parked -- in which case the caller
     creates nothing further and the next tick resumes from what is recorded.
     """
+    # Read before `_prepared` writes it: a count already there is the only
+    # evidence a previous pass got as far as creating anything, and it is what
+    # decides whether the orphan lookup below is worth a repository walk.
+    resumed = context.state.get(_EXPECTED_CHILDREN) is not None
     _prepared(context, manifest)
     walk = _ChildWalk(
         plan=_SplitPlan.start(list(manifest), True),
         known=context.generation.split_children,
         snapshot_ref=snapshot_ref,
+        resumed=resumed,
     )
     for index, child in enumerate(manifest):
         created = _child_issue(context, walk, index, child)
@@ -247,6 +266,14 @@ def _child_issue(
     """
     try:
         return _adopted_or_created(context, walk, index, child)
+    except _StrandedChild as stranded:
+        log.error(
+            "issue=#%d found child #%d for slice %d in a state a human put "
+            "it in; leaving it alone",
+            context.issue.number, stranded.number, index,
+        )
+        _parked(context, _STRANDED_CHILD.format(number=stranded.number))
+        return None
     except Exception:
         log.exception(
             "issue=#%d could not establish late split child %d (%r)",
@@ -270,10 +297,7 @@ def _adopted_or_created(
     """
     if index < len(walk.known):
         return context.gh.get_issue(walk.known[index])
-    orphan = context.gh.find_issue_carrying(
-        _child_marker(context.generation, index),
-        label=_split._child_initial_labels()[0],
-    )
+    orphan = _orphan_for(context, walk, index)
     if orphan is not None:
         log.warning(
             "issue=#%d adopting orphan child #%d for slice %d: it was created "
@@ -287,6 +311,40 @@ def _adopted_or_created(
         parent_number=context.issue.number,
         labels=_split._child_initial_labels(),
     )
+
+
+def _orphan_for(
+    context: _LateContext, walk: _ChildWalk, index: int,
+) -> Optional[Issue]:
+    """The issue an earlier pass created for this slice and never recorded.
+
+    Asked only on a resumed pass. The lookup is a walk over the repository's
+    issues in every state, which is what a marker nobody indexed costs -- and
+    a first pass has nothing to find, since no earlier one has run. What says
+    an earlier one did is the expected count already standing on the parent
+    before this pass wrote its own.
+
+    A candidate a human has since closed, or moved off the label a child is
+    born on, is refused rather than adopted. Reopening or re-labelling it
+    would undo a deliberate act on an issue this orchestrator had not even
+    attributed yet, and creating a second one beside it would be worse -- so
+    the transaction parks and lets them say which they meant.
+    """
+    if not walk.resumed:
+        return None
+    orphan = context.gh.find_issue_carrying(
+        _child_marker(context.generation, index),
+    )
+    if orphan is None:
+        return None
+    if getattr(orphan, "closed", False) or _moved_off_blocked(context, orphan):
+        raise _StrandedChild(orphan.number)
+    return orphan
+
+
+def _moved_off_blocked(context: _LateContext, orphan: Issue) -> bool:
+    """Whether somebody has taken this child off the label it was born on."""
+    return context.gh.workflow_label(orphan) != _split._child_initial_labels()[0]
 
 
 def _recorded(

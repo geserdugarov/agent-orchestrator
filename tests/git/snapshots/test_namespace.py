@@ -14,6 +14,12 @@ GENERATION = 1
 
 EXPECTED_REF = "refs/orchestrator/late-split/issue-41/cycle-3/gen-1"
 
+# The ref-safe segment a slug is sanitized into before it may qualify a local
+# ref, and an identity wide enough to push the built name at its bound.
+REPOSITORY = "owner__repo"
+
+_BIG = 1000000000000
+
 # Every identity a pinned comment could hand the builder that is not one. Each
 # is a value `int(...)` would happily convert, which is the whole reason the
 # builder refuses rather than converts.
@@ -117,6 +123,65 @@ class SnapshotRefRecognitionTest(unittest.TestCase):
         )
 
         self.assertFalse(namespace.is_snapshot_ref(overlong))
+
+
+class LocalSnapshotRefTest(unittest.TestCase):
+    """A local ref names the repository, and is bounded whatever its slug."""
+
+    def test_it_splices_the_repository_in(self) -> None:
+        self.assertEqual(
+            namespace.local_snapshot_ref(
+                ref=EXPECTED_REF, repository=REPOSITORY,
+            ),
+            f"refs/orchestrator/late-split-local/{REPOSITORY}"
+            "/issue-41/cycle-3/gen-1",
+        )
+
+    def test_a_built_local_ref_is_recognized(self) -> None:
+        self.assertTrue(namespace.is_local_snapshot_ref(
+            namespace.local_snapshot_ref(
+                ref=EXPECTED_REF, repository=REPOSITORY,
+            ),
+        ))
+
+    def test_a_remote_ref_is_not_a_local_one(self) -> None:
+        # The two namespaces are separate so a reclamation can say which of
+        # them it is deleting.
+        self.assertFalse(namespace.is_local_snapshot_ref(EXPECTED_REF))
+        self.assertFalse(namespace.is_snapshot_ref(
+            namespace.local_snapshot_ref(
+                ref=EXPECTED_REF, repository=REPOSITORY,
+            ),
+        ))
+
+    def test_an_unbounded_repository_builds_no_ref(self) -> None:
+        # Configuration bounds a slug at nothing, so a segment that would
+        # overflow the local name is refused here rather than producing a ref
+        # the recognizer would then reject.
+        with self.assertRaises(namespace.InvalidSnapshotRef):
+            namespace.local_snapshot_ref(
+                ref=EXPECTED_REF,
+                repository="r" * (namespace.MAX_REPOSITORY_SEGMENT + 1),
+            )
+
+    def test_the_longest_shapes_still_fit(self) -> None:
+        # The bound is derived from its inputs rather than restated, so the
+        # widest ref either can produce is one the recognizer still accepts.
+        widest = namespace.local_snapshot_ref(
+            ref=namespace.snapshot_ref(
+                issue_number=_BIG, cycle_id=_BIG, generation=_BIG,
+            ),
+            repository="r" * namespace.MAX_REPOSITORY_SEGMENT,
+        )
+
+        self.assertLessEqual(len(widest), namespace.MAX_LOCAL_SNAPSHOT_REF)
+        self.assertTrue(namespace.is_local_snapshot_ref(widest))
+
+    def test_a_foreign_ref_builds_no_local_one(self) -> None:
+        with self.assertRaises(namespace.InvalidSnapshotRef):
+            namespace.local_snapshot_ref(
+                ref="refs/heads/main", repository=REPOSITORY,
+            )
 
 
 if __name__ == "__main__":

@@ -2,10 +2,16 @@
 # SPDX-License-Identifier: Apache-2.0
 """Finding an issue this orchestrator created, by the marker it put in it.
 
-The lookup a create that returned into a crash needs, and the one place a
-label failure may not be answered with "no". Its caller is deciding whether an
-issue it may already have opened exists, so "could not ask" read as "there is
-none" is what opens a second issue for work that already has one.
+The lookup a create that returned into a crash needs. Its caller is deciding
+whether an issue it may already have opened exists, so every answer but a
+definite match has to be either a definite absence or a raise: "could not ask"
+read as "there is none" is what opens a second issue for work that already has
+one.
+
+Unscoped in state and in label on purpose. The window it exists for is a child
+nobody has attributed yet, and a human is free to close it as junk or move its
+label in that window -- which a search bounded to open issues on the label it
+was born with would miss, and duplicate.
 """
 from __future__ import annotations
 
@@ -42,9 +48,22 @@ def _client_over(*issues) -> GitHubClient:
     return client
 
 
-def _candidate(body: str, *, login: str = _BOT_LOGIN):
-    """An open issue whose body and author are what a match is decided on."""
-    return MagicMock(body=body, user=MagicMock(login=login))
+def _candidate(
+    body: str,
+    *,
+    login: str = _BOT_LOGIN,
+    closed: bool = False,
+    label: str = _LABEL,
+    is_pull: bool = False,
+):
+    """One candidate the walk reads: its body, its author, and its state."""
+    return MagicMock(
+        body=body,
+        user=MagicMock(login=login),
+        closed=closed,
+        labels=[MagicMock(name=label)],
+        pull_request=MagicMock() if is_pull else None,
+    )
 
 
 class MarkerLookupTest(unittest.TestCase):
@@ -55,47 +74,61 @@ class MarkerLookupTest(unittest.TestCase):
         client = _client_over(_candidate("some other issue"), wanted)
 
         self.assertIs(
-            client.find_issue_carrying(_MARKER, label=_LABEL), wanted,
+            client.find_issue_carrying(_MARKER), wanted,
         )
 
     def test_an_issue_nobody_here_opened_is_not_one(self) -> None:
         # The marker is an HTML comment: invisible, and trivially copied.
         client = _client_over(_candidate(_MARKER, login="outsider"))
 
-        self.assertIsNone(client.find_issue_carrying(_MARKER, label=_LABEL))
+        self.assertIsNone(client.find_issue_carrying(_MARKER))
 
     def test_no_match_is_none(self) -> None:
         client = _client_over(_candidate("nothing of ours"))
 
-        self.assertIsNone(client.find_issue_carrying(_MARKER, label=_LABEL))
+        self.assertIsNone(client.find_issue_carrying(_MARKER))
+
+
+class MarkerLookupReachTest(unittest.TestCase):
+    """Nothing about a candidate's current state hides it from the lookup."""
+
+    def test_a_closed_child_is_still_found(self) -> None:
+        # A human closing an unattributed child as junk must not have the
+        # transaction open a second one beside it.
+        closed = _candidate(_MARKER, closed=True)
+        client = _client_over(closed)
+
+        self.assertIs(client.find_issue_carrying(_MARKER), closed)
+
+    def test_a_relabelled_child_is_still_found(self) -> None:
+        moved = _candidate(_MARKER, label="workflow:rejected")
+        client = _client_over(moved)
+
+        self.assertIs(client.find_issue_carrying(_MARKER), moved)
+
+    def test_a_pull_request_is_not_a_child(self) -> None:
+        # The issue endpoint returns pull requests too, and a pull request
+        # quoting the marker is not an issue to adopt.
+        client = _client_over(_candidate(_MARKER, is_pull=True))
+
+        self.assertIsNone(client.find_issue_carrying(_MARKER))
 
 
 class MarkerLookupFailureTest(unittest.TestCase):
-    """A label nobody could resolve is not the same answer as no label."""
+    """An enumeration nobody could take is not the same answer as no match."""
 
-    def test_an_absent_label_is_an_absent_child(self) -> None:
-        # Creating a child is what puts the label in the repository, so a 404
-        # means none was ever created and there is provably no orphan.
-        client = _client_over()
-        client.repo.get_label.side_effect = GithubException(
-            _HTTP_NOT_FOUND, {}, None,
-        )
-
-        self.assertIsNone(client.find_issue_carrying(_MARKER, label=_LABEL))
-        client.repo.get_issues.assert_not_called()
-
-    def test_an_unreadable_label_is_raised(self) -> None:
+    def test_an_unreadable_enumeration_is_raised(self) -> None:
         # The rate limit and a 5xx both arrive this way, and answering None
         # would open a second issue for a slice that already has one.
         for status in (_HTTP_FORBIDDEN, _HTTP_SERVER_ERROR):
             with self.subTest(status=status):
                 client = _client_over()
-                client.repo.get_label.side_effect = GithubException(
+                client.repo.get_issues.side_effect = GithubException(
                     status, {}, None,
                 )
 
                 with self.assertRaises(GithubException):
-                    client.find_issue_carrying(_MARKER, label=_LABEL)
+                    client.find_issue_carrying(_MARKER)
 
 
 if __name__ == "__main__":

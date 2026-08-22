@@ -232,9 +232,10 @@ workflow/                   publishes the two label vocabularies, `guard_transit
                             every concurrent answer, the certificate a bare continue writes, the question a real
                             answer reopens, and the continue that answers none
       late_revision.py      the developer run guidance buys -- the locked session resumed under `agent_role=developer`
-                            and `stage=decomposing` -- and the clean tree, re-frozen commit, and fresh measurement its
-                            result is reconciled through, with the `ACK:` marker an UNCHANGED commit needs before it
-                            counts as an answer
+                            and `stage=decomposing` -- the refusal a candidate whose split already created children
+                            earns instead, and the clean tree, re-frozen commit, and fresh measurement its result is
+                            reconciled through (which carries none of the last generation's split receipts), with
+                            the `ACK:` marker an UNCHANGED commit needs before it counts as an answer
       late_relabel.py       the `workflow:decomposing` label a live generation pins -- one still oversized, or one
                             whose owner read is still owed: the kill-switch route it refuses, and the dispatch it
                             refuses -- with the hand relabel it repairs -- when a human has moved the label out from

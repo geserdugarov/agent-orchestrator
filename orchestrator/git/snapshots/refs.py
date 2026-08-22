@@ -66,6 +66,11 @@ log = logging.getLogger("orchestrator.git_plumbing")
 # create may run under.
 _ABSENT_LEASE = ""
 
+# What separates a truncated repository segment from the digest that keeps it
+# injective, in the spelling the branch namespace already uses for its own
+# lossy rewrites.
+_DIGEST_MARK = "__h"
+
 
 class SnapshotOutcome(Enum):
     """What one snapshot operation established.
@@ -230,10 +235,27 @@ def local_snapshot_ref(spec: config.RepoSpec, ref: str) -> str:
     another's branches keeps them off one another's snapshots. Published
     because the child a split creates is told to read the snapshot out of this
     name, so the instruction and the fetch have to be one string.
+
+    Bounded here rather than by the namespace, because bounding it is a
+    rewrite and a rewrite has to stay injective: configuration bounds a slug
+    at nothing, so a long one is replaced by a prefix of itself plus the
+    content digest the branch namespace already uses for its own lossy
+    rewrites. Two repositories with a shared prefix therefore still land on
+    two refs, which is the whole property the segment exists for.
     """
     return namespace.local_snapshot_ref(
-        ref=ref, repository=paths._sanitize_branch_segment(spec.slug),
+        ref=ref, repository=_repository_segment(spec.slug),
     )
+
+
+def _repository_segment(slug: str) -> str:
+    """A ref-safe, bounded, injective segment naming one repository."""
+    sanitized = paths._sanitize_branch_segment(slug)
+    if len(sanitized) <= namespace.MAX_REPOSITORY_SEGMENT:
+        return sanitized
+    digest = paths._slug_digest(slug)
+    kept = namespace.MAX_REPOSITORY_SEGMENT - len(digest) - len(_DIGEST_MARK)
+    return _DIGEST_MARK.join((sanitized[:kept], digest))
 
 
 def _drop_mirror(

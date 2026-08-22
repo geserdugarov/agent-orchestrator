@@ -102,7 +102,6 @@ class GitHubClient(
         *,
         throttle_absent: bool = False,
         absent_names: Optional[list[str]] = None,
-        strict: bool = False,
     ) -> Optional[Label]:
         """Resolve and cache a label, while leaving failures retryable.
 
@@ -123,14 +122,6 @@ class GitHubClient(
 
         ``absent_names`` is where a throttled miss is recorded for the caller
         to summarize; a caller that passes none takes the miss silently.
-
-        ``strict`` is for the caller that cannot treat "could not ask" as an
-        answer. A 404 is a real one -- the repository does not have that label
-        -- and still returns None; every other status is a question nobody
-        put, and swallowing it hands back the same None. The sweep reads that
-        as one label skipped this pass; a caller deciding whether an issue it
-        already created exists would read it as "no" and create a second one.
-        So a non-404 is re-raised for that caller and swallowed for the others.
         """
         cached_label = self._label_cache.get(name)
         if cached_label is not None:
@@ -140,8 +131,6 @@ class GitHubClient(
         try:
             label_object = self.repo.get_label(name)
         except GithubException as error:
-            if strict and error.status != _HTTP_NOT_FOUND:
-                raise
             self._report_label_lookup_failure(
                 name, error, throttle_absent, absent_names,
             )

@@ -157,7 +157,8 @@ orchestrator/
       namespace.py      the one `refs/orchestrator/late-split/...` namespace a snapshot may occupy, built from a
                         generation's own identity and refused for anything else, plus the
                         `refs/orchestrator/late-split-local/<repository>/...` name this host's copy of one lands
-                        under -- qualified because several configured repositories may share a clone
+                        under -- qualified because several configured repositories may share a clone, and bounded
+                        because configuration bounds a slug at nothing
       refs.py           create-or-verify against the exact commit with no overwrite, the fetch-and-resolve that
                         proves a child could obtain it (one locked step, onto this repository's own local name),
                         and the absent-is-success delete -- leased at the preserved commit, so a re-pointed ref is

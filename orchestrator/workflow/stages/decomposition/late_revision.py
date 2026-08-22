@@ -81,6 +81,7 @@ from __future__ import annotations
 import logging
 from dataclasses import replace
 from pathlib import Path
+from typing import Optional
 
 from github.Issue import Issue
 
@@ -144,6 +145,16 @@ _UNREADABLE_HEAD_PARK = (
     "to re-read it."
 )
 
+_STRANDED_PARK = (
+    "this issue's committed candidate cannot be revised: the adjudication "
+    "before this one already created {children} from it, and a new candidate "
+    "would be split into a manifest that has nothing to do with them. The "
+    "children, the recorded verdict, and your comment all stand. Decide what "
+    "the existing children should be first -- close them and clear this "
+    "issue's `late_split_children`, or let them run -- and the next tick "
+    "continues from there."
+)
+
 _UNMEASURED_PARK = (
     "the revised candidate `{revised}` could not be measured ({failure}), so "
     "it is not being adjudicated and the recorded generation is unchanged. A "
@@ -196,6 +207,37 @@ _UNANSWERED_PARK = (
 )
 
 
+def _stranded_by_children(
+    context: _LateContext,
+) -> Optional[_LateContentSettlement]:
+    """Refuse to replace a candidate whose split has already created children.
+
+    A revision ends in a NEW candidate under a new generation, and everything
+    that generation decides is decided about work the old one has already
+    handed to real GitHub issues. Those children exist, carry an ancestry
+    naming the adjudication that made them, and are recorded as the consumers
+    a snapshot is retained for -- so a second manifest over the top of them
+    would strand every one: nothing polls a child the parent no longer
+    records, and no automatic rule can say which of two manifests a human
+    meant.
+
+    So the issue is handed back instead. What the human asked for is not lost
+    -- their comment stands, the children stand, and the recorded verdict
+    stands -- and settling it is a decision about issues that already exist,
+    which is theirs to make.
+    """
+    if not context.generation.split_children:
+        return None
+    return _parked(
+        context, _STRANDED_PARK.format(
+            children=", ".join(
+                f"#{number}" for number in context.generation.split_children
+            ),
+        ),
+        reason=_late_outcome.PARK_REVISION_UNANSWERED,
+    )
+
+
 def _revise_from_guidance(
     context: _LateContext, signal: _LateContentSignal,
 ) -> _LateContentSettlement:
@@ -216,6 +258,9 @@ def _revise_from_guidance(
     than leaving the issue claiming it is still waiting to be told what the
     edit meant.
     """
+    stranded = _stranded_by_children(context)
+    if stranded is not None:
+        return stranded
     _comments._post_issue_comment(
         context.gh, context.issue, context.state, _REVISING_NOTICE,
     )
@@ -259,6 +304,9 @@ def _retry_revision(
         return _revise_from_guidance(context, signal)
     if not signal.bare_continue:
         return _LateContentSettlement(disposition=_LateDisposition.PARKED)
+    stranded = _stranded_by_children(context)
+    if stranded is not None:
+        return stranded
     _consume(context, signal)
     return _reconcile_revised_candidate(
         context,
@@ -369,6 +417,15 @@ def _remeasured(
         threshold=config.MAX_ADDED_LINES,
         additions=measured.additions,
         phase=LatePhase.MEASURING,
+        # The split transaction's own receipts belong to the generation that
+        # wrote them and go with it. They are positional and one-shot: an
+        # ordered child register carried forward would have a new manifest
+        # adopt the old one's children by index, and a link receipt carried
+        # forward would suppress the very announcement the new split owes.
+        # What does NOT go with them is either external ledger -- a ref the
+        # remote holds is owed whatever this generation decides next.
+        split_children=(),
+        links_announced=False,
         # The owner read this run still owes goes down WITH the result, in the
         # one write. Claimed a step later by the guard, a tick that died in
         # between would leave a re-measured candidate nothing brings a later

@@ -654,9 +654,12 @@ rather than preserving.
   — and an empty answer costs a marker lookup rather than a wrong adoption. That lookup is the other half: every
   child is created carrying `<!--orchestrator-late-child:issue=…:cycle=…:generation=…:index=…-->`, so a child created
   into a crash before its number was recorded is adopted rather than opened twice. The issue is part of that identity
-  because a cycle is minted per issue and repeats across them, while the lookup walks one workflow label rather than
-  one parent's children — without it, two parents on their first candidate would each carry
-  `cycle=1:generation=1:index=0` and one would adopt the other's child.
+  because a cycle is minted per issue and repeats across them, while the lookup is not scoped to one parent's
+  children — without it, two parents on their first candidate would each carry `cycle=1:generation=1:index=0` and one
+  would adopt the other's child. Both fields are also cleared whenever the generation counter advances: they are the
+  split transaction's own one-shot receipts, so a register carried into a revision would have the new manifest adopt
+  an old child by index and a link receipt would swallow the announcement the new split owes. Neither external ledger
+  is cleared with them — a ref the remote holds is owed whatever the next generation decides.
 - **Inherited lineage.** `late_ancestry_root_issue`, `late_ancestry_depth`, `late_ancestry_parent`,
   `late_ancestry_cycle_id`, `late_ancestry_generation`, `late_ancestry_snapshot_ref`,
   `late_ancestry_snapshot_sha`, `late_ancestry_base_branch`, and `late_declared_scope` are what a child born of a

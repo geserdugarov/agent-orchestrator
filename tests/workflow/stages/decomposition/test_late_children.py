@@ -21,9 +21,8 @@ from tests.workflow.stages.decomposition.late_test_support import (
     ROOT_ISSUE,
 )
 from tests.support.fakes import make_issue
-from tests.workflow.fixtures import LABEL_BLOCKED, LABEL_DONE
+from tests.workflow.fixtures import LABEL_DONE
 from tests.workflow.stages.decomposition.late_crash_support import (
-    killed_after,
     recording_children,
     refusing,
     refusing_child_writes,
@@ -44,7 +43,6 @@ from tests.workflow.stages.decomposition.late_transaction_support import (
     ancestry_of,
     first_child,
     label_of,
-    sibling_marker,
 )
 
 RESOURCE_CHILD = "child"
@@ -68,17 +66,6 @@ _PRIOR_MANIFEST = MappingProxyType({
     "dep_graph": {"1": [0]},
     "decomposed_at": "2026-01-01T00:00:00Z",
 })
-
-# A child marker naming a generation this transaction is not running.
-_FOREIGN_MARKER = (
-    f"<!--orchestrator-late-child:issue={LATE_ISSUE_NUMBER}"
-    ":cycle=1:generation=1:index=0-->"
-)
-
-# Another issue entirely, adjudicating under the same cycle and generation --
-# which is the ordinary case, not a contrived one, since a cycle is minted per
-# issue.
-OTHER_PARENT = 77
 
 # Every depth automatic splitting is allowed from, paired with the depth the
 # children it creates are born at. Depth 3 is absent because it may not split
@@ -224,75 +211,6 @@ class PriorDecompositionTest(SplitChildrenCase, unittest.TestCase):
         self._transact(children=({"title": "A", "body": "only slice"},))
 
         self.assertIsNone(self._pinned().get(KEY_DEP_GRAPH))
-
-
-class OrphanAdoptionTest(SplitChildrenCase, unittest.TestCase):
-    """A child created into a crash is adopted, never opened twice."""
-
-    def test_an_unrecorded_child_is_adopted(self) -> None:
-        # The one window the ordered register cannot close on its own: the
-        # create returned and nothing outside GitHub knows the number.
-        with self.assertRaises(KeyboardInterrupt):
-            self._transact(
-                killed=killed_after(self.github, "create_child_issue"),
-            )
-        orphan = self.github.created_child_issues[0].number
-
-        resumed = self._resume()
-
-        self.assertEqual(resumed.disposition, _LateDisposition.SETTLED)
-        self.assertEqual(
-            len(self.github.created_child_issues), len(CHILDREN),
-        )
-        self.assertEqual(self._recorded()[0], orphan)
-
-    def test_an_unreadable_lookup_creates_nothing(self) -> None:
-        # "Could not ask" read as "there is no orphan" is what opens a second
-        # issue for a slice that already has one, so the walk parks instead.
-        with refusing(self.github, "find_issue_carrying"):
-            with self.assertLogs(level="ERROR"):
-                outcome = self._transact()
-
-        self.assertEqual(outcome.disposition, _LateDisposition.PARKED)
-        self.assertEqual(self.github.created_child_issues, [])
-        self.assertEqual(
-            self._pinned().get(KEYS.park_reason), PARK_CHILDREN_FAILED,
-        )
-
-    def test_another_generation_is_not_adopted(self) -> None:
-        # The marker names the adjudication and the slice, so a child of some
-        # earlier generation is not this one's to take over.
-        stranger = self.github.create_child_issue(
-            title="A", body=_FOREIGN_MARKER, parent_number=self.issue.number,
-            labels=[LABEL_BLOCKED],
-        )
-
-        self._transact()
-
-        self.assertNotIn(
-            stranger.number, self._recorded(),
-        )
-
-    def test_another_parent_s_child_is_not_adopted(self) -> None:
-        # A cycle identity is minted per issue and repeats across them: two
-        # parents adjudicating their first candidate are both cycle 1. The
-        # lookup walks a workflow label rather than one parent's children, so
-        # without the issue in the marker one parent would adopt, reseed, and
-        # activate the other's child.
-        sibling = self.github.create_child_issue(
-            title="A",
-            body=sibling_marker(self.generation, OTHER_PARENT),
-            parent_number=OTHER_PARENT,
-            labels=[LABEL_BLOCKED],
-        )
-
-        self._transact()
-
-        self.assertNotIn(sibling.number, self._recorded())
-        self.assertEqual(
-            len(self.github.created_child_issues), len(CHILDREN) + 1,
-        )
-        self.assertEqual(self.github.pinned_data(sibling.number), {})
 
 
 class ChildInheritanceTest(SplitChildrenCase, unittest.TestCase):

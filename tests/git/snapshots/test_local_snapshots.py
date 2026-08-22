@@ -15,7 +15,10 @@ from __future__ import annotations
 
 import unittest
 
-from orchestrator.git.snapshots import refs
+from pathlib import Path
+
+from orchestrator import config
+from orchestrator.git.snapshots import namespace, refs
 
 from tests.git.snapshots.snapshot_test_support import real_remote
 
@@ -26,6 +29,12 @@ REF = "refs/orchestrator/late-split/issue-41/cycle-3/gen-1"
 MIRROR = (
     "refs/orchestrator/late-split-local/owner__repo/issue-41/cycle-3/gen-1"
 )
+
+# A slug longer than the segment a local ref may carry. Configuration bounds
+# `owner/name` at nothing, so this is a shape an operator may really write.
+_OVERLONG = namespace.MAX_REPOSITORY_SEGMENT * 3
+
+LONG_SLUG = "owner/{0}".format("n" * _OVERLONG)
 
 
 def _preserved(remote) -> None:
@@ -59,6 +68,46 @@ class LocalSnapshotNameTest(unittest.TestCase):
             self.assertEqual(
                 refs._local_ref_sha(remote.clone, MIRROR), remote.sha,
             )
+
+
+class BoundedRepositoryTest(unittest.TestCase):
+    """A slug configuration does not bound still produces a usable ref."""
+
+    def test_a_long_slug_stays_short_and_unique(self) -> None:
+        # Configuration imposes no length on `owner/name`, and a segment
+        # merely truncated to fit would put two long-named repositories back
+        # on one local ref -- so the rewrite carries the slug's own digest.
+        near = f"{LONG_SLUG}x"
+
+        first = refs.local_snapshot_ref(_spec_for(LONG_SLUG), REF)
+        second = refs.local_snapshot_ref(_spec_for(near), REF)
+
+        self.assertNotEqual(first, second)
+        for built in (first, second):
+            with self.subTest(ref=built):
+                self.assertTrue(namespace.is_local_snapshot_ref(built))
+
+    def test_a_long_slug_fetches_and_reclaims(self) -> None:
+        # The failure this closes: creation succeeded and the proof raised
+        # while building a name too long to be one, retried forever.
+        with real_remote(slug=LONG_SLUG) as remote:
+            _preserved(remote)
+
+            self.assertEqual(_mirrored(remote), remote.sha)
+            self.assertEqual(
+                refs.delete_snapshot_ref(
+                    remote.spec, remote.clone, ref=REF, sha=remote.sha,
+                ),
+                refs.SnapshotOutcome.DELETED,
+            )
+            self.assertIsNone(_mirrored(remote))
+
+
+def _spec_for(slug: str) -> config.RepoSpec:
+    """A spec naming one repository, for the local name it produces."""
+    return config.RepoSpec(
+        slug=slug, target_root=Path("/tmp"), base_branch="main",
+    )
 
 
 class SharedTargetRootTest(unittest.TestCase):

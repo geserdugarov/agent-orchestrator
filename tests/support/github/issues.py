@@ -152,15 +152,14 @@ class _IssueService:
         self.created_child_issues.append(child)
         return child
 
-    def find_issue_carrying(
-        self, marker: str, *, label: str,
-    ) -> Optional[FakeIssue]:
-        """The open issue this client created carrying `marker`, or None."""
+    def find_issue_carrying(self, marker: str) -> Optional[FakeIssue]:
+        """The issue this client created carrying `marker`, in any state.
+
+        Unscoped like the real one: the window this lookup exists for is a
+        child nobody has attributed yet, and a human is free to close it or
+        move its label in that window.
+        """
         for candidate in self._issues.values():
-            if candidate.closed:
-                continue
-            if not any(each.name == label for each in candidate.labels):
-                continue
             if carries_own_marker(
                 [candidate], marker, bot_login=self._bot_login,
             ):
