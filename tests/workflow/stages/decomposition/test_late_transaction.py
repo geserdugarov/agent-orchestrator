@@ -21,17 +21,17 @@ from tests.workflow.stages.decomposition.late_run_support import (
 )
 from tests.workflow.stages.decomposition.late_crash_support import refusing
 from tests.workflow.stages.decomposition.late_test_support import (
-    QUESTION_REPLY,
-    SPLIT_REPLY,
-    seeded_late_issue,
-)
-from tests.workflow.stages.decomposition.late_test_support import (
     CANDIDATE_SHA,
     CYCLE_ID,
     KEYS,
     LATE_ISSUE_NUMBER,
     PLAN_PR_NUMBER,
+    QUESTION_REPLY,
     ROOT_ISSUE,
+    SPLIT_REPLY,
+)
+from tests.workflow.stages.decomposition.late_test_support import (
+    seeded_late_issue,
 )
 from tests.workflow.stages.decomposition.late_transaction_support import (
     SUPERSESSION_MARKER,
@@ -45,6 +45,7 @@ from tests.workflow.stages.decomposition.late_transaction_support import (
 )
 from tests.workflow.stages.decomposition.late_transaction_support import (
     HeldPlanPrSplitCase,
+    SnapshotSeed,
     LateSplitCase,
     first_child,
     label_of,
@@ -324,6 +325,26 @@ class BranchCleanupTest(LateSplitCase, unittest.TestCase):
                 record["failure"]
                 for record in self._events_named("late_failure")
             ],
+        )
+
+    def test_a_checkout_that_stays_leaves_it_owed(self) -> None:
+        # The first attempt records the WHOLE ordinary cleanup, so a local
+        # teardown that did not happen leaves the obligation for the
+        # umbrella's terminal to retry rather than reading as settled.
+        with self.assertLogs(level="WARNING"):
+            outcome = self._transact(snapshot=SnapshotSeed(local_gone=False))
+
+        self.assertEqual(outcome.disposition, _LateDisposition.SETTLED)
+        self.assertIn(
+            STATE_FAILED,
+            [
+                recorded for (kind, _), recorded in self._resources().items()
+                if kind == RESOURCE_BRANCH
+            ],
+        )
+        self.assertEqual(
+            label_of(self.github, first_child(self.github).number),
+            WorkflowLabel.READY,
         )
 
     def test_a_raising_delete_is_recorded(self) -> None:

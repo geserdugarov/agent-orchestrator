@@ -103,7 +103,10 @@ The late size gate preserves a superseded candidate under
   delete a re-pointed ref as readily as ours, and this is the one operation whose blast radius is somebody else's
   content rather than a refused push. A snapshot ref outside the namespace — anything a hand-edited ledger entry
   could name — is refused before the remote is contacted at all, so this path can neither clobber nor delete a
-  branch, a tag, or a pull-request ref.
+  branch, a tag, or a pull-request ref. The **branch** cleanup beside it is held to the same rule from the other
+  direction: its target also comes off a ledger a human can edit, and it is checked against the orchestrator
+  namespace and this issue's own number before any delete, so a hand-edited entry naming an unprotected default
+  branch deletes nothing and holds the umbrella open instead.
 
 The refs hold objects, so they hold *content*: a snapshot is a copy of a candidate that was never published. It lives
 in the same repository under the same visibility as the branch it came from, and it is deleted at the umbrella's own

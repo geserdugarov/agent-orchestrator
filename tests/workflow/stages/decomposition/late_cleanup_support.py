@@ -10,7 +10,7 @@ become an umbrella never reaches the transaction again.
 """
 from __future__ import annotations
 
-from typing import Optional
+from dataclasses import dataclass
 
 from orchestrator.workflow.late_split import state as _late_state
 from orchestrator.workflow.late_split.models import (
@@ -23,6 +23,9 @@ from orchestrator.workflow.stages.decomposition.models import _ChildScan
 
 from tests.support.fakes import FakeGitHubClient, make_issue
 from tests.workflow.fixtures import _TEST_SPEC, _agent
+from tests.workflow.stages.decomposition.late_seam_support import (
+    local_teardown,
+)
 from tests.workflow.stages.decomposition.late_test_support import (
     late_generation,
 )
@@ -56,12 +59,21 @@ RESOLVED_STAMP = "umbrella_resolved_at"
 WORKFLOW_LOG = "orchestrator.workflow"
 
 
+@dataclass(frozen=True)
+class SeededUmbrella:
+    """The parent one case walks, and the client it lives on."""
+
+    github: FakeGitHubClient
+    parent: object
+
+
 def split_umbrella(
     owed: LateResourceState,
     *,
-    snapshot: Optional[LateResourceState] = None,
+    snapshot: LateResourceState | None = None,
     child_label: str = LABEL_DONE,
-) -> tuple:
+    branch: str = SUPERSEDED_BRANCH,
+) -> SeededUmbrella:
     """An umbrella whose children are done and whose remote is still owed."""
     github = FakeGitHubClient()
     parent = make_issue(PARENT_NUMBER, label=UMBRELLA)
@@ -71,7 +83,7 @@ def split_umbrella(
         threshold=None, additions=None, resources=(),
     ).with_consumers((CHILD_NUMBER,)).with_resource(LateResource(
         kind=LateResourceKind.BRANCH,
-        target=SUPERSEDED_BRANCH,
+        target=branch,
         resource_state=owed,
     ))
     if snapshot is not None:
@@ -88,15 +100,20 @@ def split_umbrella(
         umbrella=True,
         **recorded.data,
     )
-    return github, parent
+    return SeededUmbrella(github=github, parent=parent)
 
 
-def walk_umbrella(case, github, parent) -> None:
+def walk_umbrella(
+    case, seeded: SeededUmbrella, *, local_gone: bool = True,
+) -> None:
     """Run one umbrella tick through the real stage handler."""
-    case._run(
-        lambda: _umbrella._handle_umbrella(github, _TEST_SPEC, parent),
-        run_agent=_agent(),
-    )
+    with local_teardown(local_gone=local_gone):
+        case._run(
+            lambda: _umbrella._handle_umbrella(
+                seeded.github, _TEST_SPEC, seeded.parent,
+            ),
+            run_agent=_agent(),
+        )
 
 
 def resource_states(github: FakeGitHubClient) -> dict:

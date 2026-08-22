@@ -65,6 +65,7 @@ GIT_SEAM_OWNERS = MappingProxyType({
     "_head_on_branch": _verification_probes,
     "_head_sha": _verification_probes,
     "_infer_subject_prefix": _publication_titles,
+    "_local_branch_present": _worktree_cleanup,
     "_measure_candidate": _measurement,
     "_push_branch": _authentication,
     "_rebase_base_into_worktree": _base_sync_pre_pr,

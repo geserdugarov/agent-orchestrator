@@ -413,7 +413,9 @@ orphan instead of opening a duplicate. The issue is in the marker because a cycl
 repeats across them — two parents adjudicating their first candidate are both cycle 1 — while the lookup walks a
 label rather than one parent's children, so without it one parent would adopt, reseed, and activate another's child.
 The lookup costs one listing and is taken only where something has to be created, so a fully adopted resume pays
-nothing for it.
+nothing for it — and it fails closed: a 404 on the label means the repository has none, and therefore no orphan
+either, since creating a child is what puts that label there; every other label failure is raised and parks, because
+"could not ask" read as "there is no orphan" is exactly what opens a second issue for a slice that already has one.
 
 Each child is born knowing what it needs and nothing more: its declared scope in the words the adjudication used, the
 current base branch, the ancestor snapshot ref and exact commit, and the lineage and cycle identity a later record is
@@ -460,10 +462,22 @@ parent still labelled `decomposing`, and a child with no recorded dependencies i
 walk as the retry.
 
 **Cleanup last, and never in the way.** The superseded branch is written to the ledger as `pending` in that same
-retirement write and attempted *after* activation: a delete that fails records `failed`, emits
+retirement write and attempted *after* activation: an attempt that does not finish records `failed`, emits
 `branch_cleanup_failed`, and holds no child back. Children waiting on a branch deletion would be work stalled on
-tidiness. The local worktree and branch come down beside it, best-effort, and that is safe here for one reason: the
-snapshot was created and proved before any of this, so the commit the worktree holds is no longer the only copy.
+tidiness.
+
+"The branch" is every surface it exists on — the remote ref, the checkout holding it, and the local ref — and the
+entry reads `reconciled` only once all three are provably gone. A remote delete that succeeded beside a worktree
+that would not come down is not settled: what is left is a checkout on a superseded branch that the per-tick base
+refresh treats as a pre-PR tree and goes on merging into. The local half is *verified* rather than trusted, because
+`git worktree remove` and `git branch -D` are best-effort helpers that report nothing — so the entry is decided by a
+read taken afterwards, and that read fails closed. Taking the checkout down at all is safe here for one reason: the
+snapshot was created and proved before any of this, so the commit it holds is no longer the only copy.
+
+Only a branch this generation owns is ever deleted. The target comes off a ledger a human can edit and is spent on a
+destructive call, so it is checked against the orchestrator namespace and against this issue's own number before the
+remote is touched; anything else is recorded `failed` and left for a human, which is the one answer that neither
+deletes somebody's branch nor quietly forgets the obligation.
 
 What the obligation **does** block is the umbrella's own terminal completion, and the retry lives there rather than
 in the transaction — an issue that has become an umbrella never reaches the transaction again, so nothing else would
@@ -488,6 +502,14 @@ because a consumer could not be proved terminal is one a later sweep settles —
 cancellation rules are the change that follows this one — and blocking on it would hold the umbrella open for a
 condition nothing here can clear. A ref the remote *refused* to delete is a permission or ruleset problem an
 operator has to see, and the parent staying open is how they see it.
+
+Two more things block it outright, and both are the same rule: nothing that cannot be *proved* settled lets a
+terminal fire. An obligation ledger this orchestrator could not fully type blocks whatever the typed view says — the
+entries it could not read are still obligations, and closing on the strength of a projection is the reading the
+verbatim copy exists to prevent. So does a ledger holding anything at all on a record whose cycle identity is
+damaged: there is nothing to correlate a reclamation to and no issue number to prove a branch belongs to this
+generation, so the umbrella stays open and says so where an operator reads it. An issue that never entered the late
+gate carries no ledger and answers without a write, which is every umbrella the initial decomposer made.
 
 ## What the humans can still change while a candidate is frozen
 

@@ -35,7 +35,7 @@ from orchestrator.workflow.stages.decomposition.late_models import (
 
 from tests.workflow.fixtures import _TEST_SPEC
 from tests.workflow.stages.decomposition.late_seam_support import (
-    SnapshotSeed,
+    SnapshotSeed as SnapshotSeed,
     snapshot_seams,
 )
 from tests.workflow.stages.decomposition.late_test_support import (

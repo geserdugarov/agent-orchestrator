@@ -55,7 +55,6 @@ import logging
 from dataclasses import replace
 from typing import Optional
 
-from orchestrator.git.worktrees import cleanup as _worktree_cleanup
 from orchestrator.git.worktrees import paths as _worktree_paths
 from orchestrator.github import comments as _github_comments
 from orchestrator.workflow.engine import comments as _comments
@@ -441,18 +440,15 @@ def _reclaimed_branch(context: _LateContext, branch: str) -> None:
     (`late_cleanup`) rather than here: an issue this transaction has finished
     with is one nothing brings back to this owner.
 
-    The local checkout goes with it, and it is safe here for one reason: the
-    snapshot was created and proved before any of this, so the commit the
-    worktree holds is no longer the only copy. A worktree left on a superseded
-    branch is not merely untidy -- the per-tick base refresh treats it as a
-    pre-PR checkout and accretes merges onto a branch nobody will publish.
+    The local checkout goes with it -- the reclamation takes every surface the
+    branch exists on -- and it is safe here for one reason: the snapshot was
+    created and proved before any of this, so the commit the worktree holds is
+    no longer the only copy. A worktree left on a superseded branch is not
+    merely untidy: the per-tick base refresh treats it as a pre-PR checkout and
+    accretes merges onto a branch nobody will publish.
     """
     context.generation = _late_cleanup._reclaim_branch(
-        context.gh, context.generation, branch,
-    )
-    _worktree_cleanup._remove_issue_worktree(context.spec, context.issue.number)
-    _worktree_cleanup._delete_local_issue_branch(
-        context.spec, context.issue.number, branch,
+        context.gh, context.spec, context.generation, branch,
     )
     deleted = branch not in _late_cleanup._owed_branches(context.generation)
     if not deleted:

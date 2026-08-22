@@ -226,13 +226,16 @@ The hash is re-persisted on every reaction so a single edit triggers exactly one
   ([`../workflow/roles.md`](../workflow/roles.md#what-a-cleared-split-actually-does)) owes two things — the branch its
   superseded candidate was committed on, and the immutable ref that candidate was preserved under — and this is the
   last tick that could settle either: nothing revisits a closed umbrella, and no other handler reads that ledger. So
-  `late_cleanup` retries every `branch` entry that is not `reconciled`, and deletes each held `snapshot_ref` once
-  every recorded direct consumer is terminal — which all-children-resolved has just made true, proved off the child
-  scan this handler already took rather than off requests of its own. A consumer that cannot be proved terminal keeps
-  the ref. A refusal keeps the label rather than closing, which *is* the retry: the parent stays visibly open instead
-  of closing over a remote nobody will ever reap. A `snapshot_ref` still `retained` does not block — that condition is
-  a later sweep's to clear — while one the remote *refused* does, and an umbrella with no recorded generation owes
-  nothing and answers without a write.
+  `late_cleanup` retries every `branch` entry that is not `reconciled` — taking down the remote ref, the checkout,
+  and the local ref, and settling the entry only once a read afterwards proves all three gone — and deletes each held
+  `snapshot_ref` once every recorded direct consumer is terminal, which all-children-resolved has just made true,
+  proved off the child scan this handler already took rather than off requests of its own. A branch target outside
+  the orchestrator namespace or belonging to another issue is refused rather than deleted; a consumer that cannot be
+  proved terminal keeps the ref. A refusal keeps the label rather than closing, which *is* the retry: the parent
+  stays visibly open instead of closing over a remote nobody will ever reap. A `snapshot_ref` still `retained` does
+  not block — that condition is a later sweep's to clear — while one the remote *refused* does. An opaque obligation
+  ledger blocks outright, and so does any ledger entry on a record whose cycle identity is damaged; an umbrella with
+  no recorded generation and no ledger owes nothing and answers without a write.
 - **Output**: terminal `done`, OR a sibling unblocked, OR a HITL park, OR a held terminal (something still owed), OR
   a no-op.
 

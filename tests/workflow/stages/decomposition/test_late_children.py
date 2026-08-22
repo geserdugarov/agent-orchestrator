@@ -246,6 +246,19 @@ class OrphanAdoptionTest(SplitChildrenCase, unittest.TestCase):
         )
         self.assertEqual(self._recorded()[0], orphan)
 
+    def test_an_unreadable_lookup_creates_nothing(self) -> None:
+        # "Could not ask" read as "there is no orphan" is what opens a second
+        # issue for a slice that already has one, so the walk parks instead.
+        with refusing(self.github, "find_issue_carrying"):
+            with self.assertLogs(level="ERROR"):
+                outcome = self._transact()
+
+        self.assertEqual(outcome.disposition, _LateDisposition.PARKED)
+        self.assertEqual(self.github.created_child_issues, [])
+        self.assertEqual(
+            self._pinned().get(KEYS.park_reason), PARK_CHILDREN_FAILED,
+        )
+
     def test_another_generation_is_not_adopted(self) -> None:
         # The marker names the adjudication and the slice, so a child of some
         # earlier generation is not this one's to take over.

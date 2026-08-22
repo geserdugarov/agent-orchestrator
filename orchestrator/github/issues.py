@@ -254,15 +254,22 @@ class GitHubIssueMixin:
         Scoped to one workflow label rather than searched repository-wide,
         because a child is born on exactly one and the alternative is a walk
         over every open issue. An absent label is an absent child -- nothing
-        this orchestrator created could be wearing it -- so it answers None
-        rather than widening the search.
+        this orchestrator created could be wearing it, since creating one is
+        what puts the label in the repository -- so a 404 answers None rather
+        than widening the search.
+
+        Every OTHER label failure is raised rather than answered. The caller
+        is deciding whether an issue it may already have created exists, and
+        "could not ask" read as "no" is the one reading that opens a second
+        issue for work that already has one. The rate limit and a 5xx both
+        arrive that way, so the lookup fails closed and the caller retries.
 
         The body is what carries the marker, and the author is checked with
         it: the whole point is to recognize an issue THIS orchestrator opened,
         and an issue somebody else wrote the marker into is not one to adopt,
         reseed, and activate as a child.
         """
-        label_object = self._cached_label(label)
+        label_object = self._cached_label(label, strict=True)
         if label_object is None:
             return None
         for candidate in self.repo.get_issues(

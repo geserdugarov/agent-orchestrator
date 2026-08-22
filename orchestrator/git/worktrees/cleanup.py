@@ -7,6 +7,13 @@ branch that is still checked out, so every caller runs them as one ordered
 pair. Each step splits into a bare runner and a best-effort wrapper: the
 wrapper owns the exception boundary, which lets a caller tear down the
 next surface even when this one failed.
+
+Best-effort is right for a caller whose issue is already terminal -- a stale
+ref there is tidiness -- and not for one that has to RECORD whether the
+teardown happened. `_local_branch_present` is what the second kind asks
+afterwards, and it fails closed: a read that established nothing answers
+"still here", because a caller that took it for gone would mark an obligation
+settled that nothing had settled.
 """
 from __future__ import annotations
 
@@ -99,3 +106,33 @@ def _delete_local_issue_branch(
             log_prefix,
             branch,
         )
+
+
+def _local_branch_present(spec: config.RepoSpec, branch: str) -> bool:
+    """Whether the local clone still carries `branch`.
+
+    The verification half of a teardown a caller has to record. Fail-closed on
+    everything that is not a clean answer: `--verify --quiet` exits 0 when the
+    ref resolves and 1 when it does not, and any other exit -- a repository
+    that could not be read, a git that could not be run -- is a reading that
+    established nothing, which a caller must not spend as proof the branch is
+    gone.
+    """
+    try:
+        with locks._target_root_lock(spec.target_root):
+            resolved = commands._git(
+                "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}",
+                cwd=spec.target_root,
+            )
+    except Exception:
+        log.exception("local branch %r could not be read", branch)
+        return True
+    if resolved.returncode == 0:
+        return True
+    if resolved.returncode == 1:
+        return False
+    log.warning(
+        "local branch %r read answered %d; treating it as still present",
+        branch, resolved.returncode,
+    )
+    return True

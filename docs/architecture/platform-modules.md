@@ -171,7 +171,8 @@ orchestrator/
                         resolution
       creation.py       issue and PR worktree creation, stale-worktree reuse and the probe it turns on, and the one
                         move that re-anchors a reused checkout onto a PR head or its merged base
-      cleanup.py        lock-held worktree removal and local branch deletion, each behind its best-effort boundary
+      cleanup.py        lock-held worktree removal and local branch deletion, each behind its best-effort boundary,
+                        plus the fail-closed read a caller that has to RECORD the teardown asks afterwards
       recovery.py       candidate-branch discovery, the unpushed-commit probe, and the tip read a recorded SHA is
                         compared against
       decomposition.py  the decomposer scratch path, its detached creation, and its best-effort removal
