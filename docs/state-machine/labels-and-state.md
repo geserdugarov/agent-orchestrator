@@ -390,7 +390,7 @@ machine fall into a few groups:
   size gate re-sets its own reasons for the same kind of reason: `late_plan_pr_hold_failed`,
   `late_generation_incomplete`, `late_worktree_missing`, `late_worktree_mutated`, `late_adjudicator_timeout`,
   `late_manifest_invalid`, `late_result_unrecordable`, `late_owner_unreadable`, `late_pr_unreconciled`,
-  `late_content_drift`,
+  `late_snapshot_failed`, `late_children_failed`, `late_supersession_failed`, `late_content_drift`,
   `late_revision_dirty`, `late_revision_unmeasured`, `late_revision_unanswered`, and `late_question` — see
   [the late run](#the-late-run) for which of them the next attempt retires. `late_owner_unreadable` is the one of
   them that recovers on its own: it is a GitHub read that failed after the agent had already answered, so the retry
@@ -584,7 +584,10 @@ rather than preserving.
   generation already under adjudication. `late_phase` names the reconciliation boundary reached —
   `measuring`, `holding_plan_pr`, `adjudicating`, `owner_check`, `snapshotting`, `splitting`, `superseding`,
   `cleaning_up`, `cancelling`, `restarting` — so a tick that crashed mid-step reconciles that step rather than
-  starting a new one.
+  starting a new one. It is a boundary marker rather than a resume token: the owner-read claim every retry passes
+  through rewrites it to `owner_check`, so a step that has to know whether it already ran keys on its own durable
+  fact instead — the ledger entry for the snapshot and the branch, the recorded `children` for the children, and
+  `decomposed_at` for the one comment a split owes its parent.
 - **Local fingerprints.** `late_title_body_hash`, and `late_comment_hash` beside the `late_comment_watermark_id` it
   covers from, are what tell a scope edit apart from a trusted answer arriving after the late baseline. They are
   local by design: the global `user_content_hash` above keeps its single baseline and its meaning unchanged, so
@@ -638,6 +641,26 @@ rather than preserving.
   owed when the identity beside it is damaged. Dropping any of it would be an obligation deleted from the issue that
   still owes it — a cleanup that looks complete, or a snapshot reclaimed as though nobody were waiting on it — so a
   generation holding an opaque ledger is one nothing may treat as settled.
+- **Inherited lineage.** `late_ancestry_root_issue`, `late_ancestry_depth`, `late_ancestry_parent`,
+  `late_ancestry_cycle_id`, `late_ancestry_generation`, `late_ancestry_snapshot_ref`,
+  `late_ancestry_snapshot_sha`, `late_ancestry_base_branch`, and `late_declared_scope` are what a child born of a
+  late split carries, and they are a separate group from the generation above because they answer a separate
+  question and outlive it: a generation is minted, adjudicated, and retired inside one issue, while an ancestry is
+  written once when the child is created and is still true after that child has been implemented, split again, and
+  closed. The depth and the root are what the child's own size gate mints its generation from, so automatic
+  splitting stops at the same bound three generations down as it does at the root — a child that could not say how
+  deep it is would read as a root and buy the lineage another generation, which is why an unreadable depth reads
+  back unknown rather than 0. The cycle, the generation, and the parent issue are what a record about this child is
+  correlated back to the adjudication that created it by. The snapshot ref and commit are the only durable pointer
+  to the work the child is meant to reuse, since the branch it was committed on is superseded and the pull request
+  that carried it is closed — both halves or neither, because a ref with no commit cannot be verified against
+  anything and a commit with no ref names work nothing can fetch. `late_declared_scope` is the slice the
+  adjudication assigned, and it is what the child's own late prompt states rather than an issue body somebody has
+  since edited. Every field is additive and read fail-closed like the generation's own: an issue that reached this
+  workflow another way carries none of these keys, and a hand-edited one reads back absent rather than becoming a
+  lineage nobody wrote. The ref is checked against the namespace that owns it rather than merely for being a string
+  — a value outside `refs/orchestrator/late-split/` names a branch, a tag, or nothing, and handing one to a child is
+  worse than handing it none.
 - **Pending owner check.** `late_owner_check_pending` says a completed run's outcome has not yet been cleared by a
   fresh read of the issue it belongs to. It is written *before* that read is taken and dropped when one succeeds or
   the cycle is cancelled, and while it is set no later tick may treat the generation as settled, however small,

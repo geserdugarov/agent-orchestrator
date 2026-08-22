@@ -1,0 +1,163 @@
+# Copyright 2026 Geser Dugarov
+# SPDX-License-Identifier: Apache-2.0
+"""A real remote, a real clone, and real commits for the snapshot transport.
+
+These are not mocked. What the snapshot operations promise -- that a ref is
+created only where none exists, that an occupied one is never overwritten, that
+a created ref can be FETCHED back and resolved locally, and that deleting an
+absent ref succeeds -- are properties of git and of the refspecs and leases the
+transport builds, and a recorder asserting on argv would pass for a command git
+rejects. So the tests drive `git` itself against a bare repository on disk.
+
+What is replaced is exactly one thing: the askpass session, whose auth URL
+points at GitHub. Pointing it at the local bare repository leaves every other
+part of the envelope -- the hardened argv prefix, the detached config, the
+pre-flight transport-config refusal, and the per-target-root lock -- running as
+it does in production.
+"""
+from __future__ import annotations
+
+import contextlib
+import os
+import subprocess
+import tempfile
+from dataclasses import dataclass
+from pathlib import Path
+from unittest.mock import patch
+
+from orchestrator import config
+from orchestrator.git import authentication
+
+GIT = "git"
+
+QUIET = "-q"
+
+BASE_BRANCH = "main"
+
+SLUG = "owner/repo"
+
+# A remote path nothing was ever cloned from: what an unreachable remote looks
+# like to `ls-remote`, which is the read every snapshot decision starts with.
+UNREACHABLE = "unreachable.git"
+
+PLUMBING_LOG = "orchestrator.git_plumbing"
+
+
+@dataclass(frozen=True)
+class RealRemote:
+    """One disposable repository pair and the two commits in it."""
+
+    spec: config.RepoSpec
+    clone: Path
+    remote: Path
+    sha: str
+    other_sha: str
+
+    def remote_ref_sha(self, ref: str) -> str:
+        """What the bare repository itself says the ref is at, or ""."""
+        listed = _git(
+            "ls-remote", str(self.remote), ref, cwd=self.clone,
+        ).stdout
+        for output_line in listed.splitlines():
+            parts = output_line.split()
+            if len(parts) >= 2 and parts[1] == ref:
+                return parts[0]
+        return ""
+
+    def plant_ref(self, ref: str, sha: str) -> None:
+        """Put a ref on the remote without going through the transport."""
+        _git("push", str(self.remote), f"{sha}:{ref}", cwd=self.clone)
+
+
+def _git(*args: str, cwd: Path) -> subprocess.CompletedProcess:
+    """Run one plain git command, raising with its stderr when it fails."""
+    completed = subprocess.run(
+        [GIT, *args], cwd=str(cwd), capture_output=True, text=True,
+        env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+    )
+    if completed.returncode != 0:
+        raise AssertionError(f"git {args} failed: {completed.stderr}")
+    return completed
+
+
+class _LocalAuthSession:
+    """The askpass session, pointed at a path instead of at GitHub.
+
+    A class rather than a closure so the URL it is built for is visible where
+    the session is: every authenticated call in one test run goes through this
+    one object, and what it replaces is the ONLY part of the envelope these
+    tests do not exercise for real.
+    """
+
+    def __init__(self, auth_url: str) -> None:
+        self._auth_url = auth_url
+
+    @contextlib.contextmanager
+    def __call__(self, _spec, token, **_options):
+        yield authentication._GitAuthSession(
+            token=token, auth_url=self._auth_url, env=self._env(),
+        )
+
+    def _env(self) -> dict[str, str]:
+        """The environment a token-bearing command runs under, token aside."""
+        return {
+            **os.environ,
+            "GIT_TERMINAL_PROMPT": "0",
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_CONFIG_SYSTEM": os.devnull,
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_AUTHOR_NAME": "orchestrator",
+            "GIT_AUTHOR_EMAIL": "orchestrator@example.invalid",
+            "GIT_COMMITTER_NAME": "orchestrator",
+            "GIT_COMMITTER_EMAIL": "orchestrator@example.invalid",
+        }
+
+
+@contextlib.contextmanager
+def _local_auth_session(auth_url: str):
+    """Point every authenticated call at a path instead of at GitHub."""
+    with patch.object(config, "_resolve_github_token", return_value="token"):
+        with patch.object(
+            authentication, "_git_auth_session", _LocalAuthSession(auth_url),
+        ):
+            yield
+
+
+@contextlib.contextmanager
+def real_remote(*, reachable: bool = True):
+    """Yield a bare remote, a clone carrying two commits, and its spec."""
+    with tempfile.TemporaryDirectory(prefix="orch-snapshot-test-") as scratch:
+        prepared = _prepared_pair(Path(scratch))
+        reached = prepared.remote if reachable else Path(scratch) / UNREACHABLE
+        with _local_auth_session(str(reached)):
+            yield prepared
+
+
+def _prepared_pair(root: Path) -> RealRemote:
+    """Build the bare repository and the clone that has pushed to it."""
+    remote = root / "remote.git"
+    clone = root / "clone"
+    clone.mkdir()
+    _git("init", "--bare", QUIET, str(remote), cwd=root)
+    _git("init", QUIET, "-b", BASE_BRANCH, str(clone), cwd=root)
+    _git("config", "user.email", "t@example.invalid", cwd=clone)
+    _git("config", "user.name", "t", cwd=clone)
+    first, second = _commit(clone, "first"), _commit(clone, "second")
+    _git("push", QUIET, str(remote), f"HEAD:refs/heads/{BASE_BRANCH}", cwd=clone)
+    return RealRemote(
+        spec=config.RepoSpec(
+            slug=SLUG, target_root=clone, base_branch=BASE_BRANCH,
+        ),
+        clone=clone,
+        remote=remote,
+        sha=first,
+        other_sha=second,
+    )
+
+
+def _commit(clone: Path, written: str) -> str:
+    """Add one commit to the clone and return its object id."""
+    (clone / "work.txt").write_text(f"{written}\n")
+    _git("add", "work.txt", cwd=clone)
+    _git("commit", QUIET, "-m", written, cwd=clone)
+    return _git("rev-parse", "HEAD", cwd=clone).stdout.strip()

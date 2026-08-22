@@ -34,13 +34,14 @@ last is held by the loader itself rather than by a check.
   own tests hold its surface — a `test_imports.py` in the domains, `tests/config/test_surface.py` for the settings
   module — and `tests/repository/test_package_exports.py` holds the publish-or-front-nothing rule over the tree.
 - **No second site.** No domain here sits behind a facade. Where a package replaced flat modules — `git/` and four
-  of its five subpackages, `runtime/`, `skills/` — its own `test_imports.py` asserts that nothing resolves at the
+  of its six subpackages, `runtime/`, `skills/` — its own `test_imports.py` asserts that nothing resolves at the
   retired spelling, that no inventory or resolver hook names one as a target, and that no aggregate over the git
-  domains sits above them — `tests/git/publication/test_imports.py` carries that last one. `git/measurement/`
-  replaced nothing and holds the same assertion anyway, against a flat spelling that has never existed.
+  domains sits above them — `tests/git/publication/test_imports.py` carries that last one. `git/measurement/` and
+  `git/snapshots/` replaced nothing and hold the surface assertion anyway.
 - **Operator log channels.** Four names are spelled literally rather than derived from `__name__`, because an
-  operator's level and handler selection is keyed on them: `orchestrator.git_plumbing` (`git/authentication.py` and
-  the two `git/measurement/` owners that log, which report on the same `ls-remote`, fetch, and diff plumbing),
+  operator's level and handler selection is keyed on them: `orchestrator.git_plumbing` (`git/authentication.py`,
+  `git/snapshots/refs.py`, and the two `git/measurement/` owners that log, which all report on the same `ls-remote`,
+  fetch, push, and diff plumbing),
   `orchestrator.base_sync` (`git/base_sync/state.py`), `orchestrator.worktree_lifecycle` (the four `git/worktrees/`
   owners that log), and `orchestrator.branch_publication` (`git/publication/rewrite.py`). A module moved between
   packages does not take its channel with it, and each of the four names is asserted where its owner is tested —
@@ -112,8 +113,9 @@ orchestrator/
     models.py           the typed submission, the historical `submit` binding, and field normalization
     service.py          the concrete scheduler: the caps, the tracked claims, the family mutex, dispatch, and shutdown
   git/
-    authentication.py   the per-repo token and askpass session, the authenticated fetches, the remote-ref read that
-                        answers what a branch is at without a local one, and the lease-pinned push
+    authentication.py   the per-repo token and askpass session, the authenticated fetches, the remote-ref reads that
+                        answer what a branch or a whole refname is at without a local one, the lease-pinned branch
+                        push, and the lease-pinned ref write and delete an immutable namespace is owned through
     commands.py         plain / hardened git execution, the argv hardening and no-prompt environment, the per-call
                         environment pin a caller adds over it, the absolute `--work-tree` argument a working-tree
                         operation names its tree with, and the unsafe local-transport probe
@@ -151,6 +153,11 @@ orchestrator/
                         attributes and a named algorithm, pinned where git consults the environment last, and
                         refusing outright on the attribute file and diff-driver config no pin reaches — and the
                         measurement composing the three steps
+    snapshots/          the immutable remote copy a superseded candidate is preserved as
+      namespace.py      the one `refs/orchestrator/late-split/...` namespace a snapshot may occupy, built from a
+                        generation's own identity and refused for anything else
+      refs.py           create-or-verify against the exact commit with no overwrite, the fetch-and-resolve that
+                        proves a child could obtain it, and the absent-is-success delete
     verification/       what a verify run is, and the reads a checkout is judged by
       models.py         the `VerifyResult` statuses and fields, and the output budget
       output.py         the redact-then-truncate pass over captured verify output
@@ -178,7 +185,7 @@ orchestrator/
 
 ## Inside `git/`
 
-The five subpackages bind their collaborators directly, so the dependency direction reads off the owner rather than
+The six subpackages bind their collaborators directly, so the dependency direction reads off the owner rather than
 off a facade:
 
 - `publication/` — `probes` calls `commands`; `titles` calls `probes`; `planning` calls `commands`, both siblings,
@@ -188,6 +195,11 @@ off a facade:
 - `measurement/` — `models` carries only data. `commits` calls `commands`, `authentication`, and the verification
   probes for the two object reads; `additions` calls `commands` and `commits`. Nothing here reaches the workflow
   layer, so the ceiling a count is compared against, and the verdict that comparison earns, stay with the caller.
+- `snapshots/` — `namespace` is string policy and reaches nothing, which is what lets the late domain's lineage
+  record consult it on every pinned read without paying for the transport; `refs` calls `authentication` for the
+  remote read, the lease-pinned write and delete, and the fetch, and `commands` for the hardened local resolution
+  that proves what the fetch brought. The workflow decides WHEN a snapshot is taken and what its absence costs; this
+  package decides only what a snapshot ref IS and refuses everything outside it.
 - `worktrees/` — the creators call `commands`, `locks`, `authentication`, and their `paths` / `recovery` siblings;
   `decomposition` resolves its own path helper; `terminal` composes its local teardown from `cleanup`.
 - `base_sync/` — `models` and `state` carry only data. On the sync side `refresh` calls `pre_pr` and `pr`, `pr` asks

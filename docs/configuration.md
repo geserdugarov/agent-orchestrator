@@ -15,6 +15,9 @@ Two companion pages carry what is read on its own rather than scanned for a valu
   analytics database URL, skill-trigger tracking, the dashboard read mode, and the dashboard quickstart.
 - [`configuration/operations.md`](configuration/operations.md) — continuous integration, run modes, the systemd user
   service, and what an edited `.env` takes to apply.
+- [`configuration/snapshot-capability-check.md`](configuration/snapshot-capability-check.md) — the
+  disposable-repository check that proves a production token and its rulesets can create, fetch, verify, and delete
+  the late split's snapshot refs, and what each failure means.
 
 Each of their sections keeps a one-paragraph pointer at its place below, so a link written against this reference
 still lands on the answer.

@@ -10,6 +10,13 @@ the two persistent markers `split` writes are what tells them apart:
 `expected_children_count` goes down before the first child is created, and
 `children` grows after each one is.
 
+Those same two markers are written by the late split transaction, which owns
+them for as long as its generation is live -- so a live generation stops this
+recovery outright rather than finalizing a split that has not finished
+snapshotting, superseding, or recording what the remote is owed. The tick ends
+having changed nothing, which is what leaves the transaction free to resume
+from its own durable facts.
+
 Equal counts mean the loop finished and only the label flip was lost, so the
 parent finalizes to whatever the manifest asked for. Fewer mean a child exists
 that the parent never recorded, which no automatic rule can resolve, so it
@@ -30,6 +37,10 @@ from orchestrator.github.client import GitHubClient
 from orchestrator.github.pinned_state import PinnedState
 from orchestrator.workflow.engine import guards as _guards
 from orchestrator.workflow.engine import usage as _usage
+from orchestrator.workflow.late_split import state as _late_state
+from orchestrator.workflow.stages.decomposition import (
+    late_relabel as _late_relabel,
+)
 from orchestrator.workflow.stages.decomposition import state as _state
 from orchestrator.workflow.state import WorkflowLabel
 
@@ -104,6 +115,29 @@ def _repair_recovered_children(
     )
 
 
+def _markers_not_ours(issue: Issue, state: PinnedState) -> bool:
+    """Whether these split markers belong to another owner's decision.
+
+    Two owners can hold them. A human holds them once the issue is parked
+    awaiting one: it is stopped either way, and there is nothing for a
+    recovery to add. The late split transaction holds them for as long as its
+    generation is live, because it writes the same two markers and resumes
+    from its own durable facts -- finalizing on its behalf would hand a parent
+    on before its snapshot, its supersession, or what the remote is owed had
+    been settled.
+    """
+    if _late_relabel._adjudication_is_live(
+        _late_state.read_late_generation(state),
+    ):
+        log.info(
+            "issue=#%s carries a live oversized candidate; leaving its split "
+            "markers to the late transaction that wrote them",
+            issue.number,
+        )
+        return True
+    return bool(state.get(_state._AWAITING_HUMAN))
+
+
 def _recover_stale_manifest(
     gh: GitHubClient, issue: Issue, state: PinnedState
 ) -> bool:
@@ -135,7 +169,7 @@ def _recover_stale_manifest(
     children_recorded = state.get(_state._CHILDREN) or []
     if expected_raw is None and not children_recorded:
         return False
-    if state.get(_state._AWAITING_HUMAN):
+    if _markers_not_ours(issue, state):
         return True
     if expected_raw is not None and len(children_recorded) < int(expected_raw):
         _park_incomplete_decomposition(

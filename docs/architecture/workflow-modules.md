@@ -97,6 +97,9 @@ workflow/                   publishes the two label vocabularies, `guard_transit
     state.py                the `late_*` pinned keys -- the frozen evidence, the ledgers, and the cancellation and
                             pending-owner-check markers -- and the round trip through them that leaves a legacy
                             comment untouched and an unreadable obligation intact
+    lineage.py              what a child born of a split inherits and reads back fail-closed: the lineage it
+                            continues, the adjudication that created it, the snapshot ref and exact commit it may
+                            reuse, and the slice it owns
     exemption.py            the one commit an accepted candidate publishes under -- written, read, and compared
                             fail-closed, and deliberately outside the group a cleared generation drops
     restart.py              the two-phase restart marker: the closed pair of labels it may apply, the cycle it
@@ -189,6 +192,20 @@ workflow/                   publishes the two label vocabularies, `guard_transit
                             cancellation a closed owner earns, the park an unreadable one takes only where nothing
                             else already holds the issue, and the one follow-up that park owes the thread --
                             posted before the write that clears it
+      late_snapshot.py      the immutable copy every child of a split is cut from: the ref this generation's
+                            identity names, the obligation written ahead of the push and again behind the proof, the
+                            create-or-verify that never overwrites, the fetch that proves a child could obtain it,
+                            and the one park every refusal takes
+      late_children.py      the children a split creates: the umbrella flag and count written before the first one,
+                            the single write that records each as a child, a consumer, and an obligation, the adopt
+                            -- never repeat -- a resumed walk does, the seed that adds an ancestry without replacing
+                            a child's own work, and the body naming the snapshot, the two reuse forms, and the hunk
+                            splitting it forbids
+      late_transaction.py   the order a cleared split runs in: the two refusals no step below could repair, the
+                            snapshot before any child, the children before any link, the forward links behind the
+                            stamp that stops them repeating, the held plan PR superseded and closed, the generation
+                            retired onto `workflow:umbrella` in the write that hands the issue on, the activation
+                            behind it, and the branch cleanup recorded as owed and reconciled after
       late_settlement.py    what a guarded verdict earns: the announcement a question owes the issue, the exemption
                             naming the measured commit, the plan-PR hold released and the pull request reconciled
                             against that commit in any state -- with a settled pointer dropped rather than handed on

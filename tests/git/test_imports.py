@@ -54,10 +54,13 @@ _OWNER_ONLY_NAMES = (
     "TargetRootLockRegistry",
     "_TARGET_ROOT_LOCKS",
     "_authed_fetch",
+    "_delete_remote_ref",
     "_git",
     "_git_auth_session",
     "_git_hardened",
     "_push_branch",
+    "_push_ref",
+    "_remote_ref_sha",
     _ROOT_LOCK,
     "_unsafe_local_transport_config",
 )

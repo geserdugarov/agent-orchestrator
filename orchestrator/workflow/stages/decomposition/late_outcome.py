@@ -108,6 +108,9 @@ PARK_TIMEOUT = "late_adjudicator_timeout"
 PARK_UNPARSED = "late_manifest_invalid"
 PARK_UNRECORDABLE = "late_result_unrecordable"
 PARK_OWNER_UNREADABLE = "late_owner_unreadable"
+PARK_SNAPSHOT_FAILED = "late_snapshot_failed"
+PARK_CHILDREN_FAILED = "late_children_failed"
+PARK_SUPERSESSION_FAILED = "late_supersession_failed"
 PARK_PR_UNRECONCILED = "late_pr_unreconciled"
 PARK_QUESTION = "late_question"
 PARK_CONTENT_DRIFT = "late_content_drift"
@@ -118,8 +121,10 @@ PARK_REVISION_UNANSWERED = "late_revision_unanswered"
 # The parks a fresh attempt answers, and therefore retires before it runs. A
 # hold that failed has now been reconciled, a worktree that was gone is back, a
 # run that timed out or answered unusably is about to be re-run, and a pull
-# request lookup nobody could take is about to be taken again. The six left
-# out are the ones no retry answers. `PARK_QUESTION` is the announcement
+# request lookup nobody could take is about to be taken again, and each of the
+# three transaction steps -- the snapshot, the children, the supersession -- is
+# about to be reconciled again from the same recorded verdict, at no agent's
+# cost. The six left out are the ones no retry answers. `PARK_QUESTION` is the announcement
 # itself, and the four content
 # parks are the workflow waiting to be told what an edited scope, a worktree
 # the developer left changed, a candidate nobody could measure, or a developer
@@ -142,6 +147,9 @@ _SUPERSEDED_PARKS = frozenset((
     PARK_UNPARSED,
     PARK_UNRECORDABLE,
     PARK_PR_UNRECONCILED,
+    PARK_SNAPSHOT_FAILED,
+    PARK_CHILDREN_FAILED,
+    PARK_SUPERSESSION_FAILED,
 ))
 
 _UNPARSED_PARK = (

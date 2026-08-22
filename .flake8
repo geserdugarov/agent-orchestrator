@@ -557,6 +557,44 @@
 # parser, the run record, the undelivered notice a park owes, and the engine
 # guard a park goes through. WPS201 and WPS202 are waived.
 #
+# orchestrator/workflow/stages/decomposition/late_snapshot.py owns the whole
+# snapshot step -- the ref this generation's identity names, the durable
+# obligation written ahead of the push and again behind the proof, the
+# create-or-verify and the fetch that proves it, and the one shape every
+# refusal takes -- and names 13 imports past the WPS201 ceiling of 12. They are
+# what "snapshot-first" costs: the namespace and the transport that write the
+# ref, the domain's typed failure, resource vocabulary, and refusal, the event
+# and the dual emission that report one external resource, and the outcome
+# owner every park and persist rides. WPS201 is waived.
+#
+# orchestrator/workflow/stages/decomposition/late_children.py owns the whole
+# child half of a split -- the walk that adopts what the parent already
+# records, the umbrella flag and count written before the first child, the one
+# write that records a child as a child, a consumer, and an obligation at
+# once, the seed that adds an ancestry without replacing a child's own work,
+# and the body and the lineage that child is born with -- so it carries 13
+# members past the WPS202 ceiling of 7 and names 15 imports past the WPS201
+# ceiling of 12. The order is the crash-safety contract, and the imports are
+# what a child needs to exist: the lineage record it inherits, the depth
+# bound, the phase, the two ledger vocabularies, the initial split's own child
+# labels, the stage's pinned keys and split plan, and the outcome owner every
+# park and persist rides. Splitting it would put "created" and "recorded" in
+# two modules, so WPS201 and WPS202 are waived.
+#
+# orchestrator/workflow/stages/decomposition/late_transaction.py is the order
+# a cleared split runs in -- the two refusals no step below could repair, the
+# snapshot, the children, the forward links and the stamp that stops them
+# repeating, the supersession of the held plan PR, the retirement that hands
+# the parent to `umbrella`, the activation behind it, and the branch
+# obligation reconciled after -- so it carries 13 members past the WPS202
+# ceiling of 7 and names 20 imports past the WPS201 ceiling of 12. Every step
+# is what makes the next one safe, and the imports are the union of what the
+# order touches: the snapshot and children owners, the hold's release, the
+# worktree teardown and branch resolution, the comment poster and the stamp
+# clock, the domain's failure, phase, resource, and generation records with
+# the events and telemetry that report them, and the label the parent is
+# handed on under. WPS201 and WPS202 are waived.
+#
 # orchestrator/workflow/stages/decomposition/late_settlement.py is what a
 # guarded verdict earns -- the announcement a question owes the issue, the
 # handoff a split makes to the transaction that creates its children, and the
@@ -694,6 +732,9 @@ per-file-ignores =
     orchestrator/workflow/stages/decomposition/late_outcome.py:WPS201,WPS202
     orchestrator/workflow/stages/decomposition/late_owner.py:WPS202
     orchestrator/workflow/stages/decomposition/late_settlement.py:WPS201,WPS202
+    orchestrator/workflow/stages/decomposition/late_snapshot.py:WPS201
+    orchestrator/workflow/stages/decomposition/late_children.py:WPS201,WPS202
+    orchestrator/workflow/stages/decomposition/late_transaction.py:WPS201,WPS202
     orchestrator/workflow/stages/decomposition/late_revision.py:WPS201,WPS202
     orchestrator/workflow/stages/decomposition/late_session.py:WPS201,WPS202
     orchestrator/workflow/stages/decomposition/split.py:WPS201,WPS202
