@@ -426,7 +426,11 @@ and never split hunks mechanically to make the change smaller. File and hunk bou
 a change partitioned along them is one nobody can build or review — the judgment about what belongs to a slice stays
 with the developer who implements it. The seed is re-applied on a resume by reading the child's state and adding to
 it, never by writing a fresh record: by the time a retry reaches a child that was already created, that child may be
-implementing.
+implementing. The write that first *attributes* a child also takes back the park it may have collected in the
+meantime — poll order is the repository's, not the transaction's, so an orphan can reach the stage machine before
+anything records it and be parked as an unattributed `blocked` issue. Leaving that standing would activate a child
+that then waits for a reply nobody owes it. A child that already records a parent keeps whatever park it has: that
+one is its own.
 
 **Only then the links and the supersession.** The parent says what it became and where its work went, exactly once,
 and both halves of "once" are needed. The generation's own `late_links_announced` flag is the cheap gate and the one

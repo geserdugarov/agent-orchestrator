@@ -26,7 +26,12 @@ convention:
 - **Exact SHA, proved twice.** The remote is asked what the ref resolves to
   and the answer has to be the exact frozen candidate; then the ref is fetched
   back and resolved locally, because "a child can obtain this" is the property
-  the whole namespace exists for and an `ls-remote` does not establish it.
+  the whole namespace exists for and an `ls-remote` does not establish it. The
+  fetch lands under a LOCAL name qualified by the repository it came from, and
+  the fetch and the resolution are one locked step: several configured
+  repositories may share a `target_root`, so an unqualified name would have
+  one force-fetch over another's and a resolution taken after the lock was
+  released would answer for whichever landed last.
 - **Absent is success, and only ours is deletable.** A deletion that finds
   nothing there has nothing to do, which is what makes reclamation idempotent
   across a crash between the push and the write that would have recorded it. A

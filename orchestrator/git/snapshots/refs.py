@@ -24,6 +24,15 @@ resolution equal to the frozen candidate is a proof. A namespace the token can
 write and not read would otherwise pass every check until the first child tried
 to use it.
 
+Where it lands is qualified by the repository it came from, and the fetch and
+the resolution are one locked step. Several `REPOS` entries may share a
+`target_root`, so the clone a snapshot is fetched into is a store two of them
+write: an unqualified local name would have the second force-fetch overwrite
+the first, and a resolution taken after the lock was released would answer for
+whichever fetch landed last. Both are the same failure read two ways -- a
+verification against a candidate this call never saw, and a child copying files
+out of the other repository's work.
+
 **Absent is success.** A deletion that finds no ref has nothing to reclaim, and
 saying so is what makes reclamation idempotent across the crash between the
 push that deleted a ref and the write that would have recorded it. What is
@@ -43,8 +52,9 @@ from pathlib import Path
 from typing import Optional
 
 from orchestrator import config
-from orchestrator.git import authentication, commands
+from orchestrator.git import authentication, commands, locks
 from orchestrator.git.snapshots import namespace
+from orchestrator.git.worktrees import paths
 
 # The channel the authenticated transport already reports on: these are an
 # `ls-remote`, a push, a fetch, and a `rev-parse`, so an operator following a
@@ -73,6 +83,13 @@ class SnapshotOutcome(Enum):
     REFUSED = "refused"
     ABSENT = "absent"
     DELETED = "deleted"
+
+
+# The two answers that mean the remote no longer has the ref, and therefore
+# that this host's copy of it is holding objects nothing points at.
+_GONE = frozenset((
+    SnapshotOutcome.DELETED, SnapshotOutcome.ABSENT,
+))
 
 
 def create_snapshot_ref(
@@ -130,16 +147,21 @@ def prove_snapshot_ref(
     if not namespace.is_snapshot_ref(ref):
         log.error("refusing to fetch %r: not a snapshot ref", ref)
         return SnapshotOutcome.REFUSED
-    fetched = authentication._authed_fetch(
-        spec, f"+{ref}:{ref}", cwd=worktree,
-    )
-    if fetched.returncode != 0:
-        log.error(
-            "%s: %s could not be fetched back after it was created: %s",
-            spec.slug, ref, (fetched.stderr or "").strip(),
+    mirror = local_snapshot_ref(spec, ref)
+    # One lock over both, because the answer is about what THIS fetch brought:
+    # another worktree of the same target root fetching the same ref between
+    # them would have the resolution report on its landing rather than ours.
+    with locks._target_root_lock(spec.target_root):
+        fetched = authentication._authed_fetch(
+            spec, f"+{ref}:{mirror}", cwd=worktree,
         )
-        return SnapshotOutcome.REFUSED
-    resolved = _local_ref_sha(worktree, ref)
+        if fetched.returncode != 0:
+            log.error(
+                "%s: %s could not be fetched back after it was created: %s",
+                spec.slug, ref, (fetched.stderr or "").strip(),
+            )
+            return SnapshotOutcome.REFUSED
+        resolved = _local_ref_sha(worktree, mirror)
     if resolved == sha:
         return SnapshotOutcome.PROVEN
     log.error(
@@ -173,6 +195,16 @@ def delete_snapshot_ref(
     if not namespace.is_snapshot_ref(ref):
         log.error("refusing to delete %r: not a snapshot ref", ref)
         return SnapshotOutcome.REFUSED
+    reclaimed = _reclaimed_remote(spec, worktree, ref, sha)
+    if reclaimed in _GONE:
+        _drop_mirror(spec, worktree, ref)
+    return reclaimed
+
+
+def _reclaimed_remote(
+    spec: config.RepoSpec, worktree: Path, ref: str, sha: str,
+) -> SnapshotOutcome:
+    """What the remote did with the one ref this generation preserved."""
     observed = authentication._remote_ref_sha(spec, worktree, ref)
     if observed is None:
         return SnapshotOutcome.UNREADABLE
@@ -188,6 +220,42 @@ def delete_snapshot_ref(
         spec, worktree, ref=ref, expected=sha,
     )
     return SnapshotOutcome.DELETED if deleted else SnapshotOutcome.REFUSED
+
+
+def local_snapshot_ref(spec: config.RepoSpec, ref: str) -> str:
+    """The local ref THIS repository's copy of one snapshot lands under.
+
+    The repository segment is the same sanitized slug the per-issue branch
+    namespace is built from, so what keeps two `REPOS` entries off one
+    another's branches keeps them off one another's snapshots. Published
+    because the child a split creates is told to read the snapshot out of this
+    name, so the instruction and the fetch have to be one string.
+    """
+    return namespace.local_snapshot_ref(
+        ref=ref, repository=paths._sanitize_branch_segment(spec.slug),
+    )
+
+
+def _drop_mirror(
+    spec: config.RepoSpec, worktree: Path, ref: str,
+) -> None:
+    """Reclaim this host's copy of a snapshot whose remote ref is gone.
+
+    Best-effort and last: what the caller was asked to settle is the remote,
+    and a local ref left behind is this host's disk rather than the
+    repository's. It is still dropped, because a mirror nothing deletes holds
+    the snapshot's objects against `gc` for as long as the clone lives.
+    """
+    mirror = local_snapshot_ref(spec, ref)
+    with locks._target_root_lock(spec.target_root):
+        dropped = commands._git_hardened(
+            "update-ref", "-d", mirror, cwd=worktree,
+        )
+    if dropped.returncode != 0:
+        log.warning(
+            "%s: local snapshot %s could not be dropped: %s",
+            spec.slug, mirror, (dropped.stderr or "").strip(),
+        )
 
 
 def _local_ref_sha(worktree: Path, ref: str) -> Optional[str]:

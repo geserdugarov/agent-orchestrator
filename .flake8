@@ -557,6 +557,24 @@
 # parser, the run record, the undelivered notice a park owes, and the engine
 # guard a park goes through. WPS201 and WPS202 are waived.
 #
+# orchestrator/git/snapshots/namespace.py is what a snapshot ref IS, and it
+# carries 8 members past the WPS202 ceiling of 7: the refusal, the builder and
+# the recognizer for the ref a remote holds, the same pair for the local copy
+# this host fetches, and the three field checks the builders refuse on. They
+# are one vocabulary -- the local name is the remote one with the repository
+# that owns it spliced in, and a recognizer that did not agree with its own
+# builder would let a ref be created that nothing could later reclaim. WPS202
+# is waived.
+#
+# orchestrator/git/snapshots/refs.py owns every operation over that namespace
+# and carries 8 members past the same ceiling: the outcome vocabulary, the
+# create-or-verify, the fetch-and-resolve, the delete and the remote half it
+# is composed of, the local name both the fetch and the child's instructions
+# are written from, the mirror a reclaimed remote leaves behind, and the local
+# resolution that proves what a fetch brought. Splitting them would put "what
+# a snapshot ref is worth" and "what was done to it" in two modules while the
+# lock and the exact-SHA proof run across both. WPS202 is waived.
+#
 # orchestrator/workflow/late_split/state.py is the whole round trip a late
 # generation makes through the pinned comment, and it carries 8 members past
 # the WPS202 ceiling of 7: the read, the write, the clear that defines what
@@ -746,6 +764,8 @@ per-file-ignores =
     orchestrator/workflow/__init__.py:WPS412,WPS410
     orchestrator/observability/usage/__init__.py:WPS412,WPS410
     orchestrator/observability/analytics/recording/__init__.py:WPS412,WPS410
+    orchestrator/git/snapshots/namespace.py:WPS202
+    orchestrator/git/snapshots/refs.py:WPS202
     orchestrator/workflow/state.py:WPS202
     orchestrator/workflow/late_split/models.py:WPS214
     orchestrator/workflow/late_split/state.py:WPS202

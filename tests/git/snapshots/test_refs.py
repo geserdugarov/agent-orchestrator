@@ -112,7 +112,6 @@ class SnapshotProofTest(unittest.TestCase):
             outcome = _prove(remote)
 
             self.assertEqual(outcome, refs.SnapshotOutcome.PROVEN)
-            self.assertEqual(refs._local_ref_sha(remote.clone, REF), remote.sha)
 
     def test_a_ref_the_remote_lacks_is_refused(self) -> None:
         with real_remote() as remote:

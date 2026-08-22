@@ -70,6 +70,7 @@ from typing import Optional
 
 from github.Issue import Issue
 
+from orchestrator.git.snapshots import refs as _snapshot_refs
 from orchestrator.workflow.engine import usage as _usage
 from orchestrator.workflow.late_split import formats as _formats
 from orchestrator.workflow.late_split import identity as _identity
@@ -129,7 +130,8 @@ own the slice above. The commit is preserved on an immutable snapshot ref --
 its branch is superseded and its pull request is closed, so the snapshot is the
 only place to read it from.
 
-- ancestor snapshot ref: `{ref}`
+- ancestor snapshot ref, on the remote: `{ref}`
+- the same snapshot, once fetched here: `{mirror}`
 - exact snapshot commit: `{sha}`
 - the base it was cut against: `{base_sha}`
 - target base branch: `{base_branch}`
@@ -139,7 +141,7 @@ only place to read it from.
 Read it, from this repository:
 
 ```sh
-git fetch {remote} '+{ref}:{ref}'          # only if the ref is not here yet
+git fetch {remote} '+{ref}:{mirror}'       # only if the ref is not here yet
 git log --oneline {base_sha}..{sha}
 git diff {base_sha}...{sha}                # three dots: what it ADDS
 ```
@@ -148,7 +150,7 @@ Reuse only what your scope covers, and do it one of two ways:
 
 - **cherry-pick a coherent commit** -- `git cherry-pick <commit>` -- when a
   whole commit belongs to your slice; or
-- **copy selected paths** -- `git checkout {ref} -- <path>` -- when it does
+- **copy selected paths** -- `git checkout {mirror} -- <path>` -- when it does
   not, and then finish the slice by hand.
 
 Do **not** split hunks mechanically to make the change smaller. File and hunk
@@ -367,9 +369,28 @@ def _seed_child_state(
     child_issue: Issue,
     child: dict,
 ) -> None:
-    """Add the parent link, the stamp, and the ancestry to a child's state."""
+    """Add the parent link, the stamp, and the ancestry to a child's state.
+
+    The park an unattributed child took goes with the link that attributes it,
+    exactly as the initial mode's orphan repair does. A child created into a
+    crash is on GitHub with no parent recorded, and the poll order is the
+    repository's rather than this transaction's -- GitHub sorts by most
+    recently updated, so the child it just created can be dispatched before
+    the write that records it -- and a `blocked` issue nobody claims is parked
+    for a human. Leaving that park standing would hand the child an
+    `awaiting_human` it never earned: the parent activates it, the implementing
+    stage reads the flag, and it waits for a reply nobody owes it.
+
+    Cleared only where this write is the one that first attributes the child.
+    A child that already records a parent has been attributed, so any park on
+    it is its own -- something it hit while running -- and not this
+    transaction's to take back.
+    """
     child_state = context.gh.read_pinned_state(child_issue)
-    child_state.set(_state._PARENT_NUMBER, context.issue.number)
+    if not child_state.get(_state._PARENT_NUMBER):
+        child_state.set(_state._PARENT_NUMBER, context.issue.number)
+        child_state.set(_state._AWAITING_HUMAN, False)
+        child_state.set(_state._PARK_REASON, None)
     if child_state.get(_state._CREATED_AT) is None:
         child_state.set(_state._CREATED_AT, _usage._now_iso())
     _lineage.write_late_ancestry(
@@ -429,6 +450,9 @@ def _child_body(
         _REUSE_BLOCK.format(
             parent=generation.current_issue,
             ref=snapshot_ref,
+            mirror=_snapshot_refs.local_snapshot_ref(
+                context.spec, snapshot_ref,
+            ),
             sha=generation.candidate_sha,
             base_sha=generation.base_sha,
             base_branch=context.spec.base_branch,

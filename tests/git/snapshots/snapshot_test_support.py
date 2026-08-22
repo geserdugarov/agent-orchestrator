@@ -36,6 +36,10 @@ BASE_BRANCH = "main"
 
 SLUG = "owner/repo"
 
+# The second repository a shared `target_root` carries. A different slug is
+# what keeps its snapshots off the first one's local refs.
+OTHER_SLUG = "owner/private"
+
 # A remote path nothing was ever cloned from: what an unreachable remote looks
 # like to `ls-remote`, which is the read every snapshot decision starts with.
 UNREACHABLE = "unreachable.git"
@@ -68,6 +72,10 @@ class RealRemote:
         """Put a ref on the remote without going through the transport."""
         _git("push", str(self.remote), f"{sha}:{ref}", cwd=self.clone)
 
+    def drop_remote_ref(self, ref: str) -> None:
+        """Take a ref off the remote without going through the transport."""
+        _git("push", str(self.remote), f":{ref}", cwd=self.clone)
+
 
 def _git(*args: str, cwd: Path) -> subprocess.CompletedProcess:
     """Run one plain git command, raising with its stderr when it fails."""
@@ -83,20 +91,36 @@ def _git(*args: str, cwd: Path) -> subprocess.CompletedProcess:
 class _LocalAuthSession:
     """The askpass session, pointed at a path instead of at GitHub.
 
-    A class rather than a closure so the URL it is built for is visible where
-    the session is: every authenticated call in one test run goes through this
-    one object, and what it replaces is the ONLY part of the envelope these
-    tests do not exercise for real.
+    Resolved per SLUG rather than bound to one URL, because a shared
+    `target_root` carries two repositories and each has its own remote: a
+    session that answered with whichever URL was installed last would have
+    both of them pushing to one. What it replaces is the ONLY part of the
+    envelope these tests do not exercise for real.
     """
 
-    def __init__(self, auth_url: str) -> None:
-        self._auth_url = auth_url
+    def __init__(self) -> None:
+        self._urls: dict[str, str] = {}
 
     @contextlib.contextmanager
-    def __call__(self, _spec, token, **_options):
+    def __call__(self, spec, token, **_options):
         yield authentication._GitAuthSession(
-            token=token, auth_url=self._auth_url, env=self._env(),
+            token=token, auth_url=self._urls[spec.slug], env=self._env(),
         )
+
+    @contextlib.contextmanager
+    def registered(self, slug: str, auth_url: str):
+        """Point this repository's authenticated calls at a path."""
+        self._urls[slug] = auth_url
+        try:
+            with patch.object(
+                config, "_resolve_github_token", return_value="token",
+            ):
+                with patch.object(
+                    authentication, "_git_auth_session", self,
+                ):
+                    yield
+        finally:
+            self._urls.pop(slug, None)
 
     def _env(self) -> dict[str, str]:
         """The environment a token-bearing command runs under, token aside."""
@@ -113,46 +137,56 @@ class _LocalAuthSession:
         }
 
 
-@contextlib.contextmanager
-def _local_auth_session(auth_url: str):
-    """Point every authenticated call at a path instead of at GitHub."""
-    with patch.object(config, "_resolve_github_token", return_value="token"):
-        with patch.object(
-            authentication, "_git_auth_session", _LocalAuthSession(auth_url),
-        ):
-            yield
+# One session object for the whole suite, so a nested `real_remote` adds its
+# repository to the same registry rather than replacing the one outside it.
+_SESSIONS = _LocalAuthSession()
 
 
 @contextlib.contextmanager
-def real_remote(*, reachable: bool = True):
-    """Yield a bare remote, a clone carrying two commits, and its spec."""
+def real_remote(*, reachable: bool = True, clone: Path = None):
+    """Yield a bare remote, a clone carrying two commits, and its spec.
+
+    `clone` shares an existing checkout's `target_root`, which is the shape a
+    single local clone with a public and a private remote produces -- and the
+    one where two repositories' snapshots meet in one ref store.
+    """
     with tempfile.TemporaryDirectory(prefix="orch-snapshot-test-") as scratch:
-        prepared = _prepared_pair(Path(scratch))
+        prepared = _prepared_pair(Path(scratch), clone)
         reached = prepared.remote if reachable else Path(scratch) / UNREACHABLE
-        with _local_auth_session(str(reached)):
+        with _SESSIONS.registered(prepared.spec.slug, str(reached)):
             yield prepared
 
 
-def _prepared_pair(root: Path) -> RealRemote:
+def _prepared_pair(root: Path, shared: Path = None) -> RealRemote:
     """Build the bare repository and the clone that has pushed to it."""
     remote = root / "remote.git"
-    clone = root / "clone"
-    clone.mkdir()
     _git("init", "--bare", QUIET, str(remote), cwd=root)
-    _git("init", QUIET, "-b", BASE_BRANCH, str(clone), cwd=root)
-    _git("config", "user.email", "t@example.invalid", cwd=clone)
-    _git("config", "user.name", "t", cwd=clone)
-    first, second = _commit(clone, "first"), _commit(clone, "second")
+    clone = shared or _fresh_clone(root)
+    first, second = _commit(clone, f"first in {root.name}"), _commit(
+        clone, f"second in {root.name}",
+    )
     _git("push", QUIET, str(remote), f"HEAD:refs/heads/{BASE_BRANCH}", cwd=clone)
     return RealRemote(
         spec=config.RepoSpec(
-            slug=SLUG, target_root=clone, base_branch=BASE_BRANCH,
+            slug=SLUG if shared is None else OTHER_SLUG,
+            target_root=clone,
+            base_branch=BASE_BRANCH,
         ),
         clone=clone,
         remote=remote,
         sha=first,
         other_sha=second,
     )
+
+
+def _fresh_clone(root: Path) -> Path:
+    """Initialize the working clone this pair's commits are made in."""
+    clone = root / "clone"
+    clone.mkdir()
+    _git("init", QUIET, "-b", BASE_BRANCH, str(clone), cwd=root)
+    _git("config", "user.email", "t@example.invalid", cwd=clone)
+    _git("config", "user.name", "t", cwd=clone)
+    return clone
 
 
 def _commit(clone: Path, written: str) -> str:

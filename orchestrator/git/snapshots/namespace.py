@@ -23,6 +23,20 @@ numbers, the pattern that accepts them is exact, and a name that does not match
 it is refused rather than pushed. That refusal is not decoration -- the
 identity a ref is assembled from is read back out of a pinned comment a human
 can edit, so "the fields were numbers" is a claim to check rather than assume.
+
+The LOCAL name a fetched snapshot lands under is a second namespace, and it
+carries one thing the remote one does not: which repository the snapshot came
+from. A remote ref is unique inside the repository that holds it, so three
+numbers are enough there -- but several `REPOS` entries may share one
+`target_root` (a single clone with a public and a private remote is the shape
+the branch namespacing already exists for), and their object stores and ref
+stores are the same store. Two of them adjudicating the same issue number
+under the same cycle would otherwise fetch onto ONE local ref: the second
+force-fetch would overwrite the first, a verification would fail against a
+candidate it never saw, and the `git checkout <ref> -- <path>` a child is told
+to run would copy files out of the other repository's candidate. So the local
+name is qualified by a caller-supplied, ref-safe segment naming the
+repository, and this owner refuses to build one without it.
 """
 from __future__ import annotations
 
@@ -45,9 +59,25 @@ _SNAPSHOT_REF_RE = re.compile(
     r"/gen-(?:0|[1-9][0-9]*)\Z",
 )
 
-# How long a snapshot ref may be. Well past what three real identities produce
-# and far short of any path limit, so a number nobody wrote cannot become a ref
-# nobody can delete.
+# Where a fetched snapshot lands in the clone the worktrees share. A separate
+# root from the remote namespace, because these are this host's copies rather
+# than what any remote holds, and because a reclamation has to be able to say
+# which of the two it is deleting.
+LOCAL_SNAPSHOT_NAMESPACE = "refs/orchestrator/late-split-local"
+
+# The one shape a local snapshot ref may take: the repository it came from,
+# then the remote ref's own three numbers.
+_LOCAL_SNAPSHOT_REF_RE = re.compile(
+    r"\Arefs/orchestrator/late-split-local"
+    r"/(?:[A-Za-z0-9][A-Za-z0-9._-]*)"
+    r"/issue-(?:[1-9][0-9]*)"
+    r"/cycle-(?:[1-9][0-9]*)"
+    r"/gen-(?:0|[1-9][0-9]*)\Z",
+)
+
+# How long a snapshot ref may be. Well past what three real identities and a
+# repository segment produce and far short of any path limit, so a number
+# nobody wrote cannot become a ref nobody can delete.
 MAX_SNAPSHOT_REF = 200
 
 
@@ -76,6 +106,42 @@ def snapshot_ref(*, issue_number: int, cycle_id: int, generation: int) -> str:
     if not is_snapshot_ref(built):
         raise InvalidSnapshotRef("the assembled ref is not in the namespace")
     return built
+
+
+def local_snapshot_ref(*, ref: str, repository: str) -> str:
+    """Return the local ref one repository's fetched snapshot lands under.
+
+    `repository` is a ref-safe segment naming which repository the snapshot
+    came from, supplied by the caller because sanitizing a slug into one is
+    the branch namespace's own contract and there is no second implementation
+    of it. It is what keeps two `REPOS` entries sharing a `target_root` off
+    one another's local refs.
+
+    Raises rather than returning a best effort, for the reason the remote
+    builder does: the value is what a fetch writes and a reclamation deletes,
+    so a segment that is not one this domain may hold must not become a ref it
+    then cannot recognize.
+    """
+    if not is_snapshot_ref(ref):
+        raise InvalidSnapshotRef("not a snapshot ref")
+    built = ref.replace(
+        SNAPSHOT_NAMESPACE, f"{LOCAL_SNAPSHOT_NAMESPACE}/{repository}", 1,
+    )
+    if not is_local_snapshot_ref(built):
+        raise InvalidSnapshotRef("the repository segment is not usable")
+    return built
+
+
+def is_local_snapshot_ref(ref: object) -> bool:
+    """Whether a value is a local snapshot ref this domain wrote.
+
+    Asked before a local ref is resolved or deleted, for the reason the remote
+    check is asked: the value is assembled from a segment a caller supplied
+    and is spent on a read and a destructive update.
+    """
+    if not isinstance(ref, str) or len(ref) > MAX_SNAPSHOT_REF:
+        return False
+    return _LOCAL_SNAPSHOT_REF_RE.match(ref) is not None
 
 
 def is_snapshot_ref(ref: object) -> bool:

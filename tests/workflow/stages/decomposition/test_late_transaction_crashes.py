@@ -1,10 +1,10 @@
 # Copyright 2026 Geser Dugarov
 # SPDX-License-Identifier: Apache-2.0
-"""What a split leaves behind when it dies over its snapshot or its children.
+"""What a split leaves behind when it dies over its snapshot or its links.
 
-The front half of the transaction: the ref every child is cut from, the
-children themselves, and the sentence the parent owes. The back half -- the
-supersession, the handoff, and the branch -- is the module beside this one.
+The ref every child is cut from, and the sentence the parent owes once they
+exist. The children between them are the module beside this one, and the back
+half -- the supersession, the handoff, and the branch -- is a third.
 
 Each case kills the process at one seam and then runs the transaction again
 from what the pinned comment holds -- which is exactly what the next eligible
@@ -19,9 +19,6 @@ import unittest
 
 from orchestrator.git.snapshots import refs as _snapshot_refs
 from orchestrator.git.snapshots.refs import SnapshotOutcome
-from orchestrator.workflow.stages.decomposition import (
-    late_children as _late_children,
-)
 from orchestrator.workflow.stages.decomposition.late_models import (
     _LateDisposition,
 )
@@ -35,17 +32,12 @@ from tests.workflow.stages.decomposition.late_seam_support import (
     SnapshotSeed,
 )
 from tests.workflow.stages.decomposition.late_transaction_support import (
-    CHILDREN,
     FORWARD_LINK_MARKER,
     SNAPSHOT_REF,
 )
 from tests.workflow.stages.decomposition.late_transaction_support import (
-    KEY_CHILDREN,
-    KEY_CONSUMERS,
     KEY_DECOMPOSED_AT,
-    KEY_EXPECTED_CHILDREN,
     KEY_LINKS_ANNOUNCED,
-    KEY_UMBRELLA,
 )
 from tests.workflow.stages.decomposition.late_transaction_support import (
     LateSplitCase,
@@ -118,72 +110,6 @@ class SnapshotBoundaryTest(LateSplitCase, unittest.TestCase):
         self.assertEqual(
             len(self._events_named(EVENT_LATE_SNAPSHOT)), 1,
         )
-
-
-class ChildBoundaryTest(LateSplitCase, unittest.TestCase):
-    """A child is recorded before anything else is done with it."""
-
-    def test_a_death_pre_child_leaves_the_count(self) -> None:
-        # What tells a partial split from a finished one, and what says the
-        # parent has no implementation of its own to return to.
-        with self.assertRaises(KeyboardInterrupt):
-            self._transact(
-                killed=killed_before(self.github, "create_child_issue"),
-            )
-
-        pinned = self._pinned()
-        self.assertEqual(pinned[KEY_EXPECTED_CHILDREN], len(CHILDREN))
-        self.assertTrue(pinned[KEY_UMBRELLA])
-        self.assertIsNone(pinned.get(KEY_CHILDREN))
-
-    def test_a_death_mid_create_is_visible(self) -> None:
-        # The one window the ordering accepts rather than closes: the create
-        # returned and the parent never learned of it. The operator sees a
-        # count the recorded children do not reach; nothing here silently
-        # adopts an issue the parent cannot name.
-        with self.assertRaises(KeyboardInterrupt):
-            self._transact(
-                killed=killed_after(self.github, "create_child_issue"),
-            )
-
-        self.assertEqual(len(self.github.created_child_issues), 1)
-        self.assertIsNone(self._pinned().get(KEY_CHILDREN))
-        self.assertEqual(
-            self._pinned()[KEY_EXPECTED_CHILDREN], len(CHILDREN),
-        )
-
-    def test_a_death_between_children_resumes(self) -> None:
-        # The first slice is created, recorded, and seeded; the second has not
-        # been touched. The resume adopts the first and opens only the second.
-        with self.assertRaises(KeyboardInterrupt):
-            self._transact(killed=killed_after(_late_children, "_seeded"))
-        first = list(self._pinned()[KEY_CHILDREN])
-        self.assertEqual(len(first), 1)
-
-        resumed = self._resume()
-
-        self.assertEqual(resumed.disposition, _LateDisposition.SETTLED)
-        self.assertEqual(len(self.github.created_child_issues), len(CHILDREN))
-        self.assertEqual(self._pinned()[KEY_CHILDREN][:1], first)
-
-    def test_a_death_after_the_record_adopts(self) -> None:
-        # Recorded first, so the retry reuses the child rather than opening a
-        # second issue for the same slice -- and re-seeds it, since the seed
-        # is the step that can have been lost.
-        with self.assertRaises(KeyboardInterrupt):
-            self._transact(killed=killed_after(_late_children, "_recorded"))
-
-        recorded = list(self._pinned()[KEY_CHILDREN])
-        self.assertEqual(self._pinned()[KEY_CONSUMERS], recorded)
-
-        resumed = self._resume()
-
-        self.assertEqual(resumed.disposition, _LateDisposition.SETTLED)
-        self.assertEqual(
-            [child.number for child in self.github.created_child_issues],
-            self._pinned()[KEY_CHILDREN],
-        )
-        self.assertEqual(len(self._pinned()[KEY_CHILDREN]), len(CHILDREN))
 
 
 class AnnouncementBoundaryTest(LateSplitCase, unittest.TestCase):

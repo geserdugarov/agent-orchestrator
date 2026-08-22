@@ -108,7 +108,9 @@ The late size gate preserves a superseded candidate under
   namespace and this issue's own number before any delete, so a hand-edited entry naming an unprotected default
   branch deletes nothing and holds the umbrella open instead.
 
-The refs hold objects, so they hold *content*: a snapshot is a copy of a candidate that was never published. It lives
+The refs hold objects, so they hold *content*: a snapshot is a copy of a candidate that was never published. This
+host keeps its own copy under `refs/orchestrator/late-split-local/<repository>/…`, qualified so that two configured
+repositories sharing one clone cannot read each other's, and it is dropped when the remote ref is. It lives
 in the same repository under the same visibility as the branch it came from, and it is deleted at the umbrella's own
 terminal once every recorded direct consumer is terminal — a ref whose delete the remote refuses holds that terminal
 open rather than being silently abandoned. It is not a place to put anything the repository itself may not hold.

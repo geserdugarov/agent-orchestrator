@@ -155,10 +155,13 @@ orchestrator/
                         measurement composing the three steps
     snapshots/          the immutable remote copy a superseded candidate is preserved as
       namespace.py      the one `refs/orchestrator/late-split/...` namespace a snapshot may occupy, built from a
-                        generation's own identity and refused for anything else
+                        generation's own identity and refused for anything else, plus the
+                        `refs/orchestrator/late-split-local/<repository>/...` name this host's copy of one lands
+                        under -- qualified because several configured repositories may share a clone
       refs.py           create-or-verify against the exact commit with no overwrite, the fetch-and-resolve that
-                        proves a child could obtain it, and the absent-is-success delete -- leased at the preserved
-                        commit, so a re-pointed ref is refused rather than reclaimed
+                        proves a child could obtain it (one locked step, onto this repository's own local name),
+                        and the absent-is-success delete -- leased at the preserved commit, so a re-pointed ref is
+                        refused rather than reclaimed, and taking this host's copy down with the remote one
     verification/       what a verify run is, and the reads a checkout is judged by
       models.py         the `VerifyResult` statuses and fields, and the output budget
       output.py         the redact-then-truncate pass over captured verify output

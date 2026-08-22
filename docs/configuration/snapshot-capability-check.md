@@ -50,33 +50,56 @@ envelope, so a hook or a url rewrite on the operator's machine cannot make the c
 fail.
 
 ```sh
+set -eu   # the SETUP below must fail closed: a step that does not run cannot
+          # be allowed to leave a later one certifying something it never tested
+
 printf '#!/bin/sh\nprintf %%s "$GIT_TOKEN"\n' > /tmp/askpass.sh && chmod 700 /tmp/askpass.sh
 export GIT_ASKPASS=/tmp/askpass.sh GIT_TERMINAL_PROMPT=0
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYSTEM=1
 git() { command git -c core.hooksPath=/dev/null -c credential.helper= -c core.fsmonitor= "$@"; }
+export MIRROR="refs/orchestrator/late-split-local/capability-check/issue-1/cycle-1/gen-0"
 
+# SETUP: two commits that are certainly distinct. Step 3 pushes the second one
+# over the first and requires a refusal, so a repository with one commit -- or
+# a `HEAD~1` that does not resolve -- would leave SECOND empty, turn that push
+# into a deletion refspec, and read its failure as overwrite protection.
+date > capability-check.txt && git add capability-check.txt
+git commit -qm "capability check: first"
 FIRST=$(git rev-parse HEAD)
-SECOND=$(git rev-parse HEAD~1)
+date >> capability-check.txt && git add capability-check.txt
+git commit -qm "capability check: second"
+SECOND=$(git rev-parse HEAD)
+test -n "$FIRST" && test -n "$SECOND" && test "$FIRST" != "$SECOND"
+
+set +e    # past setup, each check reports for itself rather than aborting
 
 # 1. create, leased as absent
 git push --force-with-lease="$REF": "$AUTH_URL" "$FIRST:$REF"          || echo "FAIL: create"
 
 # 2. fetch it back and resolve it here
-git fetch --quiet "$AUTH_URL" "+$REF:$REF"                              || echo "FAIL: fetch"
-test "$(git rev-parse --verify "$REF^{commit}")" = "$FIRST"             || echo "FAIL: verify"
+git fetch --quiet "$AUTH_URL" "+$REF:$MIRROR"                           || echo "FAIL: fetch"
+test "$(git rev-parse --verify "$MIRROR^{commit}")" = "$FIRST"          || echo "FAIL: verify"
 
 # 3. a different commit under the same ref must be refused
 git push --force-with-lease="$REF": "$AUTH_URL" "$SECOND:$REF" \
   && echo "FAIL: an occupied ref was overwritten"
+test "$(git ls-remote "$AUTH_URL" "$REF" | cut -f1)" = "$FIRST"         || echo "FAIL: the ref moved"
 
 # 4. delete, then delete again -- the second must succeed
 git push --force-with-lease="$REF:$FIRST" "$AUTH_URL" ":$REF"           || echo "FAIL: delete"
 test -z "$(git ls-remote "$AUTH_URL" "$REF")"                           || echo "FAIL: still present"
+git update-ref -d "$MIRROR"                                             || echo "FAIL: local drop"
 ```
 
-Every step must print nothing. The third step is inverted on purpose: it is expected to *fail*, and the check fails
-if it succeeds. Step 4's "delete again" is the `ls-remote` on the last line — the orchestrator's own deletion reads
-the ref first and reports an absent one as already reclaimed, so an empty listing is exactly the success it needs.
+Every step must print nothing. The setup runs under `set -eu` and stops on the first failure, because a step that
+silently did not happen is what lets a later one certify behavior it never exercised — the original hazard being an
+empty `SECOND`, which turns step 3's push into a delete refspec whose refusal reads exactly like overwrite
+protection. The line after step 3 closes that door from the other side: it is not enough that the push failed, the
+ref has to still be at the commit it was created with. The third step is inverted on purpose — it is expected to
+*fail*, and the check fails if it succeeds. Step 4's "delete again" is the `ls-remote` on the following line: the
+orchestrator's own deletion reads the ref first and reports an absent one as already reclaimed, so an empty listing
+is exactly the success it needs, and the `update-ref -d` after it is the local copy the orchestrator drops with the
+remote one.
 
 ## Reading a failure
 
