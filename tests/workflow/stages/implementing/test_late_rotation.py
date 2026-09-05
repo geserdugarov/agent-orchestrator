@@ -79,9 +79,11 @@ PARK_DAMAGED = "late_measurement_failed"
 # reading this build does not know, a permission short of a member, and a
 # phase the settlement never reached. Each is what the reader that makes the
 # record answers None to, and none of them is an absence.
+UNKNOWN_READING = "not-a-reading"
+
 _STRANDED_PROOFS = MappingProxyType({
     "a reading this build does not know": {
-        KEY_TRANSFER_PROOF: "not-a-reading",
+        KEY_TRANSFER_PROOF: UNKNOWN_READING,
     },
     "a permission short of a member": {_rewrites.LATE_REWRITE_LEASE: None},
     "a phase the settlement never reached": {
@@ -361,6 +363,31 @@ class UnreportedTransferTest(_SettlementCase):
                 # repair is exactly what the crash left.
                 self.assertIn(KEY_TRANSFER_PROOF, durable.data)
                 self.assertEqual(self._records_of(EVENT_TRANSFER), [])
+
+    def test_a_stranded_proof_parks_the_adjudication(self) -> None:
+        # The adjudication is asked two of the claims rather than four,
+        # because it is mid-way through the reading and the approval and has
+        # failed to produce neither. The note is not one of those: nothing
+        # writes one it cannot read back, and the statement that settles a
+        # transfer puts the note and the phase down together -- so there is
+        # no settlement in flight for a refusal to hold up, only a comment
+        # something took apart, which the mode below would decide over while
+        # the account stayed unreported for the life of the issue.
+        settled = self._settles_without_reporting(
+            _rewrites.LateRewriteKind.SQUASH, _support.SOURCE_STAGE,
+        )
+        self._restores(settled, {KEY_TRANSFER_PROOF: UNKNOWN_READING})
+
+        self.assertTrue(self._reconciles(WorkflowLabel.DECOMPOSING))
+
+        durable = self._durable()
+        self.assertEqual(
+            _claims._unreadable_record(WorkflowLabel.DECOMPOSING, durable),
+            _claims._DAMAGED_TRANSFER,
+        )
+        self.assertEqual(durable.get(KEY_PARK_REASON), PARK_DAMAGED)
+        self.assertIn(KEY_TRANSFER_PROOF, durable.data)
+        self.assertEqual(self._records_of(EVENT_TRANSFER), [])
 
     def _restores(self, settled: dict, damage: dict) -> None:
         """Put the receipted comment back, with one field of the note edited."""

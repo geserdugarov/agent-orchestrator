@@ -341,9 +341,19 @@ and the recovery deferred to a later tick. Reached then, this owner would pay th
 publishing the replay and settling it — while the finish that clears the anchor, resets `review_round`, and routes
 the reviewer at the rewritten head never happens, and the stage would run over a branch the refresh rewrote with
 the round the reviewer spent before the rewrite. So an anchor still on the comment stops the tick outright: nothing
-is published, nothing is written, and nothing is parked for a read that will answer on the next one. It is the
-fail-closed half of the same rule — the interrupted rebase owns what it recorded until its own recovery finishes it
-or parks.
+is published, nothing is written, and nothing is parked for a read that will answer on the next one. That holds
+whether or not there is anything else to see — the windows leaving no debt and no count are the same refusal with
+less on the comment, and answering "nothing owed" there lets the handler run behind the same unfinished recovery.
+It is the fail-closed half of the same rule — the interrupted rebase owns what it recorded until its own recovery
+finishes it or parks.
+
+Unless the refresh is standing down for the very record the reconciliation is holding, and there deferring is a
+DEADLOCK rather than a courtesy. The freeze above sets one thing aside for this anchor and one only, the approval
+leased to it; every other record it reads holds the branch still. So a pair the gate froze and never counted stops
+the refresh on every tick — and a reconciliation waiting for that recovery waits for a tick that cannot come, while
+the same stalemate repeats. The question is therefore asked of the freeze itself rather than re-derived: a comment
+carrying nothing that holds the branch is one the recovery can reach and the reconciliation defers to it, and a
+comment that holds the branch is the reconciliation's own to answer.
 
 A pull request that is no longer OPEN ends the pairing the other way. Nothing can be pushed onto a merged or closed
 one, so the debt is unpayable and the permission beside it is a claim about a push that will never happen — and
@@ -1857,9 +1867,11 @@ rather than preserving.
   group a reader is held to WHOLE because the transfer is settled whether or not it has been reported, and a record
   short of this member is not one to refuse. It is read by PRESENCE all the same: the key standing over a proof this
   build does not know, a phase the settlement never reached, or an authorization it cannot read whole is a comment
-  saying two things at once, and every road that asks parks rather than reading it as nothing owed. A fresh grant
-  drops it with the transfer it described, since the phase going back to `authorized` is what would leave it
-  unreadable beside the new one.
+  saying two things at once, and every road that asks parks rather than reading it as nothing owed —
+  `workflow:decomposing` included, since nothing writes a note it cannot read back and the statement that settles a
+  transfer puts the note and the phase down together, so there is no settlement in flight for that refusal to hold
+  up. A fresh grant drops it with the transfer it described, since the phase going back to `authorized` is what
+  would leave it unreadable beside the new one.
 
   Every rewrite this workflow settles goes through the same push tail, so every one of them has the window this note
   exists for — the squash a reviewer's approval earns, the replay `workflow:resolving_conflict` publishes, and the
@@ -1875,8 +1887,9 @@ rather than preserving.
   past it, the account would never be made, and the corrupt note would stand for the life of the issue while the
   stage ran behind a verdict nothing here can account for. So `late_claims` asks the transfer's own reader among
   the claims a record can make and fail to produce, on the same five publishing stages the other four are asked on,
-  and the refusal takes the once-only park those share. `workflow:decomposing` is not asked it, for the reason it is
-  asked no claim but the publication: a settlement in flight is exactly what that mode may be in the middle of.
+  and the refusal takes the once-only park those share. `workflow:decomposing` is asked it beside the publication
+  group — the two records that mode did not write and cannot repair — while the reading and the approval are not,
+  since it is mid-way through deciding both and has failed to produce neither.
 
   Being unreadable is not being absent, and the difference is what a WRITER asks. A grant replaces the whole group
   rather than adding beside it, so a group that CLAIMS the commit currently exempt and cannot be read back is

@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import itertools
 import unittest
+from types import MappingProxyType
 from unittest.mock import MagicMock, patch
 
 from orchestrator import config
@@ -160,6 +161,14 @@ GET_PR = "get_pr"
 UNREADABLE_PR = "the pull request could not be read"
 PUSH_BRANCH = "_push_branch"
 SPENT_ROUNDS = 3
+
+# The two windows an interrupted attempt leaves with no debt and no count on
+# the comment: one before anything was measured, and one past the receipt
+# whose settlement cleared the debt it had. Both leave the anchor.
+_NO_DEBT_SEAMS = MappingProxyType({
+    "before the transfer was granted": "_crashes_before_the_grant",
+    "past the receipt that settled it": "_crashes_before_the_route",
+})
 
 # The method and the stage the tick that really published recorded itself
 # under, which is the one record a resumed finish may not add to.
@@ -1428,6 +1437,30 @@ class DeferredRecoveryTest(_ResumedRebaseCase, unittest.TestCase):
         self.assertEqual(self._events_of(EVENT_BASE_REBASED), [])
         self.assertEqual(self._pinned()[KEY_REVIEW_ROUND], SPENT_ROUNDS)
         self.assertNotIn(KEY_PARK_REASON, self._pinned())
+
+    def test_a_no_debt_seam_holds_the_tick_too(self) -> None:
+        # The two windows that leave the anchor and nothing this owner reads:
+        # a tick that died before the transfer was granted, so nothing was
+        # measured and no debt was recorded, and one that died past the
+        # receipt, whose settlement cleared the debt it had. Answered as
+        # "this issue owes the reconciliation nothing", both let the stage
+        # run behind a recovery no tick has finished.
+        for described, crashes in _NO_DEBT_SEAMS.items():
+            with self.subTest(seam=described):
+                self.setUp()
+                getattr(self, crashes)()
+                with self._unreadable():
+                    self._resumes()
+
+                pushed, held = self._reconciles()
+
+                self.assertTrue(held)
+                pushed.assert_not_called()
+                self._assert_anchor(BEFORE_SHA)
+                pinned = self._pinned()
+                self.assertIsNone(pinned.get(KEY_APPROVED_SHA))
+                self.assertEqual(pinned[KEY_REVIEW_ROUND], SPENT_ROUNDS)
+                self.assertNotIn(KEY_PARK_REASON, pinned)
 
     def _unreadable(self):
         """A pull-request read no request on this tick can take."""

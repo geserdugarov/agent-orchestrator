@@ -216,26 +216,34 @@ def _unreadable_record(
     reconciliation walks past it, the account is never made, and the corrupt
     note stands for the life of the issue while the stage runs behind it.
 
-    `workflow:decomposing` is the adjudication's, and it is asked the
-    publication question ALONE -- the transfer note included, since a
-    settlement in flight is exactly what that mode may be in the middle of
-    and a refusal there would hold the tick that finishes it. The group is
-    the one piece of evidence that
+    `workflow:decomposing` is the adjudication's, and it is asked TWO of
+    them. The publication group is the one piece of evidence that
     mode cannot re-derive and the one it decides everything by: a settlement
     reads it to know which pull request the verdict was taken over, which
     head to pin the push it licenses to, and which stage to hand the issue
     back to -- so a marker a hand edit took reads as a candidate nothing had
     published, and the accepted commit is routed to `workflow:implementing`
-    with the frozen evidence retired behind it. The other three are not asked
-    there, and the approval is the reason: a verdict taken before anything
-    was published approves its commit with no head to pin it against, which
-    is exactly the half-written pair this owner calls damage everywhere else.
+    with the frozen evidence retired behind it. The transfer note is the
+    other, because a note that cannot produce the account it claims is damage
+    in any mode: nothing writes an unreadable one, the statement that settles
+    a transfer puts the note and the phase down together, and the grant that
+    replaces a transfer drops the note with it -- so there is no settlement
+    in flight for a refusal here to hold up, only a comment something took
+    apart, and letting the adjudication run over it leaves the account
+    unreported for the life of the issue.
+
+    The other two are not asked there, and the approval is the reason: a
+    verdict taken before anything was published approves its commit with no
+    head to pin it against, which is exactly the half-written pair this owner
+    calls damage everywhere else.
     """
     if label == WorkflowLabel.DECOMPOSING:
-        return _DAMAGED_PUBLICATION if _claims_a_publication(state) else ""
-    if not _workflow_state.publishes_onto_a_pull_request(label):
+        asked = _ADJUDICATION_CLAIMS
+    elif _workflow_state.publishes_onto_a_pull_request(label):
+        asked = _CLAIMS
+    else:
         return ""
-    for claims, refusal in _CLAIMS:
+    for claims, refusal in asked:
         if claims(state):
             return refusal
     return ""
@@ -376,6 +384,16 @@ _CLAIMS = (
     (_claims_a_publication, _DAMAGED_PUBLICATION),
     (_claims_an_approval, _DAMAGED_APPROVAL),
     (_claims_a_spend, _DAMAGED_SPENDS),
+    (_rewrites.stranded_transfer_proof, _DAMAGED_TRANSFER),
+)
+
+
+# The two the adjudication is asked instead. It is mid-way through deciding
+# the reading and the approval, so neither is a claim it has failed to
+# produce; the publication group and the transfer note are records it did not
+# write and cannot repair, and both are damage wherever they stand.
+_ADJUDICATION_CLAIMS = (
+    (_claims_a_publication, _DAMAGED_PUBLICATION),
     (_rewrites.stranded_transfer_proof, _DAMAGED_TRANSFER),
 )
 

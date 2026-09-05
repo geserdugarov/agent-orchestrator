@@ -24,7 +24,10 @@ import logging
 from github.Issue import Issue
 
 from orchestrator import config
-from orchestrator.git.base_sync import state as _base_sync_state
+from orchestrator.git.base_sync import (
+    frozen as _base_sync_frozen,
+    state as _base_sync_state,
+)
 from orchestrator.git.worktrees import paths as _worktree_paths
 from orchestrator.github.client import GitHubClient
 from orchestrator.github.pinned_state import PinnedState
@@ -193,25 +196,41 @@ def _reconciles_published_work(
         _worktree_paths._worktree_path(spec, issue.number),
     )
     _rotation._reports_a_settled_transfer(gate)
-    if not damage and not owed and not _claims._awaits_its_count(
-        recorded,
-    ):
-        if _parks._retire_settled_park(state, recorded):
-            log.info(
-                "issue=#%d carried a measurement park over a split that has "
-                "already become children; clearing it and letting the "
-                "label's own handler run",
-                issue.number,
-            )
-            gh.write_pinned_state(issue, state)
-        return False
     if damage:
         return _claims._parks_the_damage(gate, damage)
     if _defers_to_the_rebase_recovery(issue, state):
         return True
     if owed:
         return _debt._publishes_the_debt(gate, label)
-    return _answers_the_frozen_pair(gate, recorded, label)
+    if _claims._awaits_its_count(recorded):
+        return _answers_the_frozen_pair(gate, recorded, label)
+    return _retires_a_settled_park(gh, issue, state, recorded)
+
+
+def _retires_a_settled_park(
+    gh: GitHubClient,
+    issue: Issue,
+    state: PinnedState,
+    recorded: LateGeneration,
+) -> bool:
+    """Answer the ordinary issue, which owes this reconciliation nothing.
+
+    False every time, because nothing here stops a tick: what the pair before
+    it looks for is not on this comment, so the label's own handler runs. The
+    one write it may still make is the measurement park a split that has
+    already become children carried past its own settlement -- nothing about
+    that record is a human's to answer, and the branch it was freezing goes
+    back into the base refresh with it.
+    """
+    if _parks._retire_settled_park(state, recorded):
+        log.info(
+            "issue=#%d carried a measurement park over a split that has "
+            "already become children; clearing it and letting the "
+            "label's own handler run",
+            issue.number,
+        )
+        gh.write_pinned_state(issue, state)
+    return False
 
 
 def _defers_to_the_rebase_recovery(
@@ -221,18 +240,17 @@ def _defers_to_the_rebase_recovery(
 
     The base refresh pins its anchor before `git rebase` runs and drops it
     only when the attempt is finished, reset, or parked -- so an anchor still
-    on the comment at dispatch is an attempt no tick has resolved yet. What it
-    left beside it is exactly what this owner would otherwise act on: the gate
-    it entered froze a pair, and past the reading it recorded the rebased
-    commit as one still owed a push.
-
-    Acted on here, both are answered by the wrong owner. This road publishes
-    the commit and settles it as an ordinary debt -- and the recovery's own
-    finish, which is what clears the anchor, resets the reviewer's round, and
-    routes them at the rewritten head, never happens. The stage then runs over
-    a branch the refresh rewrote with the round it had spent before the
-    rewrite, so the reviewer is neither reset nor re-asked and the anchor is
-    left for a later tick to classify against a remote this one has moved.
+    on the comment at dispatch is an attempt no tick has resolved yet, and
+    every window it can have been lost in is one where the branch is not
+    where the pull request has it. Acted on here, whatever it left is
+    answered by the wrong owner: this road publishes and settles the replay
+    while the recovery's own finish -- which is what clears the anchor, resets
+    the reviewer's round, and routes them at the rewritten head -- never
+    happens. The stage then runs over a branch the refresh rewrote with the
+    round the reviewer spent before the rewrite. The windows that leave
+    NOTHING else on the comment are the same refusal with less to see: no
+    debt and no count means this owner has no answer to give, so returning
+    one lets the handler run behind the same unfinished recovery.
 
     So the tick stops instead, and nothing is written for it. The recovery
     reaches the same records on the refresh ahead of the next handler --
@@ -240,9 +258,28 @@ def _defers_to_the_rebase_recovery(
     could not be read -- and finishes them on its own terms or parks. Stopping
     is the fail-closed half of that: the stage may not run over a publication
     whose owner has not settled it yet.
+
+    Unless the refresh is standing down for the very record this owner is
+    holding, and that is not a courtesy either -- deferring there is a
+    deadlock. The freeze ahead of the refresh sets one thing aside for this
+    anchor and one only, the approval leased to it; every other record it
+    reads holds the branch still, so a generation the gate froze and never
+    counted stops the refresh on every tick while this owner waits for it. So
+    the question is asked of the freeze itself rather than re-derived: a
+    comment carrying nothing that holds the branch is one the recovery can
+    reach, and a comment that holds it is this owner's to answer.
     """
     anchor = state.get(_base_sync_state._PENDING_PUSH_SHA)
     if not anchor:
+        return False
+    frozen_by = _base_sync_frozen._held_records(state)
+    if frozen_by:
+        log.info(
+            "issue=#%d holds an auto rebase anchored at %s and a record that "
+            "freezes the refresh out of it (%s); answering it here rather "
+            "than waiting for a recovery that cannot run",
+            issue.number, str(anchor)[:8], ", ".join(frozen_by),
+        )
         return False
     log.info(
         "issue=#%d holds an auto rebase anchored at %s that no tick has "
