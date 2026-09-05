@@ -14,6 +14,7 @@ from tests.git.base_sync.refresh_test_support import (
     _CrashRecoveryVerificationFixture,
     _diverged,
     _git_result,
+    _pending_attempt,
     _RemoteHeadGit,
     _SyncWorktreeWithBaseFixture,
 )
@@ -131,7 +132,7 @@ class CrashRecoveryDivergenceUnitTest(
 ):
     def test_landed_push_behind_falls_through(self) -> None:
         self._seed_pr_issue(
-            pending_auto_base_rebase_push_sha=BEFORE_SHA,
+            **_pending_attempt(REBASED_SHA),
             review_round=3,
         )
         # The crashed tick's own push landed, so the pull request is already
@@ -222,7 +223,9 @@ class CrashRecoveryDivergenceUnitTest(
             "dirty": MagicMock(return_value=[]),
             REBASE_PATCH: MagicMock(return_value=(True, [])),
             "head_sha": MagicMock(
-                side_effect=[REBASED_SHA, REBASED_SHA, NEW_REBASED_SHA],
+                side_effect=[
+                    REBASED_SHA, REBASED_SHA, NEW_REBASED_SHA, NEW_REBASED_SHA,
+                ],
             ),
             "fetch": MagicMock(return_value=_git_result()),
             PUSH_PATCH: (

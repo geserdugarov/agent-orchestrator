@@ -174,6 +174,10 @@ class _Gate:
     # human ever saw. It is the caller's because everything in it is gone
     # from the checkout and the remote by the time this owner could ask.
     rewrite: _rewrites.LateRewrite | None = None
+    # Whether a rewrite permit is the ONLY thing that may let this candidate
+    # publish. Off for every ordinary caller, and on for the crash recovery,
+    # which reaches this gate holding a transfer it already knows about.
+    permit_only: bool = False
 
 
 @dataclass(frozen=True)
@@ -217,6 +221,23 @@ class _Entered:
     # ruled on it, and it is handed in rather than read because a rewrite
     # destroys its own before-state.
     rewrite: _rewrites.LateRewrite | None = None
+    # Whether the permit is the whole of what may license this publication.
+    #
+    # Off is the ordinary answer and the one every publishing seam gives: a
+    # permit that refuses leaves the candidate to the cumulative reading, and
+    # a count under the ceiling publishes the same commit on the count rather
+    # than on the exemption. That is right for a caller DECIDING whether to
+    # publish a rewrite it has just made.
+    #
+    # On is the recovery, and it is right there for the opposite reason. It
+    # holds a transfer it already knows about -- a permission the grant left,
+    # or evidence re-derived from the record -- and what it is finishing is a
+    # publication, not deciding one. Measured instead, a count under the
+    # ceiling would report the recovery as landed with the verdict still on
+    # the commit a human ruled on, and a count over it would route an
+    # adjudicated change into a second adjudication with the pull request
+    # already open over the work.
+    permit_only: bool = False
 
 
 # What a caller that established nothing hands in.
@@ -255,11 +276,25 @@ class _GateVerdict:
     still publish the same commit. Read off the record instead, that
     publication would rotate a human's verdict onto a rewrite this tick
     declined to vouch for.
+
+
+    `refused` is the third answer, and only a `permit_only` caller can get
+    it: the permit declined and nothing was measured in its place. It is a
+    hold like any other -- the caller publishes nothing -- except that the
+    gate has taken no park and made no route, so the caller owns what happens
+    next.
     """
 
     held: bool
     candidate_sha: str = ""
     permitted_sha: str = ""
+    refused: bool = False
+
+
+# What a permit-only caller gets when its permit declines: nothing measured,
+# nothing parked, nothing routed, and the answer handed back for the caller to
+# fail closed on.
+_REFUSED = _GateVerdict(held=True, refused=True)
 
 
 # What every held answer is, since a hold names no commit: there is nothing

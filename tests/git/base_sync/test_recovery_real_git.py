@@ -14,10 +14,19 @@ class RecoveryRealGitTest(RecoveryGitFixtureMixin, unittest.TestCase):
     """The comparison the routing runs on is the one git itself computed."""
 
     def test_unpushed_rebase_is_leased_onto_remote(self) -> None:
+        # A rebase replays the branch, so the commit the pull request still
+        # carries is on no local history: git counts this branch as behind its
+        # own publication as well as ahead of it. What says the push never
+        # went out is the remote standing EXACTLY on the anchor the rebase
+        # pinned before git ran, and the counts would say the opposite.
+        ahead, behind = self.divergence_from_remote()
+        self.assertGreater(behind, 0)
+        self.assertGreater(ahead, 0)
+
         recovered = self.recover()
 
-        # Ahead-only against the freshly fetched remote head, so the recovery
-        # reissues the push the crash interrupted rather than rebasing again.
+        # So the recovery reissues the push the crash interrupted rather than
+        # parking the branch as one somebody else moved.
         self.assertTrue(recovered)
         self.assertEqual(self.push.leases, [self.anchor])
         self.assertEqual(self._remote_head(), self.recovered)
@@ -35,6 +44,24 @@ class RecoveryRealGitTest(RecoveryGitFixtureMixin, unittest.TestCase):
         self.assertEqual(self.push.leases, [])
         self.assertEqual(self._remote_head(), self.recovered)
         self._assert_routed_to_validating("crash_recovery_relabel_only")
+
+    def test_an_unrecorded_divergence_is_not_pushed(self) -> None:
+        # The remote is exactly where the crash left it and the checkout is
+        # clean and diverged -- the shape a replay has, and the shape a
+        # worktree somebody rebuilt has too. Nothing on the comment says this
+        # commit is the attempt's own, so the lease the anchor would satisfy
+        # is never spent and the candidate stays on the pull request.
+        stranded = self.strand_an_unrelated_head()
+        ahead, behind = self.divergence_from_remote()
+        self.assertEqual((ahead, behind), (1, 1))
+
+        recovered = self.recover()
+
+        self.assertTrue(recovered)
+        self.assertEqual(self.push.leases, [])
+        self.assertEqual(self._remote_head(), self.anchor)
+        self.assertNotEqual(stranded, self.recovered)
+        self._assert_parked(fixtures.PARK_PUSH_FAILED)
 
     def test_out_of_band_update_restores_anchor(self) -> None:
         pushed_elsewhere = self.advance_remote_out_of_band()

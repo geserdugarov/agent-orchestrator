@@ -135,8 +135,18 @@ def _outside_the_gate(
     is the wider fact that no developer ran: a rebase, a resolution, and a
     recovery push each set that and are each new work this gate has never
     seen.
+
+    A call that may publish on a rewrite PERMIT and on nothing else is never
+    outside the gate, whatever the switch says. What it is asking for is not a
+    count -- the commit is already on the pull request, or already leased for
+    a push it is owed -- and the permit that decides it is asked inside, over
+    the publication this gate freezes. Kept out, it would publish with nothing
+    vouching for the move, finish its route with the verdict still on the
+    commit a human ruled on, and leave the permission standing outstanding.
     """
     if config.DECOMPOSE or recorded.candidate_sha:
+        return False
+    if gate.permit_only:
         return False
     return not gate.answering and not _parks._approved_commit(gate.state)
 

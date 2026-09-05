@@ -773,10 +773,19 @@ record names both ends of both contributions — `source_sha` / `base_sha` for t
 `workflow:resolving_conflict` runs when a branch has stopped merging cleanly), and `transfer_proof` for which
 reading proved the push landed: `pushed` where the leased force-push moved the publication off the head the permit
 was granted against, and `already_published` where a tick that pushed and died before its receipt came back to a
-pull request standing there already and the leased no-op found it so. There is no third value — a remote anywhere
-else is a permit that was refused, which settles nothing and reports nothing. No `late_verdict` joins it: the
-transfer carries a decision a human already made onto the object that replaced the one they made it about, and a
-second `single` here would read as a second adjudication of work nobody was asked about twice. Two roads leave the
+pull request standing there already and the leased no-op found it so. On the base-refresh side that second reading
+is the crash recovery's own: the anchor an interrupted rebase left pinned is what brings the tick back, and where
+the remote is already on the rewritten commit the recovery takes the leased no-op itself — on the permit alone —
+rather than relabelling and leaving the permission for a stage the rewrite was never entered from
+([`../state-machine/labels-and-state.md#base-refresh`](../state-machine/labels-and-state.md#base-refresh)). There is
+no third value — a remote anywhere else is a permit that was refused, which settles nothing and reports nothing.
+The proof is also the one thing here a later tick could not re-derive, so the write that settles a transfer keeps
+it on the pinned comment until this record has been made and drops it behind the record: a process lost between
+the settlement and the report comes back to a verdict that moved and a proof still standing, and makes the record
+from it rather than leaving the move unannounced.
+No `late_verdict` joins it: the transfer carries a decision a human already made onto the object that replaced the
+one they made it about, and a second `single` here would read as a second adjudication of work nobody was asked
+about twice. Two roads leave the
 permission unspent and are silent here for the same reason — nothing moved. A publication the permit went PAST —
 some other commit reached the pull request — drops it. And a permission this tick's permit did not VOUCH for is left
 exactly where it stands: a refusal on the re-ask is not a hold, so the rewritten commit falls through to the

@@ -97,6 +97,11 @@ class _PublishedCandidate:
     exemption. Carried here rather than re-read from the comment, because a
     permission standing there says a permit was once granted and not that it
     still holds.
+
+    `refused` says a `permit_only` caller's permit declined and nothing was
+    measured in its place. It is a hold like any other here -- nothing is
+    published -- and what makes it its own answer is that the gate took no
+    park and made no route, so the caller is the one that has to fail closed.
     """
 
     held: bool
@@ -104,11 +109,16 @@ class _PublishedCandidate:
     lease: str = ""
     standing: str = ""
     permitted_sha: str = ""
+    refused: bool = False
 
 
 # What every held answer is, since a hold publishes nothing and so names
 # neither commit.
 _HELD = _PublishedCandidate(held=True)
+
+# What a permit-only caller's refusal is: the same silence, handed back as the
+# caller's own to answer for rather than as a tick the gate finished.
+_REFUSED = _PublishedCandidate(held=True, refused=True)
 
 
 def _holds_published_work(
@@ -154,6 +164,7 @@ def _holds_published_work(
         candidate=entered.candidate,
         spends=entered.spends,
         rewrite=entered.rewrite,
+        permit_only=entered.permit_only,
     )
     if _freeze._outside_the_gate(gate, recorded):
         return _unentered(gate, _gate._holds_candidate(gate), entered)
@@ -218,6 +229,7 @@ def _unentered(
         revision=revision,
         lease=entered.head,
         permitted_sha=verdict.permitted_sha,
+        refused=verdict.refused,
     )
 
 
@@ -267,7 +279,7 @@ def _measured(
     instead of parking for a lease no push needs.
     """
     if verdict.held:
-        return _HELD
+        return _REFUSED if verdict.refused else _HELD
     standing = entry.published_sha
     if _parks._approved_commit(gate.state) != verdict.candidate_sha:
         return _PublishedCandidate(

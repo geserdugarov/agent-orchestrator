@@ -354,14 +354,18 @@ class FinalizeRecoveredRebaseTest(unittest.TestCase):
             )
 
         self.assertTrue(routed)
-        # Notice, audit event, and relabel all land before the single
-        # pinned-state write that commits them; the staged anchor clear and
-        # review-round reset are only durable once that write returns.
+        # Notice and audit event first, then the write that records the
+        # announcement while the anchor still stands, then the relabel and the
+        # single write that commits the anchor clear and the review-round
+        # reset. A tick lost between the two writes comes back to a finish
+        # that says it announced itself, and makes only the write it never
+        # made rather than saying all of it again.
         self.assertEqual(
             ordered,
             [
                 PR_COMMENT,
                 f"{EMIT_EVENT}:{REBASED_EVENT}",
+                WRITE_STATE,
                 SET_LABEL,
                 f"{EMIT_EVENT}:{STAGE_ENTER_EVENT}",
                 WRITE_STATE,

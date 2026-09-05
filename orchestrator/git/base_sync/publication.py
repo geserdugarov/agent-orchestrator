@@ -19,24 +19,21 @@ an issue whose exemption names that commit it is the rewrite that would
 punish it: the exemption names one commit and only it, so the replayed
 object is measured past the same ceiling and the change a human already
 adjudicated goes back into adjudication with a pull request open over it.
-What this owner therefore hands the gate beside the candidate is the evidence
-that decides -- the pair the exemption already records, the pair the rebase
-produced, and the publication and pre-rebase anchor the push is made against.
-Nothing here rules on it: `late_transfer` grants or refuses the permit, and a
-refusal simply leaves the ordinary cumulative gate to measure the rebase like
-any other candidate, which is what a base advance that changed the
-contribution has to get.
+So the gate is handed evidence beside the candidate, and ``transfers`` is
+what assembles it -- the pair the exemption already records, the pair this
+rebase produced, and the publication and pre-rebase anchor the push is made
+against. That owner rather than this one, because the recovery that finishes
+an interrupted rebase needs the same claim and has no rewrite of its own to
+describe. Nothing on either road rules on it: `late_transfer` grants or
+refuses the permit, and a refusal simply leaves the ordinary cumulative gate
+to measure the rebase like any other candidate, which is what a base advance
+that changed the contribution has to get.
 """
 from __future__ import annotations
 
-from orchestrator.git.base_sync import guards
+from orchestrator.git.base_sync import guards, persistence, transfers
 from orchestrator.git.base_sync.models import _AutoRebaseContext
-from orchestrator.git.base_sync.state import (
-    _PENDING_PUSH_SHA,
-    _REVIEW_ROUND,
-    log,
-)
-from orchestrator.git.measurement import commits as measurement_commits
+from orchestrator.git.base_sync.state import _REVIEW_ROUND, log
 from orchestrator.git.verification import probes
 from orchestrator.git.worktrees import paths
 from orchestrator.workflow.state import WorkflowLabel, stage_name
@@ -65,81 +62,6 @@ def _gate_records():
     """
     from orchestrator.workflow.stages.implementing import late_records
     return late_records
-
-
-def _rewritten_by_the_rebase(
-    context: _AutoRebaseContext,
-    before_sha: str,
-    after_sha: str,
-):
-    """What this rebase replaced, as the evidence a transfer is granted on.
-
-    Assembled here because this is the one place both halves of the claim are
-    in hand at once. The pair the contribution came FROM is the one the
-    adjudication already recorded -- the commit a human ruled on and the base
-    it was measured over -- and it is the only pair a verdict may be moved off
-    and the only one a later reader re-derives the equality from. The pair it
-    went TO is this rebase's own: the head the replay left, which moves with
-    the next commit, and the base the branch now sits over, which is what the
-    remote says its base branch is at.
-
-    Nothing is decided here. Whether the two pairs are one contribution is the
-    gate's question, asked over fingerprints taken from the objects
-    themselves, and every other term this hands over is re-asked there against
-    the publication the gate froze for itself.
-
-    The base is frozen from what the REMOTE says the branch is at rather than
-    read off the local ref the rebase named, and that is the whole of what
-    keeps the pair honest. `refs/remotes/<remote>/<base>` lives in the object
-    store the issue's agent writes to and any worktree sharing it can repoint
-    -- after this tick's fetch, at that. A replay onto a ref carrying work the
-    remote does not have fingerprints as the little that sits on top of it,
-    while the pull request against the real base carries that work and this
-    change together, and the permit would wave the pair through unmeasured. Read
-    from the remote, the forged base is simply a different contribution and the
-    ordinary cumulative gate measures it -- which costs one authenticated read
-    on the rare tick an exempt issue is rebased.
-
-    Empty where either half cannot be shown, and that is a claim withheld
-    rather than a refusal reported. A comment with no semantic record -- an
-    issue that never earned an exemption, one written before the record
-    existed, one whose fingerprint could not be taken -- has no accepted pair
-    to name, and a base the remote would not name, or one this host does not
-    hold even after a fetch, is no commit to read a contribution over. In both
-    the rebase is measured exactly as it always was.
-
-    The pre-rebase anchor goes down as the LEASE rather than as the commit
-    that was replaced, and the two are deliberately kept apart. It is the head
-    the pull request is standing on and the head the force-push behind this is
-    pinned to; that it is also the commit the exemption names is what the
-    equality of the two contributions proves, and not something this owner may
-    assert by spelling one field from the other.
-    """
-    # Lazy import: the exemption record and the rewrite vocabulary sit in the
-    # workflow layer above this package, so binding them at module load would
-    # make every git-side import pay for the stage tree they pull in.
-    from orchestrator.workflow.late_split import (
-        exemption as _exemption,
-        rewrites as _rewrites,
-    )
-    identity = _exemption.read_semantic_identity(context.state)
-    if identity is None:
-        return None
-    replayed_onto = measurement_commits._freeze_base_commit(
-        context.spec, context.worktree,
-    )
-    if not replayed_onto.is_frozen:
-        return None
-    return _rewrites.LateRewrite(
-        kind=_rewrites.LateRewriteKind.AUTO_CLEAN_REBASE,
-        from_sha=identity.candidate_sha,
-        from_base_sha=identity.base_sha,
-        to_sha=after_sha,
-        to_base_sha=replayed_onto.sha,
-        pr_number=context.pr_number,
-        source_stage=context.label,
-        lease=before_sha,
-    )
 
 
 def _post_auto_rebase_notice(
@@ -176,7 +98,14 @@ def _emit_auto_rebase_event(
     context: _AutoRebaseContext,
     after_sha: str,
 ) -> None:
-    """Emit the stable audit shape for a published clean rebase."""
+    """Emit the stable audit shape for a published clean rebase.
+
+    The round is zero by definition rather than read: this publication is what
+    resets it, so the record of it is about a reviewer with no rounds spent on
+    the head it names. Spelled rather than read so the emit can sit ahead of
+    the write that resets it -- which is what lets the finish record that it
+    announced itself while the anchor is still pinned.
+    """
     context.gh.emit_event(
         "base_rebased",
         issue_number=context.issue.number,
@@ -184,7 +113,7 @@ def _emit_auto_rebase_event(
         pr_number=context.pr_number,
         sha=after_sha,
         method="auto_clean_rebase",
-        review_round=int(context.state.get(_REVIEW_ROUND) or 0),
+        review_round=0,
         retry_count=context.state.get("retry_count"),
     )
 
@@ -194,10 +123,17 @@ def _finalize_auto_rebase(
     branch: str,
     after_sha: str,
 ) -> None:
-    """Publish the notice, audit event, validating route, and pinned state."""
+    """Publish the notice, audit event, validating route, and pinned state.
+
+    The pinned write that clears the attempt goes last so a tick that dies
+    partway leaves the anchor for the next one to recover from. What the
+    announcement owes that ordering is a durable mark of its own, written
+    while the anchor still stands: the notice and the audit event are out
+    before the relabel, and a tick lost between them and the last write would
+    otherwise come back to an attempt that looks unfinished and say all of it
+    a second time.
+    """
     _post_auto_rebase_notice(context, after_sha)
-    context.state.set(_PENDING_PUSH_SHA, None)
-    context.state.set(_REVIEW_ROUND, 0)
     log.info(
         "issue=#%d auto base rebase pushed %s/%s -> %s; routing %r -> "
         "validating",
@@ -208,6 +144,9 @@ def _finalize_auto_rebase(
         context.label,
     )
     _emit_auto_rebase_event(context, after_sha)
+    persistence._announced(context, after_sha)
+    persistence._clears_the_attempt(context.state)
+    context.state.set(_REVIEW_ROUND, 0)
     context.gh.set_workflow_label(context.issue, WorkflowLabel.VALIDATING)
     context.gh.write_pinned_state(context.issue, context.state)
 
@@ -255,7 +194,9 @@ def _publish_auto_rebase(
             # adjudication accepted is recognized as the same contribution
             # rather than measured past the same ceiling and adjudicated a
             # second time with a pull request already open over it.
-            rewrite=_rewritten_by_the_rebase(context, before_sha, after_sha),
+            rewrite=transfers._rewritten_by_the_rebase(
+                context, before_sha, after_sha,
+            ),
         ),
     )
     if published.held:

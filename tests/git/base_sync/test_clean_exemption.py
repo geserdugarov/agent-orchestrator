@@ -12,19 +12,13 @@ Nothing here rules on that evidence. What these cases pin is the wiring: the
 terms the gate is handed, that an equivalent replay publishes and rotates
 without a reading, that a base advance which changed the contribution falls
 back to the ordinary cumulative gate, and that evidence this refresh cannot
-assemble is no claim at all.
-
-The crash road is here for the same reason. The gate records the debt this
-push is owed BEFORE the push goes out, so a process dying in between comes
-back to a rebased branch, an unpushed remote, and an anchor still pinned --
-and what has to happen next is this refresh's own recovery finishing the
-route, not a later stage landing the push and leaving the reviewer looking at
-a head nothing routed them to.
+assemble is no claim at all. What a process that dies inside the same tick
+comes back to belongs to the recovery that classifies it, and lives beside
+that owner's own cases.
 """
 from __future__ import annotations
 
 import unittest
-from unittest.mock import MagicMock
 
 from orchestrator.git.measurement.models import (
     FrozenCommit,
@@ -40,82 +34,26 @@ from tests.git.base_sync.exemption_test_support import (
     ACCEPTED_DIGEST,
     ACCEPTED_SHA,
     CHANGED_DIGEST,
+    EVENT_MEASUREMENT,
+    EVENT_TRANSFER,
+    LEASE,
     REPLAYED_BASE_SHA,
+    REVISION,
+    _CleanRebaseCase,
     adjudicated,
-    readings,
 )
-from tests.git.base_sync.refresh_scenarios import (
-    PUSH_PATCH,
-    _clean_rebase_scenario,
-    _scenario,
-)
+from tests.git.base_sync.refresh_scenarios import PUSH_PATCH
 from tests.git.base_sync.refresh_test_support import (
     AFTER_SHA,
     BEFORE_SHA,
-    EVENT_BASE_REBASED,
     ISSUE,
     KEY_PARK_REASON,
-    KEY_PENDING_PUSH_SHA,
     KEY_REVIEW_ROUND,
     LABEL_VALIDATING,
-    METHOD_FIELD,
     PARK_PUSH_FAILED,
     PR_NUMBER,
-    THREE_BEHIND_STDOUT,
-    UP_TO_DATE_STDOUT,
-    _RemoteHeadGit,
-    _SyncWorktreeWithBaseFixture,
 )
-from tests.git.base_sync.sync_test_support import _diverged, _git_result
 from tests.workflow.fixtures import LABEL_DECOMPOSING
-
-EVENT_MEASUREMENT = "late_measurement"
-EVENT_TRANSFER = "late_transfer"
-
-# The keyword a gated push names the commit it publishes by, and the one it
-# pins that push to.
-REVISION = "revision"
-LEASE = "force_with_lease"
-
-# What a process that never came back looks like from inside the tick, and the
-# method the recovery that finishes its route records itself under.
-DIED = "the process died before the push returned"
-RECOVERY_PUSHED = "crash_recovery_pushed"
-
-
-class _CleanRebaseCase(_SyncWorktreeWithBaseFixture):
-    """One behind-base issue in review whose head a human already ruled on."""
-
-    def setUp(self) -> None:
-        super().setUp()
-        self.reading = readings(self)
-        self._seed_pr_issue(review_round=3)
-
-    def _rebases(self, **scenario_options):
-        """Run one refresh over the seeded world and hand back its scenario."""
-        scenario = _clean_rebase_scenario(
-            THREE_BEHIND_STDOUT, **scenario_options,
-        )
-        scenario.run(self)
-        return scenario
-
-    def _durable(self):
-        """The pinned comment as a process starting now would read it."""
-        return self.gh.read_pinned_state(self.gh._issues[ISSUE])
-
-    def _events_of(self, family: str) -> list[dict]:
-        return [
-            record for record in self.gh.recorded_events
-            if record.get("event") == family
-        ]
-
-    def _assert_measured(self) -> None:
-        """The ordinary cumulative gate read this replay and published it."""
-        self.assertEqual(len(self._events_of(EVENT_MEASUREMENT)), 1)
-        self.assertEqual(self._events_of(EVENT_TRANSFER), [])
-        durable = self._durable()
-        self.assertTrue(_exemption.is_exempt(durable, BEFORE_SHA))
-        self.assertFalse(_rewrites.carries_rewrite_authorization(durable))
 
 
 class TransferredRebaseTest(_CleanRebaseCase, unittest.TestCase):
@@ -171,7 +109,7 @@ class TransferredRebaseTest(_CleanRebaseCase, unittest.TestCase):
 
 
 class MeasuredRebaseTest(_CleanRebaseCase, unittest.TestCase):
-    """The replays no transfer is granted for, measured as they always were."""
+    """The replays no transfer is granted for, read by the cumulative gate."""
 
     def test_a_changed_contribution_is_measured(self) -> None:
         # A base advance that moved what the branch adds to it produces a
@@ -234,70 +172,6 @@ class RolledBackRebaseTest(_CleanRebaseCase, unittest.TestCase):
         self.assertFalse(_rewrites.carries_rewrite_authorization(durable))
         pinned = self.gh.pinned_data(ISSUE)
         self.assertEqual(pinned[KEY_PARK_REASON], PARK_PUSH_FAILED)
-
-
-class InterruptedRebaseTest(_CleanRebaseCase, unittest.TestCase):
-    """The tick that dies between the grant and the push it licensed."""
-
-    def setUp(self) -> None:
-        super().setUp()
-        adjudicated(self)
-        self._crashes()
-        self.resumed = self._resumes()
-
-    def test_the_recovery_publishes_and_settles(self) -> None:
-        # The permit is re-asked over the record the grant left -- the
-        # recovery has no evidence of its own -- and the receipt behind the
-        # reissued push is what finally carries the verdict over.
-        pushed = self.resumed[PUSH_PATCH].call_args.kwargs
-        self.assertEqual(pushed[REVISION], AFTER_SHA)
-        self.assertEqual(pushed[LEASE], BEFORE_SHA)
-        durable = self._durable()
-        self.assertTrue(_exemption.is_exempt(durable, AFTER_SHA))
-        self.assertEqual(
-            _rewrites.read_rewrite_authorization(durable).phase,
-            _rewrites.LateRewritePhase.PUBLISHED,
-        )
-
-    def test_the_refresh_tail_is_finished(self) -> None:
-        # The debt the grant recorded is what freezes this branch, and it
-        # freezes it out of the very recovery the anchor beside it exists for.
-        # Left there, a later stage lands the push and the reviewer is never
-        # routed at the rewritten head.
-        pinned = self.gh.pinned_data(ISSUE)
-        self.assertIsNone(pinned[KEY_PENDING_PUSH_SHA])
-        self.assertEqual(pinned[KEY_REVIEW_ROUND], 0)
-        self.assertIn((ISSUE, LABEL_VALIDATING), self.gh.label_history)
-        rebased = self._events_of(EVENT_BASE_REBASED)
-        self.assertEqual(len(rebased), 1)
-        self.assertEqual(rebased[0][METHOD_FIELD], RECOVERY_PUSHED)
-
-    def _crashes(self) -> None:
-        """Rebase, grant the transfer, and die on the way to the remote."""
-        crashing = _clean_rebase_scenario(THREE_BEHIND_STDOUT)
-        crashing[PUSH_PATCH].side_effect = RuntimeError(DIED)
-        with self.assertRaises(RuntimeError):
-            crashing.run(self)
-
-    def _resumes(self):
-        """The next tick, over the world that crash left behind.
-
-        The checkout is on the replay, the remote is still on the anchor, and
-        the branch is one commit ahead of it -- which is what the recovery
-        classifies before it reissues the push the dead tick never made.
-        """
-        resumed = _scenario(
-            dirty=MagicMock(return_value=[]),
-            rebase=MagicMock(),
-            push=MagicMock(return_value=True),
-            head_sha=MagicMock(return_value=AFTER_SHA),
-            git=MagicMock(return_value=_git_result(stdout=UP_TO_DATE_STDOUT)),
-            hardened=MagicMock(side_effect=_RemoteHeadGit(BEFORE_SHA)),
-            fetch=MagicMock(return_value=_git_result()),
-            ahead_behind=MagicMock(return_value=_diverged(1, 0)),
-        )
-        resumed.run(self)
-        return resumed
 
 
 if __name__ == "__main__":

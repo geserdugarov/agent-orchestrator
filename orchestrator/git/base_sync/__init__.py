@@ -10,7 +10,12 @@ recovered rebase publishes live in ``persistence``, and the terminal answers
 a verified recovery comparison produces live in ``outcomes``. The reads that
 comparison is built from -- the authenticated branch fetch, the local and
 remote head SHAs, and the divergence counts -- live in ``snapshot``, and the
-order those reads and answers are asked in lives in ``recovery``. ``refresh``
+order those reads and answers are asked in lives in ``recovery``. What a
+rebase REPLACED lives in ``transfers``, beside the classification of how far
+an interrupted one got with the exemption it was carrying and whether the
+pinned comment accounts for a rewrite the pull request already has: the tick
+that makes the rewrite and the tick that comes back to it are decided on the
+same evidence, so it belongs to neither of them. ``refresh``
 drives one tick's base fetch, worktree discovery, and per-worktree routing,
 and ``frozen`` is what it asks before any of that reaches a checkout: the
 records that hold a branch still by their presence, the two parks that hold

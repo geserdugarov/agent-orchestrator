@@ -535,6 +535,41 @@ record — the issue, the pull request, both pairs, the rewrite kind, and which 
 deliberately no second `late_verdict`, which would read as a second adjudication of work nobody was asked about
 twice.
 
+The base-refresh rewrite has one window a squash does not, and its own recovery closes it. The refresh pins a
+recovery anchor before git runs and, as soon as git has made one, the replay it produced together with the pull
+request and stage it was produced for — so a process lost between the rebase and the grant comes back to a checkout
+it can prove is its own work, carrying a replay with *no* permission on the comment at all and nothing for the
+re-ask above to be asked over. That recovery
+re-derives the same evidence the dead tick would have assembled, from the record's own accepted pair, the head the
+checkout stands on, the base the remote names, the pinned anchor as the lease, and the publication that tick
+recorded — the last of those because terms taken from the issue as it reads now would compare today with today, and
+a relabel or a repoint made while the process was down would be adopted as the dead tick's own. Without any of it
+the replay of a change a human already ruled on is measured afresh and routed back into adjudication with the pull
+request open over the work. The recovery also owns the settlement where the push landed and only its receipt was
+lost, rather than relabelling and leaving it: the permit is scoped to the stage the rewrite was entered from, and
+the refresh's own route moves the issue to `workflow:validating`, so a settlement one tick later is refused on the
+stage alone. That settlement is taken on the permit ALONE — a refusal parks rather than falling through to the
+ordinary reading, which would either report a landed publication with the verdict unmoved or adjudicate the change
+a second time — and it is reached only over a permission whose paired debt agrees with it, since the grant writes
+both in one statement and a permit re-asked over half of one would rebuild the other from a claim nobody checked.
+Every road out of the recovery reconciles the pull request and the stage the attempt recorded against the ones the
+issue holds now, because finishing any of them posts a notice, files an audit event, and drops the anchor that is
+the only thing bringing the tick back — with the route's own last unmade steps recognized rather than
+refused: a finish records the head it has announced before it relabels, so a tick lost between that and the write
+that clears the record makes the relabel and the write, and says nothing a second time. The `late_transfer` record
+is recoverable across the same kind of window, since the settlement keeps the proof it was made from on the comment
+until that record is out. And
+the exemption is read before any permission standing beside it -- a permission is a claim about moving one verdict,
+so a group damaged after the grant leaves it reading back whole over a verdict nothing can name -- with every term
+of a whole permission cross-bound to the attempt in hand, since fields each well-shaped on their own still describe
+some other attempt when they disagree.
+
+Every state neither of those covers — a permission this build cannot read, one naming some other commit, a receipt
+nobody wrote, a debt nothing paid, a tree carrying uncommitted changes, a remote
+somebody moved — settles nothing and parks fail-closed rather than finishing the route, because the route clears
+the recovery anchor and the anchor is the only thing that brings the tick back to a verdict that may not have moved
+([`../state-machine/labels-and-state.md#base-refresh`](../state-machine/labels-and-state.md#base-refresh)).
+
 The approval holds the switch back for the commit it *names* and no other, which is why the switch is asked twice —
 once at the door, cheaply, and once past the proof. An approval is a claim about one object id, and nothing can say
 whether the head is that id until the head is proved; past that proof and not it, the approval describes work this

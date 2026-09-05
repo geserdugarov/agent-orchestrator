@@ -24,6 +24,10 @@ import logging
 from github.Issue import Issue
 
 from orchestrator import config
+from orchestrator.git.base_sync import (
+    frozen as _base_sync_frozen,
+    state as _base_sync_state,
+)
 from orchestrator.git.worktrees import paths as _worktree_paths
 from orchestrator.github.client import GitHubClient
 from orchestrator.github.pinned_state import PinnedState
@@ -35,6 +39,7 @@ from orchestrator.workflow.stages.implementing import (
     late_parks as _parks,
     late_push as _push,
     late_records as _records,
+    late_rotation as _rotation,
     state as _state,
 )
 from orchestrator.workflow.state import WorkflowLabel
@@ -154,31 +159,135 @@ def _reconciles_published_work(
     of. The recorded pair keeps the branch and the record exactly as they are
     until a host that has the checkout comes back, which is what the recorded
     pair is for.
+
+    The record a settled TRANSFER never got to report is made here too, ahead
+    of every one of those answers. That is a different debt with a different
+    owner -- `late_rotation` makes it -- and what this seam supplies is the
+    only tick that is guaranteed to come. The write receipting a landed push
+    is what settles a transfer and the record of it goes to the sinks BEHIND
+    that write, so a process lost between the two leaves a verdict that has
+    moved and nothing anywhere saying so, over the one fact no later reading
+    could re-derive. Every rewrite this workflow settles has that window,
+    since all of them go through the same push tail: the squash a reviewer's
+    approval earns, the replay `workflow:resolving_conflict` publishes, and
+    the base refresh's own rebase. Only the last has a recovery route that
+    would come back for it; the other two resume into a stage with nothing to
+    say about a transfer, and this reconciliation is the seam all three reach.
+    It settles nothing and stops nothing -- the verdict has moved and the
+    receipt beside it already says which commit the remote holds -- so the
+    answers below and the handler behind them run exactly as they would have.
+
+    A note that cannot produce that account is a claim like any other here,
+    and `_unreadable_record` above asks the transfer's own reader for it. The
+    report reader cannot say so: it answers "nothing to report" for a note
+    standing over a permission, a phase, or a reading nothing can account for
+    exactly as it does for a comment carrying no note at all. Left at that,
+    this seam walks past the one state it exists to close -- the account is
+    never made, the corrupt note stands for the life of the issue, and the
+    stage runs behind a verdict nothing here can account for. So it parks
+    with the rest of the damage instead, once, and nothing is discarded for
+    it.
     """
     recorded = _late_state.read_late_generation(state)
     damage = _claims._unreadable_record(label, state)
     owed = _debt._owes_a_published_push(label, state)
-    if not damage and not owed and not _claims._awaits_its_count(
-        recorded,
-    ):
-        if _parks._retire_settled_park(state, recorded):
-            log.info(
-                "issue=#%d carried a measurement park over a split that has "
-                "already become children; clearing it and letting the "
-                "label's own handler run",
-                issue.number,
-            )
-            gh.write_pinned_state(issue, state)
-        return False
     gate = _records._gate(
         gh, spec, issue, state,
         _worktree_paths._worktree_path(spec, issue.number),
     )
+    _rotation._reports_a_settled_transfer(gate)
     if damage:
         return _claims._parks_the_damage(gate, damage)
+    if _defers_to_the_rebase_recovery(issue, state):
+        return True
     if owed:
         return _debt._publishes_the_debt(gate, label)
-    return _answers_the_frozen_pair(gate, recorded, label)
+    if _claims._awaits_its_count(recorded):
+        return _answers_the_frozen_pair(gate, recorded, label)
+    return _retires_a_settled_park(gh, issue, state, recorded)
+
+
+def _retires_a_settled_park(
+    gh: GitHubClient,
+    issue: Issue,
+    state: PinnedState,
+    recorded: LateGeneration,
+) -> bool:
+    """Answer the ordinary issue, which owes this reconciliation nothing.
+
+    False every time, because nothing here stops a tick: what the pair before
+    it looks for is not on this comment, so the label's own handler runs. The
+    one write it may still make is the measurement park a split that has
+    already become children carried past its own settlement -- nothing about
+    that record is a human's to answer, and the branch it was freezing goes
+    back into the base refresh with it.
+    """
+    if _parks._retire_settled_park(state, recorded):
+        log.info(
+            "issue=#%d carried a measurement park over a split that has "
+            "already become children; clearing it and letting the "
+            "label's own handler run",
+            issue.number,
+        )
+        gh.write_pinned_state(issue, state)
+    return False
+
+
+def _defers_to_the_rebase_recovery(
+    issue: Issue, state: PinnedState,
+) -> bool:
+    """Whether an interrupted auto rebase still owns what is standing here.
+
+    The base refresh pins its anchor before `git rebase` runs and drops it
+    only when the attempt is finished, reset, or parked -- so an anchor still
+    on the comment at dispatch is an attempt no tick has resolved yet, and
+    every window it can have been lost in is one where the branch is not
+    where the pull request has it. Acted on here, whatever it left is
+    answered by the wrong owner: this road publishes and settles the replay
+    while the recovery's own finish -- which is what clears the anchor, resets
+    the reviewer's round, and routes them at the rewritten head -- never
+    happens. The stage then runs over a branch the refresh rewrote with the
+    round the reviewer spent before the rewrite. The windows that leave
+    NOTHING else on the comment are the same refusal with less to see: no
+    debt and no count means this owner has no answer to give, so returning
+    one lets the handler run behind the same unfinished recovery.
+
+    So the tick stops instead, and nothing is written for it. The recovery
+    reaches the same records on the refresh ahead of the next handler --
+    which is normally the same tick, and a later one wherever the pull request
+    could not be read -- and finishes them on its own terms or parks. Stopping
+    is the fail-closed half of that: the stage may not run over a publication
+    whose owner has not settled it yet.
+
+    Unless the refresh is standing down for the very record this owner is
+    holding, and that is not a courtesy either -- deferring there is a
+    deadlock. The freeze ahead of the refresh sets one thing aside for this
+    anchor and one only, the approval leased to it; every other record it
+    reads holds the branch still, so a generation the gate froze and never
+    counted stops the refresh on every tick while this owner waits for it. So
+    the question is asked of the freeze itself rather than re-derived: a
+    comment carrying nothing that holds the branch is one the recovery can
+    reach, and a comment that holds it is this owner's to answer.
+    """
+    anchor = state.get(_base_sync_state._PENDING_PUSH_SHA)
+    if not anchor:
+        return False
+    frozen_by = _base_sync_frozen._held_records(state)
+    if frozen_by:
+        log.info(
+            "issue=#%d holds an auto rebase anchored at %s and a record that "
+            "freezes the refresh out of it (%s); answering it here rather "
+            "than waiting for a recovery that cannot run",
+            issue.number, str(anchor)[:8], ", ".join(frozen_by),
+        )
+        return False
+    log.info(
+        "issue=#%d holds an auto rebase anchored at %s that no tick has "
+        "finished; leaving what it recorded to that recovery rather than "
+        "publishing it here and running the stage behind it",
+        issue.number, str(anchor)[:8],
+    )
+    return True
 
 
 def _answers_the_frozen_pair(

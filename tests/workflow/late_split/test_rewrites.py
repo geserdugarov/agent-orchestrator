@@ -55,6 +55,9 @@ _FORMAT = _rewrites.LATE_REWRITE_FINGERPRINT_FORMAT
 _PR_NUMBER = _rewrites.LATE_REWRITE_PR_NUMBER
 _STAGE = _rewrites.LATE_REWRITE_SOURCE_STAGE
 _LEASE = _rewrites.LATE_REWRITE_LEASE
+# Deliberately outside the group below: the note is about the record a settled
+# transfer owes the sinks rather than about the permission it was granted on.
+_PROOF = _rewrites.LATE_REWRITE_PROOF
 
 _AUTHORIZATION_KEYS = (
     _KIND, _PHASE, _FROM, _FROM_BASE, _TO, _TO_BASE,
@@ -115,6 +118,11 @@ _REFUSED_WRITES = MappingProxyType({
     "a base that is prose": {"to_base_sha": "the merge base"},
     "a lease that is not a commit": {"lease": 7},
 })
+
+
+# Which reading a settlement was proved by, which the record now
+# carries until the report it owes has been made.
+_SETTLING_PROOF = _rewrites.LateRewriteProof.PUSHED
 
 
 def granted_rewrite(**overrides) -> _rewrites.LateRewrite:
@@ -244,7 +252,12 @@ class RecordedAuthorizationTest(unittest.TestCase):
 
 
 class SpentAuthorizationTest(unittest.TestCase):
-    """The write that carries the exemption over, and what it refuses to."""
+    """The write that carries the exemption over, and what it leaves behind.
+
+    The move itself, what it refuses to make, and the note it keeps: which
+    reading proved the push landed is the one fact nothing later could
+    re-derive, so it stands on the comment until the record it feeds is out.
+    """
 
     def test_the_whole_move_lands_in_one_write(self) -> None:
         # The exemption, what the commit it names contributes, and the phase
@@ -253,7 +266,7 @@ class SpentAuthorizationTest(unittest.TestCase):
         # reader here can tell from a hand edit.
         state = authorized_state()
 
-        spent = _rewrites.record_rewrite_publication(state)
+        spent = _rewrites.record_rewrite_publication(state, _SETTLING_PROOF)
 
         self.assertEqual(spent, granted_rewrite())
         self.assertEqual(_exemption.read_exemption(state), REWRITTEN_SHA)
@@ -270,9 +283,65 @@ class SpentAuthorizationTest(unittest.TestCase):
     def test_a_spent_permission_is_not_outstanding(self) -> None:
         state = authorized_state()
 
-        _rewrites.record_rewrite_publication(state)
+        _rewrites.record_rewrite_publication(state, _SETTLING_PROOF)
 
         self.assertFalse(_rewrites.outstanding_permission(state))
+
+    def test_a_settlement_owes_its_own_reading(self) -> None:
+        # The record goes to the sinks behind the write that settles the
+        # transfer, and which reading proved the push landed is the one fact
+        # nothing later could re-derive -- the receipt looks identical either
+        # way. So it is kept until the report is out.
+        state = _published_state()
+
+        self.assertEqual(
+            _rewrites.unreported_transfer(state), _SETTLING_PROOF,
+        )
+        self.assertFalse(_rewrites.stranded_transfer_proof(state))
+
+        _rewrites.forget_transfer_proof(state)
+
+        self.assertIsNone(_rewrites.unreported_transfer(state))
+        self.assertFalse(_rewrites.stranded_transfer_proof(state))
+
+    def test_an_unreportable_proof_is_damage(self) -> None:
+        # Presence is what tells these apart from a comment that owes
+        # nothing, and each of them answers None for the report: read as
+        # "nothing owed", the recovery finishes a route over a settled
+        # transfer no sink ever heard about.
+        stranded = {
+            "a reading this build does not know": self._damaged_proof(
+                {_PROOF: "not-a-reading"},
+            ),
+            "a phase the settlement never reached": self._damaged_proof(
+                {_PHASE: str(_rewrites.LateRewritePhase.AUTHORIZED)},
+            ),
+            "a permission short of a member": self._damaged_proof(
+                {_LEASE: None},
+            ),
+        }
+        for described, state in stranded.items():
+            with self.subTest(standing=described):
+                self.assertIsNone(_rewrites.unreported_transfer(state))
+                self.assertTrue(_rewrites.stranded_transfer_proof(state))
+
+    def test_a_grant_drops_the_proof_it_replaces(self) -> None:
+        # A grant replaces the whole group, so the proof beside it describes
+        # the transfer being replaced -- and the phase going back to
+        # `authorized` is what would leave it unreadable. Only a report whose
+        # own drop-write GitHub refused gets one this far, and that record
+        # has already been made.
+        state = _published_state()
+        _exemption.record_exemption(state, REWRITTEN_SHA)
+
+        _rewrites.record_rewrite_authorization(
+            state,
+            granted_rewrite(from_sha=REWRITTEN_SHA, to_sha=CANDIDATE_SHA),
+            CONTRIBUTION_DIGEST,
+        )
+
+        self.assertFalse(_rewrites.stranded_transfer_proof(state))
+        self.assertIsNone(_rewrites.unreported_transfer(state))
 
     def test_it_refuses_a_record_it_cannot_vouch_for(self) -> None:
         # Every way a permission fails to be one this build granted: nothing
@@ -288,15 +357,25 @@ class SpentAuthorizationTest(unittest.TestCase):
                 before = dict(state.data)
 
                 with self.assertRaises(InvalidLateValue):
-                    _rewrites.record_rewrite_publication(state)
+                    _rewrites.record_rewrite_publication(state, _SETTLING_PROOF)
 
                 self.assertEqual(state.data, before)
+
+    def _damaged_proof(self, damage: dict) -> PinnedState:
+        """A settled transfer whose proof stands over one edited field."""
+        state = _published_state()
+        for key, written in damage.items():
+            if written is None:
+                state.data.pop(key, None)
+            else:
+                state.data[key] = written
+        return state
 
 
 def _published_state() -> PinnedState:
     """The comment one settled transfer leaves, through the write that makes it."""
     state = authorized_state()
-    _rewrites.record_rewrite_publication(state)
+    _rewrites.record_rewrite_publication(state, _SETTLING_PROOF)
     return state
 
 

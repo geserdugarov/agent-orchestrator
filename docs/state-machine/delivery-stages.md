@@ -1556,8 +1556,9 @@ such pushes and no others:
   through the shared dev-fix seam, are what
   [`workflow:resolving_conflict`'s content updates](#content-updates-onto-the-pull-request-this-stage-already-has)
   are made of;
-- the base-sync auto rebase `git/base_sync/publication._publish_auto_rebase` and its own crash recovery
-  `git/base_sync/recovery._retry_recovery_push`, both of which reach the gate through
+- the base-sync auto rebase `git/base_sync/publication._publish_auto_rebase` and the two roads of its own crash
+  recovery — `git/base_sync/recovery._retry_recovery_push` for a push that never went out, and
+  `_settle_published_recovery` for the leased no-op that receipts one that did — all of which reach the gate through
   `base_sync/publication._gated_publication()` so the sync layer keeps its call-time hop upward;
 - and the final documentation pass `documenting/publication._push_docs_and_advance`.
 
@@ -1597,7 +1598,8 @@ measured exactly as above. And the permission is droppable in exactly one window
 resets the branch back onto the commit the exemption never left, so the rollback takes the permission back and
 nothing else, while past the receipt the pull request carries the rewritten commit and there is nothing to take
 back. The squash is not the only rewrite decided on those terms: the per-tick base refresh publishes a clean rebase
-of the same branch once this stage has handed the issue on, and it hands the same gate the same evidence
+of the same branch once this stage has handed the issue on, and it hands the same gate the same evidence — assembled
+afresh by its own crash recovery where the tick that made the rewrite died before recording it
 ([`labels-and-state.md#base-refresh`](labels-and-state.md#base-refresh)).
 
 The conflict stage's clean rebase is the third rewrite an exemption may ride, and it reaches it from the other end.

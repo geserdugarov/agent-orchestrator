@@ -207,8 +207,8 @@ def _carried(
     -- which is now, because the push has landed and the commit is one the
     pull request really carries.
     """
-    rewrite = _rewrites.record_rewrite_publication(gate.state)
     proof = _proved_by(published)
+    rewrite = _rewrites.record_rewrite_publication(gate.state, proof)
     log.info(
         "issue=#%d carried the exemption for %s onto %s, which pull request "
         "#%d %s; the %s rewrite is settled",
@@ -297,19 +297,84 @@ def _reports_the_transfer(gate: _records._Gate, rotation: _Rotation) -> None:
     """
     if not rotation.is_reportable:
         return
-    rewrite = rotation.rewrite
+    _reported_transfer(gate, rotation.rewrite, rotation.proof)
+
+
+def _reports_a_settled_transfer(gate: _records._Gate) -> bool:
+    """Make the record a settled transfer is still owed, if it is owed one.
+
+    The window the proof on the comment exists for. A transfer is settled by
+    the write that receipts its push and reported behind that write, so a
+    process lost in between leaves a verdict that moved and nothing on either
+    sink saying so -- and the one fact nothing later could re-derive, which
+    reading proved the push landed, is exactly what that write kept.
+
+    So the record is made from what the comment carries, and the write that
+    drops the proof it was made from is taken with it: every tick that finds
+    the proof still standing reports the record again, so the drop may not
+    wait on a caller's write that is not guaranteed. Answering whether the
+    record was made is what tells that caller a verdict on this comment has
+    already been announced.
+
+    Silent for every comment that owes nothing, which is a comment carrying
+    no proof at all. A proof standing over a transfer this build cannot read
+    whole, one still outstanding, or a reading this build does not know is
+    not silence: it is a checkpoint saying two things at once, and the roads
+    that ask park on it rather than reaching here.
+    """
+    proof = _rewrites.unreported_transfer(gate.state)
+    if proof is None:
+        return False
+    authorization = _rewrites.read_rewrite_authorization(gate.state)
+    log.info(
+        "issue=#%d settled the transfer for %s onto %s and never reported it; "
+        "making the record the write behind that settlement owed",
+        gate.issue.number, authorization.rewrite.from_sha,
+        authorization.rewrite.to_sha,
+    )
+    _reported_transfer(gate, authorization.rewrite, proof)
+    return True
+
+
+def _reported_transfer(
+    gate: _records._Gate,
+    rewrite: _rewrites.LateRewrite,
+    proof: _rewrites.LateRewriteProof,
+) -> None:
+    """Write the one record on both sinks, and drop the proof it was made from.
+
+    The drop is made durable HERE rather than left for the caller, because the
+    caller's next write is not guaranteed and every tick that finds the proof
+    still standing reports the record again. It is the one write in this
+    domain that carries nothing but the fact that something has already been
+    said, and it costs a request on the rare tick a verdict actually moves.
+
+    A write GitHub refuses leaves the proof where it is, which is the safe way
+    round: the record has been made and a later tick may make it again, rather
+    than a settled transfer nobody ever announced. So it is logged and the
+    tick carries on.
+    """
     _telemetry.emit_late_event(
         gate.gh,
         _events.LateEvent(
             family=_events.LateEventFamily.TRANSFER,
             rewrite_kind=rewrite.kind,
-            transfer_proof=rotation.proof,
+            transfer_proof=proof,
             transferred_from_sha=rewrite.from_sha,
             transferred_from_base_sha=rewrite.from_base_sha,
         ),
         _reported(gate, rewrite),
         stage=rewrite.source_stage,
     )
+    _rewrites.forget_transfer_proof(gate.state)
+    try:
+        gate.gh.write_pinned_state(gate.issue, gate.state)
+    except Exception:
+        log.warning(
+            "issue=#%d reported the transfer onto %s and could not drop the "
+            "proof it was made from; a later tick may report it again",
+            gate.issue.number, rewrite.to_sha, exc_info=True,
+        )
 
 
 def _reported(

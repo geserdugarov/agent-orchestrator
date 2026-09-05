@@ -58,7 +58,10 @@ def _clean_rebase_scenario(
             REBASE_PATCH: MagicMock(return_value=(True, [])),
             PUSH_PATCH: MagicMock(return_value=push_result),
         },
-        head_sha=MagicMock(side_effect=[BEFORE_SHA, AFTER_SHA]),
+        # Three readings of one checkout: the anchor before git runs,
+        # the replay the attempt records as git hands it back, and the
+        # head the publication names its push against.
+        head_sha=MagicMock(side_effect=[BEFORE_SHA, AFTER_SHA, AFTER_SHA]),
         git=MagicMock(return_value=_git_result(stdout=behind_stdout)),
         hardened=hardened or MagicMock(return_value=_git_result()),
     )

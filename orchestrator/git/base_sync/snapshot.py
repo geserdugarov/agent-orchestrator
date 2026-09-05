@@ -22,7 +22,6 @@ from orchestrator.git.base_sync.models import (
 )
 from orchestrator.git.base_sync.state import (
     _ERROR_SNIPPET_LEN,
-    _PENDING_PUSH_SHA,
     _REASON_AUTO_BASE_REBASE_PUSH_FAILED,
     log,
 )
@@ -60,7 +59,7 @@ def _clear_ineligible_recovery(
     context: _AutoRebaseRecoveryContext,
 ) -> bool:
     """Clear an interrupted-rebase anchor after an operator relabel."""
-    context.state.set(_PENDING_PUSH_SHA, None)
+    persistence._clears_the_attempt(context.state)
     context.gh.write_pinned_state(context.issue, context.state)
     log.info(
         "issue=#%d auto-rebase recovery: label %r is no longer in "
@@ -113,7 +112,7 @@ def _clear_unchanged_recovery(
     context: _AutoRebaseRecoveryContext,
 ) -> bool:
     """Clear an anchor when HEAD never moved beyond the pre-rebase SHA."""
-    context.state.set(_PENDING_PUSH_SHA, None)
+    persistence._clears_the_attempt(context.state)
     context.gh.write_pinned_state(context.issue, context.state)
     log.info(
         "issue=#%d auto-rebase recovery: local HEAD matches pre-"

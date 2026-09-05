@@ -42,7 +42,11 @@ class FixingConflictDetourTest(
             # The pre-rebase head this refresh reads and leases against IS
             # the head the pull request is standing on: the size gate refuses
             # a call whose two readings of that one fact disagree.
-            head_sha=MagicMock(side_effect=[PR_HEAD_SHA, REBASED_HEAD_SHA]),
+            head_sha=MagicMock(
+                side_effect=[
+                    PR_HEAD_SHA, REBASED_HEAD_SHA, REBASED_HEAD_SHA,
+                ],
+            ),
             git=MagicMock(return_value=self._git_result(stdout="3\n")),
         ):
             _base_refresh._sync_worktree_with_base(

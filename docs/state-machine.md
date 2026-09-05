@@ -102,7 +102,17 @@ worktree rebases locally; a PR-having one in `workflow:validating` / `workflow:d
 `workflow:validating`, reaching `workflow:resolving_conflict` only when the rebase actually leaves conflicted files.
 That push goes through the size gate, and where the branch was standing on the commit an adjudication accepted the
 refresh hands the gate the same rewrite evidence a squash does, so a replay that contributes what a human already
-ruled on carries the exemption over instead of being adjudicated again.
+ruled on carries the exemption over instead of being adjudicated again. A process lost partway through that sequence
+comes back to the pinned record that attempt left — the head its push is leased against, the replay it produced,
+and the publication it produced that replay for — and the recovery classifies both where the remote stands and how
+far the transfer's own writes got. Both are read as exact SHAs, since a replayed branch counts as behind the
+publication it is about to replace and the lease alone would let a checkout nothing here made be force-pushed over
+the candidate. From there it re-derives the evidence a grant never reached, on the terms the dead tick recorded
+rather than the ones the issue happens to carry now; settles a push whose receipt was lost through the leased
+no-op that proves it, on the permit alone; and parks rather than publishing or finishing a route over a record the
+pinned comment cannot account for, a remote somebody rolled back off a replay it once carried, or a permit that no
+longer holds. An already-landed replay therefore finishes with no agent, no measurement, and no second
+adjudication.
 The `question` and `discussion` labels — and the parks and in-flight discussion records that outlive them — skip both
 paths. The failure modes, their durable `park_reason` tokens, and the refresh-owned retry are in
 [`state-machine/labels-and-state.md#base-refresh`](state-machine/labels-and-state.md#base-refresh).

@@ -335,6 +335,35 @@ started. Nothing else writes either field while an anchor is outstanding, and a 
 fails the test and keeps the freeze. The reading group is never set aside: a generation the gate froze and did not
 answer is a question no push settles.
 
+The reconciliation stands down for the other half of that same pairing, and it has to: the refresh reads the pull
+request before it will run a recovery, so a `get_pr` that fails leaves the anchor pinned with the debt beside it
+and the recovery deferred to a later tick. Reached then, this owner would pay that debt as an ordinary approval —
+publishing the replay and settling it — while the finish that clears the anchor, resets `review_round`, and routes
+the reviewer at the rewritten head never happens, and the stage would run over a branch the refresh rewrote with
+the round the reviewer spent before the rewrite. So an anchor still on the comment stops the tick outright: nothing
+is published, nothing is written, and nothing is parked for a read that will answer on the next one. That holds
+whether or not there is anything else to see — the windows leaving no debt and no count are the same refusal with
+less on the comment, and answering "nothing owed" there lets the handler run behind the same unfinished recovery.
+It is the fail-closed half of the same rule — the interrupted rebase owns what it recorded until its own recovery
+finishes it or parks.
+
+Unless the refresh is standing down for the very record the reconciliation is holding, and there deferring is a
+DEADLOCK rather than a courtesy. The freeze above sets one thing aside for this anchor and one only, the approval
+leased to it; every other record it reads holds the branch still. So a pair the gate froze and never counted stops
+the refresh on every tick — and a reconciliation waiting for that recovery waits for a tick that cannot come, while
+the same stalemate repeats. The question is therefore asked of the freeze itself rather than re-derived: a comment
+carrying nothing that holds the branch is one the recovery can reach and the reconciliation defers to it, and a
+comment that holds the branch is the reconciliation's own to answer.
+
+A pull request that is no longer OPEN ends the pairing the other way. Nothing can be pushed onto a merged or closed
+one, so the debt is unpayable and the permission beside it is a claim about a push that will never happen — and
+left standing, the debt is exactly what this reconciliation would try to pay, parking the issue on a publication it
+cannot even enter while the stage that would finalize the merge to `done` never runs. So the refresh retires the
+whole handoff in the write that drops the anchor: the attempt, the approval whatever it is leased to (nothing else
+writes one while an anchor is outstanding), and an `authorized` permission made over the head the anchor names. A
+`published` one is kept, because it describes a transfer that already happened and an exemption the merge carried
+with it.
+
 `late_exempt_sha` and `implementing_published_sha` freeze the branch too, but on conditions rather than on their
 presence: neither is ended by a write — the exemption is never cleared at all and the publication record is
 overwritten rather than spent — so read by presence they would take a branch out of the refresh for the rest of its
@@ -347,7 +376,161 @@ REWRITE of whatever the branch was standing on, so where it was standing on an e
 size gate the same evidence a squash does — the pair the adjudication recorded, the pair the replay produced, and
 the pull request and pre-rebase anchor the push is made against — and the transfer above may carry the verdict onto
 the replay. A base advance that CHANGED what the branch adds to it fingerprints differently, so the permit refuses
-and the ordinary cumulative gate measures the replay exactly as it always did.
+and the ordinary cumulative gate measures the replay like any other candidate.
+
+A checkout standing exactly where the attempt anchored it takes the shortcut back to the ordinary rebase flow
+only where the attempt left nothing else behind — no record of a replay and no permission this build reads as
+outstanding or cannot vouch for. Anything else is an attempt that got a long way and was UNDONE: a reset whose park
+write was lost, or a hand at the checkout. There the reset is re-run onto the commit the branch is already on, so
+the debt for a commit no branch has and the permission that will never be spent on it go with it on the rollback's
+own terms, and the issue parks for a human to say what undid it. Dropping the anchor instead would throw away the
+only thing that brings a recovery back and hand the branch to a fresh rebase with the transfer state still
+standing.
+
+That rebase is six durable moments in a row — the anchor, the rewrite, the permission, the push, the receipt, and
+the route — so the crash recovery behind `pending_auto_base_rebase_push_sha` classifies TWO things rather than one.
+Where the remote stands says which effect the dead tick reached, and it is read as an exact SHA: still on the pinned
+anchor and the push never went out, on the rewritten commit and it did, anywhere else and somebody moved the branch
+out of band. The ahead/behind counts answer only that third case. A rebase REPLAYS the branch, so the commit the
+pull request still carries is an object no local history contains afterwards — git reports the branch as behind its
+own publication as well as ahead of it — and a recovery reading those counts first would park the canonical
+pre-push case as a remote somebody else moved. Remote-old is therefore proved by BOTH pinned heads together: the
+remote standing exactly on the anchor the `--force-with-lease` is pinned to, and the checkout standing exactly on
+the replay `pending_auto_base_rebase_rewrite_sha` records. The anchor alone would let a worktree somebody rebuilt,
+an operator's reset, or a branch pointed at other work be force-pushed over the candidate under a lease every one
+of them satisfies. Remote-new is proved by the same record: refs that agree prove only that they agree, and
+somebody who moved the branch and the remote together leaves exactly that shape, so a landing the attempt cannot
+show it made parks rather than finishing the route.
+
+One window has no id to be proved by at all, and it is the narrowest: `git rebase` returned and the write naming
+what it produced did not. What stands on the comment there is the anchor and the TERMS the attempt was entered
+under, and what stands in the checkout is a replay nothing names. The head is offered to the permit instead of
+asserted — the transfer evidence is assembled over the dead tick's own publication, and the permit re-fingerprints
+what the checkout contributes against the pair the adjudication recorded before it licenses anything. A replay of
+the accepted change proves out; a worktree somebody rebuilt does not, and neither does a partly-applied rebase. The
+push behind that road is permitted or it does not happen: a refusal parks rather than falling through to the
+cumulative reading, because a count says how big a change is and never whose it is. Where no verdict on the issue
+can be re-fingerprinted at all, the branch is reset onto the anchor and the issue parks with the replay left in
+`git reflog` — the rebase costs one tick to make again, and publishing an unprovable head costs the pull request.
+
+The pull request and the stage are reconciled ahead of every road, because finishing one is never silent: the
+notice goes to the pull request this tick holds, the audit event is filed under the stage this tick reads, and the
+anchor that is the only thing bringing the tick back is dropped. An attempt recorded against a publication the
+issue no longer records would have all three attributed to work it was never made for, so it parks with HEAD and
+the whole record left exactly where they are — which pull request the branch belongs to is a question about the
+issue's record rather than about the commit, and throwing the replay away would answer neither.
+
+A relabel out of the refresh-driven set entirely — `workflow:implementing`, `workflow:decomposing`, anything this
+sync does not drive — leaves no road at all, since nothing here fetches, compares, or publishes under a label it
+does not own. What is left is a clear or a park, and the local HEAD is read (no fetch, no request) to decide which.
+An anchor over a checkout still standing ON it is dropped: git never moved the branch, so the anchor is only a
+promise to come back that no tick under the new label is coming for. An attempt that got further is not. A recorded
+replay, or a permission granted for a push nobody made, is state the clear cannot honour — the checkout may be
+standing on a rewrite the pull request has never seen, a human's verdict is licensed onto a commit no push carried,
+and the debt beside it says a publication is still owed. So is a checkout git has ALREADY moved with only the terms
+pinned, which is the window between `git rebase` returning and the write that names what it produced: the terms
+cannot tell it from an attempt that never started, and a head this host cannot read is no evidence of either.
+Dropped, those records come apart from one another and the issue reads exactly like one with nothing in flight, so
+a decomposition tick is free to put a second agent on a change a human already ruled on — while the rewrite stays
+on the branch with nothing naming it. So each of them parks instead, with nothing reset and nothing cleared — the
+hand that moved the label may have moved the checkout too — and an operator putting the label back lets the
+ordinary recovery finish the attempt on its own terms.
+
+That park is taken ONCE. Keeping the record is what brings this route back, and the route is reached from the label
+check ahead of every gate, so every poll under the wrong label arrives at the same comment again. Repeated, it
+fills the thread with one sentence and — the part that actually breaks the recovery — each park ratchets
+`last_action_comment_id` forward, so the operator's reply ends up behind the orchestrator's own newest comment and
+the retry scan never sees it. A park this route already left standing is therefore left completely alone: nothing
+posted, nothing written, nothing ratcheted. It is recognized by `awaiting_human` and `auto_base_rebase_failed`
+standing over an anchor that is still pinned, which only this park leaves — every other road ending on that reason
+resets the branch and clears the attempt first.
+
+One remote-old shape is not a pre-push recovery at all, and it is read off the record too. Where a receipt names
+the checkout's commit as pushed from this anchor — or a transfer settled, which rides the same write — the pull
+request HAD this replay, so a pull request standing on the anchor now was rolled back out of band. The head it was
+rolled back to is the very head a reissued push would lease itself against, so the lease would be satisfied and
+the rollback overwritten. That parks as the externally moved remote it is: HEAD back onto the anchor, the record
+dropped with it, and a human asked which of the two heads the branch is supposed to be on.
+
+What the pinned comment carries says how far the transfer's own writes got, and there are five answers — with the
+exemption and the identity under it asked before any permission standing beside them is believed, since a
+permission is a claim about moving one verdict and a group damaged after the grant went down leaves it reading back
+whole over a verdict nothing can name.
+
+No exemption in flight is the ordinary interrupted rebase. A rewrite with no `late_rewrite_*` group behind it is a
+grant the crash came before, so the recovery re-derives the same evidence the dead tick would have assembled —
+over the pull request and stage that tick recorded — and the permit rules on it. Without
+that, the replay of a change a human already ruled on is measured past the same ceiling and routed back into
+adjudication with a pull request open over the work. A group still at `authorized` for the head in hand, with the debt
+written beside it agreeing and every term of it bound to the attempt this recovery is finishing — the pull request
+and the stage that attempt recorded, the anchor its push was leased against, and the pair and digest the semantic
+identity names — IS the evidence, re-asked in full — the grant is one write of two records for one
+commit, and a permission standing beside a debt for another commit or another lease is a comment something took
+apart. Read as outstanding it would be re-asked, and a permit that grants re-writes BOTH, so the missing half would
+be reconstructed from the very claim nobody could check.
+
+One already `published` means the receipt landed and only the notice, the audit event, the cleared anchor, and the
+reviewer's route are outstanding — and it is cross-bound the same way, since fields that are each well-shaped on
+their own still describe some other attempt when they disagree with the one in hand.
+
+And a group this build cannot read whole, or one naming some other commit, is refused before either road that
+publishes anything: left to the ordinary cumulative
+gate the replay is measured past the same ceiling and routed into a second adjudication on the strength of a record
+nothing checked, so the branch goes back onto the anchor and the issue parks as `auto_base_rebase_failed` until a
+human repairs the comment.
+
+The exemption itself is read the same way, by PRESENCE rather than by truth. The fail-closed readers answer "no
+exemption" and "no identity" for a group something damaged exactly as they do for a comment that never carried one
+— rightly, since the gate's only move is to measure — and a recovery that took that for "no verdict in flight"
+would finish a route with the verdict still on the commit it was given for. So a comment claiming an exemption it
+cannot show whole, or an identity group short of a member, is that same refusal. The LEGACY shape is not: an
+exemption with no identity beside it is complete for what it says, costs a later tick the transfer rather than the
+verdict, and goes on exempting the commit it names.
+
+The permission still outstanding over a remote that already carries the rewrite is the one that owes a WRITE, and
+the recovery takes it rather than leaving it for the stage it is about to relabel to: the permit is scoped to the
+stage the rewrite was entered from, so a settlement one tick later is refused on the stage alone. It is taken
+through the same gated publication every other push in this domain goes through, which over a pull request already
+standing on the commit is the leased no-op that proves it — nothing sent, no agent, no measurement, no second
+adjudication comment, and the receipt, the paid debt, and the rotation riding one durable write under
+`transfer_proof=already_published`.
+
+The permit is asked for that settlement BEFORE the gate, and a refusal is a refusal rather than a fall-through.
+The gate's own answer to a declining permit is the ordinary cumulative reading, which is right for a rebase
+deciding whether to publish and wrong here twice over: a count under the ceiling would report the call as a landed
+publication and let the route finish with the permission outstanding and the verdict still on the commit a human
+ruled on, and a count over it would route an adjudicated change into a second adjudication with the pull request
+already carrying the work. There is nothing on this road to measure — the remote has the commit — so a relabelled
+issue, a repointed pull request, an owner nobody could re-read, a lease this host cannot peel, or two
+contributions that no longer fingerprint alike each park instead. The gate is told the same thing on the way in, so
+a permit that stops holding between the two asks is refused there rather than measured. The reissued push a
+remote-old recovery makes is decided the same way wherever it holds a transfer at all — an outstanding permission,
+or evidence re-derived for a grant the crash came before — and a refusal there resets the branch onto the anchor
+rather than measuring a change a human already ruled on. That exclusivity outranks the `DECOMPOSE` switch as well.
+Off, the switch takes new work straight past the gate unread, which is the whole of what it is for — and a recovery
+holding a transfer is not new work: kept out, it would push with nothing vouching for the move, finish its route
+with the exemption still on the commit a human ruled on, and leave the permission standing outstanding for ever. So
+a permit-only call is inside the gate whatever the switch says, and publishes on the permit or not at all.
+
+A dirty checkout holds every one of those roads, not only the one that still owes a receipt: finishing hands the
+issue to the reviewer, and a reviewer sent to a checkout with uncommitted files reads work the pull request does
+not have as though it were under review. The rotation is read back afterwards for the
+same reason: the terms are re-asked inside the gate, and a push that landed without the verdict moving with it is
+a route this recovery may not finish.
+
+Every other landed rewrite is asked whether the comment ACCOUNTS for it before the route is finished, because
+finishing clears the anchor and the anchor is the only thing that brings this recovery back. An issue carrying no
+verdict always is, which is the ordinary interrupted rebase and has nothing a missing record could strand. A transfer
+that settled, and a replay the ordinary cumulative gate published, are accounted for by the receipt their write
+left — read WHOLE, as `implementing_published_sha` together with the `implementing_published_lease` it was pushed
+from, held against this recovery's own anchor. A receipt is never cleared, so the commit alone goes on naming
+something this stage pushed rounds ago and vouches for any pull request somebody rewound onto it; the head is what
+dates it to THIS attempt. The debt beside it is asked too — the two go down together, so an approval still standing
+over a receipted commit is a write that did not land whole. Anything else parks with HEAD and the anchor left exactly as
+they are: a `late_rewrite_*` group nobody can read, a receipt nobody wrote, a debt nothing paid, a checkout
+carrying uncommitted changes the settlement may not be fingerprinted beside, and a leased no-op the remote refused.
+Nothing is reset on any of them — the checkout is standing on the commit the pull request carries, so a reset would
+take it off work the remote has — and the next tick classifies the remote afresh once a human has answered.
 
 Refresh-only failure modes — push rejected (`auto_base_rebase_push_failed`), rebase failed without conflicted files
 (`auto_base_rebase_failed`), dirty-after-clean-rebase (`auto_base_rebase_dirty`) — reset HEAD back to the pre-rebase
@@ -765,6 +948,56 @@ The keys that matter for the state machine fall into a few groups:
   before the post-push write, and `_recover_pending_auto_base_rebase` keys off it to either no-op, push the recovered
   head, or park as `auto_base_rebase_push_failed`. It is also what tells the approval that interrupted attempt wrote
   from a stage's, so the refresh is not frozen out of finishing its own route (see [Base refresh](#base-refresh)).
+  `pending_auto_base_rebase_rewrite_pr` + `pending_auto_base_rebase_rewrite_stage` — the TERMS of the same attempt,
+  written in the anchor's own statement, before `git rebase` is allowed to touch the branch. They are what the
+  permit's publication checks are asked against on the tick after a crash: read off the issue then they would
+  compare today with today, and a relabel or a repoint made while the process was down would pass as the dead tick's
+  own. They are also what the recovery reconciles against the issue's before it finishes any road, since finishing
+  posts a notice, files an event, and drops the anchor.
+  `pending_auto_base_rebase_rewrite_sha` — what that rebase produced, written on the statement after git hands it
+  back, before the head is read for anything else and before the size gate is entered. It is the only thing that can
+  say the divergent checkout a recovery finds is that attempt's own work: a rebase REPLAYS the branch, so a worktree
+  somebody rebuilt, an operator's reset, and a branch pointed at other work all present the same shape and all
+  satisfy the same lease.
+  The group is read whole or not at all and typed against the same shapes every other late field is — an
+  abbreviation or a value that is not a whole git object id is no head — and dropped by the same write that drops
+  the anchor. Absent, IN FLIGHT, and DAMAGED are three answers rather than one. A comment carrying none of the three
+  is an attempt from before this record existed, and only there do the ahead/behind counts get to answer. A comment
+  carrying the terms and no head is the window between git returning and that second write: nothing names the
+  commit in the checkout, so the recovery offers it to the permit to be proved by what it CONTRIBUTES against the
+  pair the adjudication recorded — a replay of the accepted change proves out, and a checkout nothing here made
+  does not. Where the issue carries no such pair — a legacy exemption, a base the remote would not name, an issue
+  that never earned a verdict — there is nothing to prove it by, and the branch is reset onto the anchor and parked
+  rather than force-pushed on a count. And a comment carrying a head that does not vouch for the checkout — a term
+  taken out, a head that is not a commit, terms missing under a head that is there, or a whole record naming some
+  other commit — resets onto the anchor and parks too, because read as either window it resembles, a strictly-ahead
+  checkout would be measured and force-pushed on the strength of a claim nothing could check.
+  `pending_auto_base_rebase_announced_sha` is the last member and covers the last window a finish has: everything a
+  finish announces goes out before the relabel and the write that clears this record goes out after it, so the head
+  it has already said it published is recorded in between, while the anchor still stands. A tick lost there comes
+  back to a comment that says the announcement was made and owes only the relabel it may not have reached and the
+  write it never made — rather than putting a second `base_rebased` on the stream, under the stage the relabel
+  moved to, for one publication that happened once. The relabel is part of what it owes: dropping the record
+  without it would strand the issue on the stage the rebase ran from with nothing left to correct it. The window
+  the mark cannot close is the one before it — the notice and the event are out and nothing says so — and it
+  resolves toward saying them again rather than losing them, since a record a reader can see twice beats one nobody
+  can reconstruct. It is read by PRESENCE, like every other checkpoint here: the key standing at all says a finish
+  announced THIS attempt's replay, so a value naming any other head — or naming no commit — is a mark something
+  took apart, and the tick parks rather than reading it as "nothing was announced" and saying the notice and the
+  event a second time for one publication. What the mark forgives is one LABEL rather than the fact of a relabel:
+  `workflow:validating` is the only stage this route ever writes, so a mark found beside `workflow:fixing`,
+  `workflow:documenting`, or `in_review` is somebody's move over an unfinished attempt and parks as the foreign
+  publication it is. And the finish it resumes is held to the base lag like every other one: a base that advanced
+  again while the process was down leaves the announced head behind it, so the record goes down, the label stays
+  where it is, and the tick falls through to the rebase that brings the branch forward — whose own finish makes the
+  route.
+  The whole group is dropped by the one write that ends an attempt, so no road can leave a member behind. Where
+  the anchor is found under a label the base refresh does not drive there is no fetch and no comparison to be
+  had, and the road is a clear or a park: a checkout still standing on the anchor strands nothing and the record
+  is dropped, while a recorded replay, a permission still owed a push, a checkout `git rebase` has already moved,
+  and a head this host cannot read each park with every record intact — the last two because a clear there leaves
+  the rewrite on the branch with nothing naming it and hands on an issue no reader can tell from one with nothing
+  in flight.
 - **Counters / timestamps.** `retry_window_start` + `retry_count` (24h fresh-spawn budget shared between implementing
   and decomposing, with `retry_cap_stage`, `retry_cap_continued`, and the sentence the park owes the thread beside
   them once it runs out — `retry_cap_notice`, or `late_park_notice` where a late adjudication is what ran out, since
@@ -1623,6 +1856,40 @@ rather than preserving.
   the same standard from the other side: a permit re-derives both contributions for itself and refuses where the
   digest already recorded is not the one it took, since a grant that carried on would write its own reading over the
   record — a repair of evidence nobody checked.
+
+  `late_rewrite_proof` sits beside that group and deliberately outside it. It records which reading proved the push
+  a settlement was taken on had landed — `pushed` for the leased force-push that moved the pull request off the head
+  the permit was granted against, `already_published` for the leased no-op that found the remote standing on the
+  rewritten commit already — and it is the one fact nothing later could re-derive, since the receipt looks identical
+  either way. `record_rewrite_publication` writes it in the same statement as the move, and the write behind the
+  `late_transfer` record it feeds drops it, so a process lost between the settlement and that record leaves the next
+  reader something to report from rather than a verdict that moved with nothing anywhere saying so. It is outside the
+  group a reader is held to WHOLE because the transfer is settled whether or not it has been reported, and a record
+  short of this member is not one to refuse. It is read by PRESENCE all the same: the key standing over a proof this
+  build does not know, a phase the settlement never reached, or an authorization it cannot read whole is a comment
+  saying two things at once, and every road that asks parks rather than reading it as nothing owed —
+  `workflow:decomposing` included, since nothing writes a note it cannot read back and the statement that settles a
+  transfer puts the note and the phase down together, so there is no settlement in flight for that refusal to hold
+  up. A fresh grant drops it with the transfer it described, since the phase going back to `authorized` is what
+  would leave it unreadable beside the new one.
+
+  Every rewrite this workflow settles goes through the same push tail, so every one of them has the window this note
+  exists for — the squash a reviewer's approval earns, the replay `workflow:resolving_conflict` publishes, and the
+  base refresh's own rebase. Only the last has a recovery route that would come back for it, and the other two
+  resume into a stage with nothing to say about a transfer. So the record a lost report still owes is made by
+  `late_reconcile`, ahead of every handler on whatever label the resumed issue wears: it settles nothing and stops
+  nothing — the verdict moved and the receipt beside it already says which commit the remote holds — and what it
+  adds is the account of it, on both sinks, once.
+
+  A note that cannot produce one is the other half of the same seam, and it PARKS there. The reader that makes the
+  record answers "nothing to report" for a note over a permission, a phase, or a reading nothing can account for —
+  the same answer it gives a comment carrying no note at all — so read no further the reconciliation would walk
+  past it, the account would never be made, and the corrupt note would stand for the life of the issue while the
+  stage ran behind a verdict nothing here can account for. So `late_claims` asks the transfer's own reader among
+  the claims a record can make and fail to produce, on the same five publishing stages the other four are asked on,
+  and the refusal takes the once-only park those share. `workflow:decomposing` is asked it beside the publication
+  group — the two records that mode did not write and cannot repair — while the reading and the approval are not,
+  since it is mid-way through deciding both and has failed to produce neither.
 
   Being unreadable is not being absent, and the difference is what a WRITER asks. A grant replaces the whole group
   rather than adding beside it, so a group that CLAIMS the commit currently exempt and cannot be read back is

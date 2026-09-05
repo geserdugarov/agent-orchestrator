@@ -113,6 +113,11 @@ CLEAN = _WorktreeStatus(readable=True)
 _HEAD = "HEAD"
 
 
+# Which reading a settlement was proved by, which the record now
+# carries until the report it owes has been made.
+_SETTLING_PROOF = _rewrites.LateRewriteProof.PUSHED
+
+
 
 def rewrite(**overrides) -> _rewrites.LateRewrite:
     """The evidence the squash hands in, with any one term replaced."""
@@ -197,7 +202,7 @@ def spent(state) -> None:
     owner rather than spelled here, so a case about what a reader does past
     the receipt is seeded with exactly what the receipt leaves.
     """
-    _rewrites.record_rewrite_publication(state)
+    _rewrites.record_rewrite_publication(state, _SETTLING_PROOF)
 
 
 def gate(github, issue, state, **overrides) -> _records._Gate:

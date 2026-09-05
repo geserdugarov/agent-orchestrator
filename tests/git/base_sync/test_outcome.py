@@ -146,7 +146,9 @@ class PrRefreshOutcomeUnitTest(_SyncWorktreeWithBaseFixture, unittest.TestCase):
         self._add_comment(UNREAD_COMMENT_ID, "do not merge yet", HUMAN_LOGIN)
         merge = MagicMock(return_value=(True, []))
         push = MagicMock(return_value=True)
-        head_sha = MagicMock(side_effect=[BEFORE_SHA, AFTER_SHA])
+        head_sha = MagicMock(
+            side_effect=[BEFORE_SHA, AFTER_SHA, AFTER_SHA],
+        )
         git_mock = MagicMock(return_value=_git_result(stdout="1\n"))
         with _patch_base_sync(
             dirty=MagicMock(return_value=[]),

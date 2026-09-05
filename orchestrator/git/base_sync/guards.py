@@ -18,7 +18,6 @@ from orchestrator import config
 from orchestrator.git.base_sync import persistence
 from orchestrator.git.base_sync.models import _AutoRebaseContext
 from orchestrator.git.base_sync.state import (
-    _PENDING_PUSH_SHA,
     _REASON_AUTO_BASE_REBASE_FAILED,
     _REASON_AUTO_BASE_REBASE_PUSH_FAILED,
     log,
@@ -65,7 +64,7 @@ def _finish_noop_auto_rebase(context: _AutoRebaseContext) -> None:
         context.spec.remote_name,
         context.spec.base_branch,
     )
-    context.state.set(_PENDING_PUSH_SHA, None)
+    persistence._clears_the_attempt(context.state)
     context.gh.write_pinned_state(context.issue, context.state)
 
 

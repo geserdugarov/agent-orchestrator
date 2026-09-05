@@ -92,6 +92,9 @@ PARK_FAILED = "auto_base_rebase_failed"
 KEY_AWAITING_HUMAN = "awaiting_human"
 KEY_PARK_REASON = "park_reason"
 KEY_PENDING_PUSH_SHA = "pending_auto_base_rebase_push_sha"
+KEY_PENDING_REWRITE_SHA = "pending_auto_base_rebase_rewrite_sha"
+KEY_PENDING_REWRITE_PR = "pending_auto_base_rebase_rewrite_pr"
+KEY_PENDING_REWRITE_STAGE = "pending_auto_base_rebase_rewrite_stage"
 KEY_REVIEW_ROUND = "review_round"
 KEY_CONFLICT_ROUND = "conflict_round"
 KEY_LAST_ACTION_COMMENT_ID = "last_action_comment_id"
@@ -119,6 +122,24 @@ UNREAD_COMMENT_ID = 500
 GIT_FAILURE_EXIT_CODE = 128
 MISSING_ISSUE_NUMBER = 9999
 NEW_REBASED_SHA = "9ea5eba0" * 5
+
+
+def _pending_attempt(rewrite: str, *, stage: str = LABEL_IN_REVIEW) -> dict:
+    """The whole record one interrupted auto-rebase attempt leaves behind.
+
+    Both halves rather than the anchor alone, because that is what a real
+    attempt writes: the head its push is leased against, pinned before git
+    ran, and the replay it produced with the publication it produced it for,
+    written once git had made one. A recovery holding only the first cannot
+    show the checkout in front of it is that attempt's own work, which is a
+    state of its own rather than the ordinary interrupted rebase.
+    """
+    return {
+        KEY_PENDING_PUSH_SHA: BEFORE_SHA,
+        KEY_PENDING_REWRITE_SHA: rewrite,
+        KEY_PENDING_REWRITE_PR: PR_NUMBER,
+        KEY_PENDING_REWRITE_STAGE: stage,
+    }
 
 
 def _patched(test_case, owner, name: str, replacement) -> None:

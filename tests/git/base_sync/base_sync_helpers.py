@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 from orchestrator import config
 from orchestrator.git.base_sync import models
+from orchestrator.workflow.state import WorkflowLabel
 from tests.git.base_sync.refresh_test_support import GATE_CANDIDATE_SHA
 from tests.support.fakes import (
     FakeComment,
@@ -82,6 +83,22 @@ BEHIND_BY = 3
 HUMAN_COMMENT_BODY = "branch reconciled, please retry"
 
 
+# What one interrupted attempt recorded about its own replay: the head it
+# produced, and the publication it produced it for. Both are the fixture's
+# ordinary world -- the head the recovery finds, on the pull request the issue
+# records -- so a case says only what it moves.
+RECORDED_REWRITE = models._PendingRewrite(
+    sha=RECOVERED_SHA, pr_number=PR_NUMBER, stage=WorkflowLabel.IN_REVIEW,
+)
+
+# The same record one `git rebase` earlier: the terms an attempt pins beside
+# its anchor before git may touch the branch, with no head yet naming what the
+# replay produced.
+IN_FLIGHT_REWRITE = models._PendingRewrite(
+    pr_number=PR_NUMBER, stage=WorkflowLabel.IN_REVIEW,
+)
+
+
 def _git_result(
     *,
     returncode: int = 0,
@@ -101,12 +118,19 @@ def _recovery_context(
     *,
     behind: int = 0,
     unparking_consumed_max: int | None = None,
+    pending_rewrite: models._PendingRewrite = RECORDED_REWRITE,
     **state_fields,
 ) -> models._AutoRebaseRecoveryContext:
     """Seed issue #7 with PR #42 pinned and wrap it in a recovery context.
 
     `state_fields` merge into the pinned state, so a test names only the
     fields its case reads back.
+
+    `pending_rewrite` defaults to the record a real attempt leaves -- the
+    replay it produced, and the publication it produced it for -- because that
+    is what every road past the anchor is decided against. A case about the
+    window before that write, or about a record naming some other commit,
+    hands in its own.
     """
     gh = FakeGitHubClient()
     issue = make_issue(ISSUE, label=LABEL)
@@ -132,6 +156,7 @@ def _recovery_context(
         pr_number=PR_NUMBER,
         label=LABEL,
         pending_pre_rebase_sha=PRE_REBASE_SHA,
+        pending_rewrite=pending_rewrite,
         behind=behind,
         unparking_consumed_max=unparking_consumed_max,
     )

@@ -41,7 +41,9 @@ class RebaseFailureRoutingUnitTest(_SyncWorktreeWithBaseFixture, unittest.TestCa
             dirty=MagicMock(side_effect=[[], ["scratch.py"]]),
             rebase=MagicMock(return_value=(True, [])),
             push=MagicMock(),
-            head_sha=MagicMock(side_effect=[BEFORE_SHA, AFTER_SHA]),
+            head_sha=MagicMock(
+                side_effect=[BEFORE_SHA, AFTER_SHA, AFTER_SHA],
+            ),
             git=MagicMock(return_value=_git_result(stdout=TWO_BEHIND_STDOUT)),
             hardened=MagicMock(return_value=_git_result()),
         )

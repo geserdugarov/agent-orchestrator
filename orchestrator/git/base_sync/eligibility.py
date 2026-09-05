@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from github.PullRequest import PullRequest
 
-from orchestrator.git.base_sync import recovery
+from orchestrator.git.base_sync import persistence, recovery, transfers
 from orchestrator.git.base_sync.models import (
     _AutoRebaseContext,
     _AutoRebaseDecision,
@@ -28,7 +28,6 @@ from orchestrator.git.base_sync.state import (
     _AUTO_REBASE_PARK_REASONS,
     _AWAITING_HUMAN,
     _PARK_REASON,
-    _PENDING_PUSH_SHA,
     _PR_REFRESH_DETOUR_LABELS,
     log,
 )
@@ -50,6 +49,7 @@ def _auto_rebase_label_is_eligible(context: _AutoRebaseContext) -> bool:
             pr_number=context.pr_number,
             label=context.label,
             pending_pre_rebase_sha=str(context.pending_pre_rebase_sha),
+            pending_rewrite=transfers._pending_rewrite(context.state),
         )
     log.debug(
         "issue=#%d behind %s/%s by %d but label=%r; not auto-rebasing",
@@ -133,15 +133,7 @@ def _open_auto_rebase_pr(
     if pr_status == "open":
         return pr
     if context.pending_pre_rebase_sha:
-        context.state.set(_PENDING_PUSH_SHA, None)
-        context.gh.write_pinned_state(context.issue, context.state)
-        log.info(
-            "issue=#%d PR #%d is %s and a recovery anchor was "
-            "pinned; clearing the stale flag",
-            context.issue.number,
-            context.pr_number,
-            pr_status,
-        )
+        _retires_the_terminal_attempt(context, pr_status)
     log.debug(
         "issue=#%d PR #%d is %s; not auto-rebasing (handler will finalize)",
         context.issue.number,
@@ -149,6 +141,38 @@ def _open_auto_rebase_pr(
         pr_status,
     )
     return None
+
+
+def _retires_the_terminal_attempt(
+    context: _AutoRebaseContext, pr_status: str,
+) -> None:
+    """Drop the whole attempt an issue holds for a pull request that is over.
+
+    The anchor is the flag this route came here for and the least of what the
+    attempt left. Beside it stand the debt the gate recorded before the push
+    -- one commit still owed a publication onto this pull request -- and the
+    permission that would have carried a human's verdict over with it. Both
+    are about a push onto a pull request that is merged or closed, so neither
+    can ever be paid.
+
+    Cleared one at a time, the two that stay are what stops the issue
+    finishing. The reconciliation ahead of every handler reads the debt as a
+    commit the pull request never received, tries to publish it, and cannot
+    enter a publication that is over -- so it parks, and the stage that would
+    have finalized the merged pull request to `done` never runs. So the whole
+    handoff is retired in one write.
+    """
+    persistence._clears_the_attempt(context.state)
+    persistence._forgets_the_unpayable_handoff(context)
+    context.gh.write_pinned_state(context.issue, context.state)
+    log.info(
+        "issue=#%d PR #%d is %s and an attempt was still in flight for it; "
+        "retiring the anchor, the debt it owed that pull request, and any "
+        "permission granted for the push it never made",
+        context.issue.number,
+        context.pr_number,
+        pr_status,
+    )
 
 
 def _auto_rebase_recovery_decision(
@@ -167,6 +191,7 @@ def _auto_rebase_recovery_decision(
         pr_number=context.pr_number,
         label=context.label,
         pending_pre_rebase_sha=str(context.pending_pre_rebase_sha),
+        pending_rewrite=transfers._pending_rewrite(context.state),
         behind=context.behind,
         unparking_consumed_max=consumed_comment_id,
     ):

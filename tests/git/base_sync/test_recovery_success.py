@@ -17,6 +17,7 @@ from tests.git.base_sync.refresh_test_support import (
     REBASED_SHA,
     _diverged,
     _git_result,
+    _pending_attempt,
     _RemoteHeadGit,
     _SyncWorktreeWithBaseFixture,
 )
@@ -81,7 +82,7 @@ class CrashRecoverySuccessUnitTest(_SyncWorktreeWithBaseFixture, unittest.TestCa
 
     def test_crash_recovery_finishes_landed_push(self) -> None:
         self._seed_pr_issue(
-            pending_auto_base_rebase_push_sha=BEFORE_SHA,
+            **_pending_attempt(REBASED_SHA),
             review_round=3,
         )
         self._add_pr()
@@ -116,8 +117,11 @@ class CrashRecoverySuccessUnitTest(_SyncWorktreeWithBaseFixture, unittest.TestCa
         scenario = _scenario(
             dirty=MagicMock(return_value=[]),
             rebase=MagicMock(return_value=(True, [])),
+            # The recovery's unchanged reading, the anchor the fresh
+            # rebase behind it pins, the replay that attempt records, and the
+            # head its publication names.
             head_sha=MagicMock(
-                side_effect=[BEFORE_SHA, BEFORE_SHA, AFTER_SHA],
+                side_effect=[BEFORE_SHA, BEFORE_SHA, AFTER_SHA, AFTER_SHA],
             ),
             fetch=MagicMock(return_value=_git_result()),
             push=MagicMock(return_value=True),

@@ -247,6 +247,40 @@ def read_semantic_identity(state: PinnedState) -> LateSemanticIdentity | None:
     )
 
 
+def unreadable_exemption(state: PinnedState) -> bool:
+    """Whether this comment CLAIMS an exemption it cannot show whole.
+
+    Presence rather than truth, and the question a caller asks before it acts
+    on the ABSENCE of one. The fail-closed readers beside this answer "no
+    exemption" and "no identity" for a record something damaged just as
+    readily as for a comment that never had one -- which is the right answer
+    for the gate, whose only move is to measure a candidate afresh, and the
+    wrong one for a caller whose move is to walk past an issue as though no
+    verdict were in flight. A half-written group, a hand-edited digest, and a
+    field carrying `null` all read as nothing there, and an adjudicated commit
+    would be left behind on the strength of it.
+
+    Two shapes count. A comment carrying any member of the group whose
+    exemption field cannot be read back as a commit is claiming one it cannot
+    show. And an identity group with a member present that does not read back
+    whole is a claim about what that commit contributes which nothing can
+    check.
+
+    The LEGACY shape is neither, and it is why the identity is asked by
+    presence rather than by truth: a comment written before this group existed
+    carries the exempt commit and nothing beside it, which is complete for
+    what it says. It reads as sound here, and what it costs a later tick is
+    the transfer rather than the verdict.
+    """
+    if not any(key in state.data for key in _EXEMPTION_KEYS):
+        return False
+    if read_exemption(state) is None:
+        return True
+    if not any(key in state.data for key in _IDENTITY_KEYS):
+        return False
+    return read_semantic_identity(state) is None
+
+
 def clear_exemption(state: PinnedState) -> None:
     """Drop the exemption and its identity, leaving every other field alone."""
     for key in _EXEMPTION_KEYS:

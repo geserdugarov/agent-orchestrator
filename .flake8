@@ -20,10 +20,15 @@ per-file-ignores =
     orchestrator/observability/usage/__init__.py:WPS412,WPS410
     orchestrator/observability/analytics/recording/__init__.py:WPS412,WPS410
     orchestrator/runtime/exclusion.py:WPS202
+    orchestrator/git/base_sync/models.py:WPS202
+    orchestrator/git/base_sync/outcomes.py:WPS202
     orchestrator/git/base_sync/persistence.py:WPS202
+    orchestrator/git/base_sync/recovery.py:WPS202
     orchestrator/git/base_sync/refresh.py:WPS202
+    orchestrator/git/base_sync/transfers.py:WPS201,WPS202
     orchestrator/git/snapshots/refs.py:WPS202
     orchestrator/workflow/state.py:WPS202
+    orchestrator/workflow/late_split/exemption.py:WPS202
     orchestrator/workflow/late_split/models.py:WPS214
     orchestrator/workflow/late_split/rewrites.py:WPS202
     orchestrator/workflow/late_split/lineage.py:WPS202
@@ -72,7 +77,9 @@ per-file-ignores =
     orchestrator/workflow/stages/implementing/disposition.py:WPS202
     orchestrator/workflow/stages/implementing/late_evidence.py:WPS201,WPS202
     orchestrator/workflow/stages/implementing/late_freeze.py:WPS202
+    orchestrator/workflow/stages/implementing/late_gate.py:WPS202
     orchestrator/workflow/stages/implementing/late_parks.py:WPS201,WPS202
+    orchestrator/workflow/stages/implementing/late_reconcile.py:WPS202
     orchestrator/workflow/stages/implementing/late_records.py:WPS202
     orchestrator/workflow/stages/implementing/late_rewrite.py:WPS202
     orchestrator/workflow/stages/implementing/late_rotation.py:WPS202
@@ -110,6 +117,12 @@ per-file-ignores =
     orchestrator/github/issues.py:WPS202,WPS214
     orchestrator/github/pull_requests.py:WPS214
     tests/git/test_ref_transport.py:WPS202
+    tests/git/base_sync/exemption_test_support.py:WPS211,WPS214
+    tests/git/base_sync/journey_git_support.py:WPS201,WPS214
+    tests/git/base_sync/recovery_git_support.py:WPS201,WPS214
+    tests/git/base_sync/test_real_git_journey.py:WPS214
+    tests/git/base_sync/test_recovery_real_git.py:WPS214
+    tests/git/base_sync/test_recovery_exemption.py:WPS201,WPS202,WPS214
     tests/git/publication/squash_recovery_support.py:WPS202
     tests/git/worktrees/artifact_test_support.py:WPS214
     tests/git/worktrees/candidate_host_test_support.py:WPS202,WPS214
@@ -130,6 +143,7 @@ per-file-ignores =
     tests/workflow/late_split/generation_test_support.py:WPS202
     tests/workflow/late_split/test_events.py:WPS202
     tests/workflow/patch_models.py:WPS202
+    tests/workflow/stages/implementing/test_late_rotation.py:WPS202,WPS214
     tests/workflow/stages/implementing/test_late_transfer.py:WPS202
     tests/workflow/stages/implementing/late_transfer_test_support.py:WPS202
     tests/workflow/stages/conflicts/test_replay_real_git.py:WPS201

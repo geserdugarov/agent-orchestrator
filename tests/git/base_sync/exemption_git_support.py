@@ -160,10 +160,10 @@ class AdjudicatedRebaseRealGitFixture(_RefreshBaseRealGitFixture):
         )
         self._gh.write_pinned_state(self._gh._issues[ISSUE], state)
 
-    def _open_pull_request(self) -> None:
-        """Put this issue in review with its pull request on the branch head."""
+    def _open_pull_request(self, label: str = LABEL_IN_REVIEW) -> None:
+        """Put this issue on `label` with its pull request on the branch head."""
         self._gh = FakeGitHubClient()
-        self._gh.add_issue(make_issue(ISSUE, label=LABEL_IN_REVIEW))
+        self._gh.add_issue(make_issue(ISSUE, label=label))
         self._gh.seed_state(
             ISSUE,
             pr_number=PR_NUMBER,
